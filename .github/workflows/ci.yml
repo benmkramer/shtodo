@@ -28,8 +28,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: check formatting
-        run: cargo fmt -- --check
+      - name: Check formatting
+        run: cargo fmt --check
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
   clippy:
@@ -37,7 +37,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      checks: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,8 +44,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Run clippy action
-        uses: clechasseur/rs-clippy-check@v3
+      - name: Check Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
   doc:
@@ -84,7 +83,7 @@ jobs:
       - name: cargo generate-lockfile
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
-      - name: cargo test --locked
-        run: cargo test --locked --all-features --all-targets
+      - name: Run tests
+        run: cargo test --locked
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
