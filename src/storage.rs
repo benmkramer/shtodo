@@ -75,8 +75,12 @@ impl Store {
         &self.paths
     }
 
+    pub(crate) fn scope(&self) -> &ListScope {
+        &self.scope
+    }
+
     pub(crate) fn load(&self) -> Result<TaskList> {
-        load_snapshot(&self.paths.data_file, &self.scope)
+        load_snapshot(&self.paths.data_file, self.scope())
     }
 
     pub(crate) fn save(&self, list: &TaskList) -> Result<()> {
@@ -386,6 +390,18 @@ mod tests {
                 Path::new("/home/ben/.shtodo/projects/shtodo-2200fde3358e9316")
             );
         }
+    }
+
+    #[test]
+    fn opened_store_should_expose_exact_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope = ListScope::Project {
+            path: temp.path().join("project").to_string_lossy().into_owned(),
+        };
+
+        let store = Store::open(temp.path(), scope.clone()).unwrap();
+
+        assert_eq!(store.scope(), &scope);
     }
 
     #[cfg(windows)]
