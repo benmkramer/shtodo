@@ -103,6 +103,73 @@ mod tests {
     }
 
     #[test]
+    fn help_mode_should_render_every_binding_without_truncating_descriptions() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+        let buffer = render_app(&app, 80, 24);
+        let lines = buffer
+            .content()
+            .chunks(80)
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(Cell::symbol)
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>();
+        let expected_rows = [
+            "Ctrl-C quit",
+            "j move down",
+            "Down move down",
+            "k move up",
+            "Up move up",
+            "J move task down",
+            "K move task up",
+            "i add task",
+            "e edit task",
+            "Space toggle complete",
+            "d delete task",
+            "u restore latest",
+            "? show help",
+            "q quit",
+            "Left move cursor left",
+            "Right move cursor right",
+            "Home move cursor start",
+            "End move cursor end",
+            "Backspace delete before cursor",
+            "Delete delete at cursor",
+            "Enter save edit",
+            "Esc cancel edit",
+            "? close help",
+            "Esc close help",
+        ];
+
+        for expected in expected_rows {
+            assert!(
+                lines.iter().any(|line| line.contains(expected)),
+                "missing full help row: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_message_should_precede_insert_save_and_cancel_hints() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::StartAdd).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        let text = buffer_text(&render_app(&app, 80, 10));
+
+        let message = text.find("Task text cannot be empty").unwrap();
+        let save = text.find("Enter save edit").unwrap();
+        let cancel = text.find("Esc cancel edit").unwrap();
+        assert!(message < save);
+        assert!(save < cancel);
+    }
+
+    #[test]
     fn undersized_terminal_should_render_only_resize_message() {
         let app = App::new(TaskList::new(ListScope::Global));
         let text = buffer_text(&render_app(&app, 30, 6));
@@ -311,17 +378,17 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
     let mut bindings = bindings_for(app.mode())
         .filter(|binding| binding.show_in_footer)
         .collect::<Vec<_>>();
-    bindings.sort_by_key(|binding| match binding.key_label {
-        "i" => 0,
-        "?" => 1,
-        _ => 2,
-    });
+    bindings.sort_by_key(|binding| footer_priority(app.mode(), binding.key_label));
     let hints = bindings
         .into_iter()
         .map(footer_binding)
         .collect::<Vec<_>>()
         .join(" · ");
-    let detail = app.message().unwrap_or(&hints);
+    let detail = match (app.message(), hints.is_empty()) {
+        (Some(message), false) => format!("{message} · {hints}"),
+        (Some(message), true) => message.to_owned(),
+        (None, _) => hints,
+    };
     let text = format!("{}  {detail}", mode_label(app.mode()));
 
     frame.render_widget(Paragraph::new(text), area);
@@ -334,15 +401,42 @@ fn render_help(frame: &mut Frame<'_>) {
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let columns = Layout::horizontal([
-        Constraint::Percentage(34),
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
-    ])
-    .split(inner);
-    for (column, mode) in columns.iter().zip([Mode::Normal, Mode::Insert, Mode::Help]) {
-        frame.render_widget(Paragraph::new(help_lines(mode)), *column);
+    let normal = help_lines(Mode::Normal);
+    let mut insert_and_help = help_lines(Mode::Insert);
+    insert_and_help.push(Line::default());
+    insert_and_help.extend(help_lines(Mode::Help));
+    let normal_width = line_width(&normal);
+    let insert_and_help_width = line_width(&insert_and_help);
+    let fits_two_columns = normal_width
+        .saturating_add(1)
+        .saturating_add(insert_and_help_width)
+        <= inner.width
+        && normal.len() <= usize::from(inner.height)
+        && insert_and_help.len() <= usize::from(inner.height);
+
+    if fits_two_columns {
+        let columns = Layout::horizontal([
+            Constraint::Min(1),
+            Constraint::Length(insert_and_help_width),
+        ])
+        .split(inner);
+        frame.render_widget(Paragraph::new(normal), columns[0]);
+        frame.render_widget(Paragraph::new(insert_and_help), columns[1]);
+    } else {
+        let mut all_modes = normal;
+        all_modes.push(Line::default());
+        all_modes.extend(insert_and_help);
+        frame.render_widget(Paragraph::new(all_modes), inner);
     }
+}
+
+fn line_width(lines: &[Line<'_>]) -> u16 {
+    lines
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or(0)
+        .min(usize::from(u16::MAX)) as u16
 }
 
 fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
@@ -364,9 +458,7 @@ fn help_lines(mode: Mode) -> Vec<Line<'static>> {
     lines.extend(
         bindings()
             .filter(|binding| binding.mode == mode)
-            .map(|binding| {
-                Line::from(format!("{:<10} {}", binding.key_label, binding.description))
-            }),
+            .map(|binding| Line::from(format!("{} {}", binding.key_label, binding.description))),
     );
     lines
 }
@@ -416,6 +508,14 @@ fn footer_binding(binding: &Binding) -> String {
         None => binding.description,
     };
     format!("{} {description}", binding.key_label)
+}
+
+fn footer_priority(mode: Mode, key_label: &str) -> u8 {
+    match (mode, key_label) {
+        (Mode::Normal, "i") | (Mode::Insert, "Enter") | (Mode::Help, "?") => 0,
+        (Mode::Normal, "?") | (Mode::Insert, "Esc") | (Mode::Help, "Esc") => 1,
+        _ => 2,
+    }
 }
 
 fn mode_label(mode: Mode) -> &'static str {
