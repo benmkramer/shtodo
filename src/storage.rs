@@ -1,8 +1,8 @@
 use std::{
     env,
     ffi::OsString,
-    fs,
-    io::ErrorKind,
+    fs::{self, File, OpenOptions, TryLockError},
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
@@ -24,6 +24,123 @@ pub(crate) struct StoragePaths {
     pub(crate) data_file: PathBuf,
     pub(crate) temp_file: PathBuf,
     pub(crate) lock_file: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct Store {
+    paths: StoragePaths,
+    scope: ListScope,
+    _lock: File,
+}
+
+impl Store {
+    pub(crate) fn open(home: &Path, scope: ListScope) -> Result<Self> {
+        let paths = paths_for_home(home, &scope)?;
+        fs::create_dir_all(&paths.directory).wrap_err_with(|| {
+            format!(
+                "could not create storage directory {}",
+                paths.directory.display()
+            )
+        })?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&paths.lock_file)
+            .wrap_err_with(|| format!("could not open lock file {}", paths.lock_file.display()))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(eyre!(
+                    "another shtodo process is already using this list ({})",
+                    paths.lock_file.display()
+                ));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(error)
+                    .wrap_err_with(|| format!("could not lock {}", paths.lock_file.display()));
+            }
+        }
+
+        Ok(Self {
+            paths,
+            scope,
+            _lock: lock,
+        })
+    }
+
+    pub(crate) fn scope(&self) -> &ListScope {
+        &self.scope
+    }
+
+    pub(crate) fn paths(&self) -> &StoragePaths {
+        &self.paths
+    }
+
+    pub(crate) fn load(&self) -> Result<TaskList> {
+        load_snapshot(&self.paths.data_file, &self.scope)
+    }
+
+    pub(crate) fn save(&self, list: &TaskList) -> Result<()> {
+        list.validate()?;
+        ensure_scope_matches(list.scope(), &self.scope)?;
+
+        let mut bytes = serde_json::to_vec_pretty(list).wrap_err_with(|| {
+            format!(
+                "could not serialize task list for {}",
+                self.paths.data_file.display()
+            )
+        })?;
+        bytes.push(b'\n');
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.paths.temp_file)
+            .wrap_err_with(|| {
+                format!(
+                    "could not open temporary snapshot {}",
+                    self.paths.temp_file.display()
+                )
+            })?;
+        file.write_all(&bytes).wrap_err_with(|| {
+            format!(
+                "could not write temporary snapshot {}",
+                self.paths.temp_file.display()
+            )
+        })?;
+        file.sync_all().wrap_err_with(|| {
+            format!(
+                "could not sync temporary snapshot {}",
+                self.paths.temp_file.display()
+            )
+        })?;
+        fs::rename(&self.paths.temp_file, &self.paths.data_file).wrap_err_with(|| {
+            format!(
+                "could not rename temporary snapshot {} to {}",
+                self.paths.temp_file.display(),
+                self.paths.data_file.display()
+            )
+        })?;
+
+        #[cfg(unix)]
+        File::open(&self.paths.directory)
+            .wrap_err_with(|| {
+                format!(
+                    "could not open storage directory {} for syncing",
+                    self.paths.directory.display()
+                )
+            })?
+            .sync_all()
+            .wrap_err_with(|| {
+                format!(
+                    "could not sync storage directory {}",
+                    self.paths.directory.display()
+                )
+            })?;
+
+        Ok(())
+    }
 }
 
 pub(crate) fn resolve_home(
@@ -175,10 +292,13 @@ mod tests {
     use std::{ffi::OsString, path::Path};
 
     use super::{
-        canonical_path_string, load_snapshot, paths_for_home, project_folder_name, resolve_home,
-        resolve_scope,
+        Store, canonical_path_string, load_snapshot, paths_for_home, project_folder_name,
+        resolve_home, resolve_scope,
     };
-    use crate::{cli::ScopeChoice, task::ListScope};
+    use crate::{
+        cli::ScopeChoice,
+        task::{ListScope, TaskList},
+    };
 
     #[test]
     fn home_should_prefer_nonempty_home_then_userprofile() {
@@ -390,5 +510,128 @@ mod tests {
                 .to_string()
                 .contains(&temp.path().display().to_string())
         );
+    }
+
+    #[test]
+    fn second_store_should_not_lock_same_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = Store::open(temp.path(), ListScope::Global).unwrap();
+
+        let error = Store::open(temp.path(), ListScope::Global).unwrap_err();
+
+        assert!(error.to_string().contains("already using"));
+        drop(first);
+        assert!(Store::open(temp.path(), ListScope::Global).is_ok());
+    }
+
+    #[test]
+    fn stores_should_lock_different_scopes_independently() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = Store::open(temp.path(), ListScope::Global).unwrap();
+        let project_scope = ListScope::Project {
+            path: std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let project = Store::open(temp.path(), project_scope).unwrap();
+
+        assert_ne!(global.paths().lock_file, project.paths().lock_file);
+    }
+
+    #[test]
+    fn save_should_write_pretty_json_newline_and_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("persist me").unwrap();
+
+        store.save(&list).unwrap();
+
+        let bytes = std::fs::read(&store.paths().data_file).unwrap();
+        assert!(bytes.ends_with(b"\n"));
+        assert_eq!(store.load().unwrap(), list);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_should_atomically_replace_existing_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("first").unwrap();
+        store.save(&list).unwrap();
+        list.add("second").unwrap();
+
+        store.save(&list).unwrap();
+
+        assert_eq!(store.load().unwrap(), list);
+    }
+
+    #[test]
+    fn failed_temp_write_should_preserve_canonical_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("first").unwrap();
+        store.save(&list).unwrap();
+        std::fs::create_dir(&store.paths().temp_file).unwrap();
+        list.add("second").unwrap();
+
+        assert!(store.save(&list).is_err());
+        assert_eq!(store.load().unwrap().visible_tasks().count(), 1);
+    }
+
+    #[test]
+    fn latest_delete_should_restore_after_storage_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first").unwrap();
+        let second = list.add("second").unwrap();
+        list.delete(first).unwrap();
+        list.delete(second).unwrap();
+        store.save(&list).unwrap();
+
+        let mut loaded = store.load().unwrap();
+
+        assert_eq!(loaded.restore_latest().unwrap(), Some(second));
+    }
+
+    #[test]
+    fn save_should_reject_wrong_scope_before_touching_temp_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        std::fs::write(&store.paths().temp_file, b"stale temp data").unwrap();
+        let project_scope = ListScope::Project {
+            path: std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let list = TaskList::new(project_scope);
+
+        assert!(store.save(&list).is_err());
+        assert_eq!(
+            std::fs::read(&store.paths().temp_file).unwrap(),
+            b"stale temp data"
+        );
+    }
+
+    #[test]
+    fn stale_temp_file_should_never_load_as_canonical() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        let mut stale = TaskList::new(ListScope::Global);
+        stale.add("stale").unwrap();
+        std::fs::write(
+            &store.paths().temp_file,
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = store.load().unwrap();
+
+        assert_eq!(loaded.visible_tasks().count(), 0);
     }
 }
