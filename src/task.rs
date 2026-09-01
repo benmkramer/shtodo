@@ -1,4 +1,4 @@
-use std::{collections::HashSet, error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -299,16 +299,43 @@ fn validated_text(text: &str) -> Result<&str, ListError> {
 fn validate_scope(scope: &ListScope) -> Result<(), ListError> {
     match scope {
         ListScope::Global => Ok(()),
-        ListScope::Project { path } if !path.is_empty() && path.starts_with('/') => Ok(()),
+        ListScope::Project { path } if project_path_is_absolute(path) => Ok(()),
         ListScope::Project { .. } => Err(ListError::InvalidData(
             "project path must be non-empty and absolute".into(),
         )),
     }
 }
 
+fn project_path_is_absolute(path: &str) -> bool {
+    Path::new(path).is_absolute()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ListScope, MoveDirection, TaskId, TaskList};
+    use super::{ListScope, MoveDirection, TaskId, TaskList, project_path_is_absolute};
+
+    #[test]
+    fn validate_should_use_current_platform_absolute_path_semantics() {
+        let absolute = std::env::current_dir().unwrap();
+        let path = absolute.to_str().unwrap().to_owned();
+        assert!(std::path::Path::new(&path).is_absolute());
+        assert!(project_path_is_absolute(&path));
+
+        let list = TaskList::new(ListScope::Project { path });
+
+        assert!(list.validate().is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn validate_should_accept_canonical_windows_absolute_project_path() {
+        let path = r"\\?\C:\work\shtodo".to_owned();
+        assert!(std::path::Path::new(&path).is_absolute());
+
+        let list = TaskList::new(ListScope::Project { path });
+
+        assert!(list.validate().is_ok());
+    }
 
     #[test]
     fn add_should_assign_id_trim_text_and_preserve_order() {

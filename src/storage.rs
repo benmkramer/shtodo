@@ -257,13 +257,31 @@ mod tests {
         assert_eq!(global.temp_file, global.directory.join("tasks.json.tmp"));
         assert_eq!(global.lock_file, global.directory.join("tasks.lock"));
 
+        #[cfg(unix)]
+        {
+            let scope = ListScope::Project {
+                path: "/Users/ben/code/shtodo".into(),
+            };
+            let project = paths_for_home(Path::new("/home/ben"), &scope).unwrap();
+            assert_eq!(
+                project.directory,
+                Path::new("/home/ben/.shtodo/projects/shtodo-2200fde3358e9316")
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn paths_should_accept_canonical_windows_project_scope() {
         let scope = ListScope::Project {
-            path: "/Users/ben/code/shtodo".into(),
+            path: r"\\?\C:\work\shtodo".into(),
         };
-        let project = paths_for_home(Path::new("/home/ben"), &scope).unwrap();
+
+        let project = paths_for_home(Path::new(r"C:\Users\ben"), &scope).unwrap();
+
         assert_eq!(
             project.directory,
-            Path::new("/home/ben/.shtodo/projects/shtodo-2200fde3358e9316")
+            Path::new(r"C:\Users\ben\.shtodo\projects\shtodo-d5ee64f14ef8d32b")
         );
     }
 
