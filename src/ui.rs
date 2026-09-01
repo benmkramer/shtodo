@@ -343,7 +343,7 @@ mod tests {
         Terminal,
         backend::TestBackend,
         buffer::{Buffer, Cell},
-        style::Modifier,
+        style::{Color, Modifier},
     };
 
     use super::{editor_window, render};
@@ -362,6 +362,12 @@ mod tests {
 
     fn buffer_text(buffer: &Buffer) -> String {
         buffer.content().iter().map(Cell::symbol).collect()
+    }
+
+    fn buffer_row(buffer: &Buffer, width: u16, row: u16) -> String {
+        (0..width)
+            .map(|column| buffer[(column, row)].symbol())
+            .collect()
     }
 
     #[test]
@@ -392,6 +398,26 @@ mod tests {
                 cell.symbol() == "f" && cell.modifier.contains(Modifier::CROSSED_OUT)
             })
         );
+    }
+
+    #[test]
+    fn populated_local_list_should_render_scope_counts_open_glyph_and_selection_style() {
+        let mut list = TaskList::new(ListScope::Project {
+            path: "/work/focus".into(),
+        });
+        list.add("open task").unwrap();
+        let completed = list.add("done task").unwrap();
+        list.toggle_complete(completed).unwrap();
+        let app = App::new(list);
+        let buffer = render_app(&app, 80, 12);
+
+        let header = buffer_row(&buffer, 80, 0);
+        assert!(header.contains("shtodo focus"));
+        assert!(header.contains("1 open · 1 done"));
+        assert_eq!(buffer[(2, 1)].symbol(), "○");
+        assert_eq!(buffer[(2, 2)].symbol(), "✓");
+        assert!(buffer[(4, 2)].modifier.contains(Modifier::DIM));
+        assert_eq!(buffer[(0, 1)].bg, Color::DarkGray);
     }
 
     #[test]
@@ -427,6 +453,22 @@ mod tests {
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("new task"));
         assert!(text.contains("INSERT"));
+    }
+
+    #[test]
+    fn edit_mode_should_render_the_buffer_in_the_task_row_and_place_the_cursor_after_it() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("draft").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::StartEdit).unwrap();
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        assert_eq!(terminal.backend().buffer()[(4, 1)].symbol(), "d");
+        assert_eq!(terminal.backend().buffer()[(8, 1)].symbol(), "t");
+        terminal.backend_mut().assert_cursor_position((9, 1));
     }
 
     #[test]
@@ -506,6 +548,34 @@ mod tests {
         let cancel = text.find("Esc cancel edit").unwrap();
         assert!(message < save);
         assert!(save < cancel);
+    }
+
+    #[test]
+    fn informational_message_should_render_before_filtered_footer_hints() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::RestoreLatest).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        let footer = buffer_row(&buffer, 80, 11);
+
+        let message = footer.find("Nothing to restore").unwrap();
+        let add = footer.find("i add task").unwrap();
+        assert!(message < add);
+        assert!(footer.contains("? help"));
+        assert!(!footer.contains("Down move down"));
+        assert!(!footer.contains("Ctrl-C quit"));
+    }
+
+    #[test]
+    fn narrow_footer_should_keep_prioritized_hints_when_clipping_the_remainder() {
+        let app = App::new(TaskList::new(ListScope::Global));
+        let buffer = render_app(&app, 40, 8);
+        let footer = buffer_row(&buffer, 40, 7);
+
+        assert!(footer.contains("NORMAL"));
+        assert!(footer.contains("i add task"));
+        assert!(footer.contains("? help"));
+        assert!(!footer.contains("Down move down"));
+        assert!(!footer.contains("Ctrl-C quit"));
     }
 
     #[test]

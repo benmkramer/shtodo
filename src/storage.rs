@@ -149,10 +149,14 @@ pub(crate) fn resolve_home(
     home: Option<OsString>,
     userprofile: Option<OsString>,
 ) -> Result<PathBuf> {
-    home.filter(|value| !value.is_empty())
-        .or_else(|| userprofile.filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-        .ok_or_else(|| eyre!("could not determine home directory from HOME or USERPROFILE"))
+    let home = home.filter(|value| !value.is_empty());
+    #[cfg(windows)]
+    let home = home.or_else(|| userprofile.filter(|value| !value.is_empty()));
+    #[cfg(not(windows))]
+    let _ = userprofile;
+
+    home.map(PathBuf::from)
+        .ok_or_else(|| eyre!("could not determine home directory from HOME"))
 }
 
 pub(crate) fn home_from_environment() -> Result<PathBuf> {
@@ -303,7 +307,7 @@ mod tests {
     };
 
     #[test]
-    fn home_should_prefer_nonempty_home_then_userprofile() {
+    fn home_should_prefer_nonempty_home() {
         assert_eq!(
             resolve_home(
                 Some(OsString::from("/home/first")),
@@ -312,11 +316,25 @@ mod tests {
             .unwrap(),
             Path::new("/home/first")
         );
+        assert!(resolve_home(None, Some(OsString::new())).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_home_resolution_should_require_nonempty_home_even_when_userprofile_is_set() {
+        assert!(resolve_home(None, Some(OsString::from("/home/profile"))).is_err());
+        assert!(
+            resolve_home(Some(OsString::new()), Some(OsString::from("/home/profile"))).is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_home_resolution_should_fall_back_to_nonempty_userprofile() {
         assert_eq!(
             resolve_home(Some(OsString::new()), Some(OsString::from("/home/second"))).unwrap(),
             Path::new("/home/second")
         );
-        assert!(resolve_home(None, Some(OsString::new())).is_err());
     }
 
     #[test]
