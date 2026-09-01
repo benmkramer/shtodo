@@ -36,6 +36,8 @@ The interface has Normal, Insert, and Help modes. Add or edit tasks in Insert
 mode, then press Enter to save. Task text is trimmed, must be non-empty and
 single-line, and Escape cancels an uncommitted add or edit. A terminal smaller
 than 40 columns by 8 rows displays a resize message until it is large enough.
+Pressing Enter with blank or all-whitespace text keeps the editor in Insert
+mode, saves nothing, and shows `Task text cannot be empty`.
 
 ## Keyboard controls
 
@@ -99,12 +101,26 @@ different local-list identity, even if its name is unchanged.
 
 ## Version-one limits
 
-Version one is intentionally local and narrow. It has no sync, accounts,
-network service, sharing or collaboration, reminders, notifications, due dates,
-recurrence, tags, projects beyond exact-directory lists, search, filtering,
-import or export, mouse support, runtime plugins, custom themes, configurable
-keybindings, or additional task-management modes. It also does not promise
-cross-device conflict resolution or compatibility with task-manager formats.
+Version one is intentionally local and narrow. It does not include accounts,
+synchronization, network access, sharing or collaboration, recurring tasks,
+reminders, notifications, dates or due dates, priorities, tags, or multiple
+named lists. It has no trash view, sidebar, mouse interaction, Git-root
+discovery for local scope, runtime plugins or extensions, user-editable
+keybindings, custom themes, configuration files, search, filtering, import,
+export, or additional task-management modes.
+
+The following work is explicitly deferred: a trash view that lists, restores,
+and permanently removes tombstones; a sidebar for global, project, trash, and
+later views; a `~/.shtodo/config` format for keybindings and themes; and
+configuration validation, conflict reporting, and fallback behavior. Editing
+is scalar-value-based, so grapheme-cluster-aware editing is deferred if it
+becomes necessary. Automated GitHub release binaries, installers, Homebrew and
+other package-manager distribution, and broader Windows runtime testing and
+support are also deferred. Windows is kept build-compatible where practical,
+but full Windows runtime support is not a version-one promise.
+
+Version one also does not promise cross-device conflict resolution or
+compatibility with task-manager formats.
 
 ## License
 
