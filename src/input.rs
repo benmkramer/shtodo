@@ -3,14 +3,30 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::{action::Action, app::Mode};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyCodePattern {
+    Exact(KeyCode),
+    Characters(&'static [char]),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct KeyChord {
-    code: KeyCode,
+    code: KeyCodePattern,
     modifiers: KeyModifiers,
 }
 
 impl KeyChord {
     const fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
-        Self { code, modifiers }
+        Self {
+            code: KeyCodePattern::Exact(code),
+            modifiers,
+        }
+    }
+
+    const fn characters(characters: &'static [char], modifiers: KeyModifiers) -> Self {
+        Self {
+            code: KeyCodePattern::Characters(characters),
+            modifiers,
+        }
     }
 
     fn from_event(event: KeyEvent) -> Self {
@@ -21,9 +37,18 @@ impl KeyChord {
         Self::new(event.code, modifiers)
     }
 
-    fn is_control_c(self) -> bool {
-        self.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(self.code, KeyCode::Char('c' | 'C'))
+    fn matches(self, event: Self) -> bool {
+        self.modifiers == event.modifiers
+            && match (self.code, event.code) {
+                (KeyCodePattern::Exact(expected), KeyCodePattern::Exact(actual)) => {
+                    expected == actual
+                }
+                (
+                    KeyCodePattern::Characters(characters),
+                    KeyCodePattern::Exact(KeyCode::Char(actual)),
+                ) => characters.contains(&actual),
+                _ => false,
+            }
     }
 }
 
@@ -38,6 +63,14 @@ pub(crate) struct Binding {
 }
 
 static BINDINGS: &[Binding] = &[
+    Binding {
+        mode: Mode::Normal,
+        chord: KeyChord::characters(&['c', 'C'], KeyModifiers::CONTROL),
+        action: Action::Quit,
+        key_label: "Ctrl-C",
+        description: "quit",
+        show_in_footer: false,
+    },
     Binding {
         mode: Mode::Normal,
         chord: KeyChord::new(KeyCode::Char('j'), KeyModifiers::NONE),
@@ -143,8 +176,8 @@ static BINDINGS: &[Binding] = &[
         show_in_footer: true,
     },
     Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        mode: Mode::Insert,
+        chord: KeyChord::characters(&['c', 'C'], KeyModifiers::CONTROL),
         action: Action::Quit,
         key_label: "Ctrl-C",
         description: "quit",
@@ -215,8 +248,8 @@ static BINDINGS: &[Binding] = &[
         show_in_footer: true,
     },
     Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        mode: Mode::Help,
+        chord: KeyChord::characters(&['c', 'C'], KeyModifiers::CONTROL),
         action: Action::Quit,
         key_label: "Ctrl-C",
         description: "quit",
@@ -238,14 +271,6 @@ static BINDINGS: &[Binding] = &[
         description: "close help",
         show_in_footer: true,
     },
-    Binding {
-        mode: Mode::Help,
-        chord: KeyChord::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-        action: Action::Quit,
-        key_label: "Ctrl-C",
-        description: "quit",
-        show_in_footer: false,
-    },
 ];
 
 pub(crate) fn bindings() -> impl Iterator<Item = &'static Binding> {
@@ -262,11 +287,7 @@ pub(crate) fn map_key(mode: Mode, event: KeyEvent) -> Option<Action> {
     }
 
     let chord = KeyChord::from_event(event);
-    if chord.is_control_c() {
-        return Some(Action::Quit);
-    }
-
-    if let Some(binding) = bindings_for(mode).find(|binding| binding.chord == chord) {
+    if let Some(binding) = bindings_for(mode).find(|binding| binding.chord.matches(chord)) {
         return Some(binding.action);
     }
 
@@ -274,7 +295,7 @@ pub(crate) fn map_key(mode: Mode, event: KeyEvent) -> Option<Action> {
         (
             Mode::Insert,
             KeyChord {
-                code: KeyCode::Char(character),
+                code: KeyCodePattern::Exact(KeyCode::Char(character)),
                 modifiers,
             },
         ) if modifiers == KeyModifiers::NONE => Some(Action::InsertChar(character)),
@@ -286,7 +307,7 @@ pub(crate) fn map_key(mode: Mode, event: KeyEvent) -> Option<Action> {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-    use super::{bindings_for, map_key};
+    use super::{KeyChord, bindings_for, map_key};
     use crate::{action::Action, app::Mode};
 
     fn key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
@@ -364,6 +385,63 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn control_c_bindings_should_declare_both_characters_without_duplicate_rows() {
+        for mode in [Mode::Normal, Mode::Insert, Mode::Help] {
+            let control_c_bindings = bindings_for(mode)
+                .filter(|binding| binding.key_label == "Ctrl-C")
+                .collect::<Vec<_>>();
+            assert_eq!(control_c_bindings.len(), 1);
+
+            for code in [KeyCode::Char('c'), KeyCode::Char('C')] {
+                assert!(
+                    control_c_bindings[0]
+                        .chord
+                        .matches(KeyChord::from_event(key(
+                            code,
+                            KeyModifiers::CONTROL,
+                            KeyEventKind::Press,
+                        )))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn declared_control_c_chords_should_quit_in_every_mode() {
+        for mode in [Mode::Normal, Mode::Insert, Mode::Help] {
+            for (code, modifiers) in [
+                (KeyCode::Char('c'), KeyModifiers::CONTROL),
+                (
+                    KeyCode::Char('C'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+            ] {
+                assert_eq!(
+                    map_key(mode, key(code, modifiers, KeyEventKind::Press)),
+                    Some(Action::Quit)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn control_alt_c_should_not_map_in_any_mode() {
+        for mode in [Mode::Normal, Mode::Insert, Mode::Help] {
+            assert_eq!(
+                map_key(
+                    mode,
+                    key(
+                        KeyCode::Char('c'),
+                        KeyModifiers::CONTROL | KeyModifiers::ALT,
+                        KeyEventKind::Press,
+                    )
+                ),
+                None
+            );
+        }
     }
 
     #[test]
