@@ -31,12 +31,20 @@ pub(crate) struct Task {
 }
 
 impl Task {
+    pub(crate) fn id(&self) -> TaskId {
+        self.id
+    }
+
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
     pub(crate) fn completed(&self) -> bool {
         self.completed
+    }
+
+    pub(crate) fn is_deleted(&self) -> bool {
+        self.deletion_sequence.is_some()
     }
 }
 
@@ -150,6 +158,61 @@ impl TaskList {
         Ok(())
     }
 
+    pub(crate) fn delete(&mut self, id: TaskId) -> Result<(), ListError> {
+        let index = self
+            .tasks
+            .iter()
+            .position(|task| task.id == id && !task.is_deleted())
+            .ok_or(ListError::TaskNotFound(id))?;
+        let next_deletion_sequence = self
+            .next_deletion_sequence
+            .checked_add(1)
+            .ok_or(ListError::DeletionSequenceExhausted)?;
+        self.tasks[index].deletion_sequence = Some(self.next_deletion_sequence);
+        self.next_deletion_sequence = next_deletion_sequence;
+        Ok(())
+    }
+
+    pub(crate) fn restore_latest(&mut self) -> Result<Option<TaskId>, ListError> {
+        let index = self
+            .tasks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, task)| task.deletion_sequence.map(|sequence| (index, sequence)))
+            .max_by_key(|(_, sequence)| *sequence)
+            .map(|(index, _)| index);
+        let Some(index) = index else {
+            return Ok(None);
+        };
+        let task = &mut self.tasks[index];
+        task.deletion_sequence = None;
+        Ok(Some(task.id))
+    }
+
+    pub(crate) fn move_visible(
+        &mut self,
+        id: TaskId,
+        direction: MoveDirection,
+    ) -> Result<bool, ListError> {
+        let index = self
+            .tasks
+            .iter()
+            .position(|task| task.id == id && !task.is_deleted())
+            .ok_or(ListError::TaskNotFound(id))?;
+        let swap_index = match direction {
+            MoveDirection::Up => (0..index)
+                .rev()
+                .find(|candidate| !self.tasks[*candidate].is_deleted()),
+            MoveDirection::Down => ((index + 1)..self.tasks.len())
+                .find(|candidate| !self.tasks[*candidate].is_deleted()),
+        };
+        let Some(swap_index) = swap_index else {
+            return Ok(false);
+        };
+        self.tasks.swap(index, swap_index);
+        Ok(true)
+    }
+
     pub(crate) fn adjacent_visible(&self, id: TaskId, direction: MoveDirection) -> Option<TaskId> {
         match direction {
             MoveDirection::Up => {
@@ -245,7 +308,7 @@ fn validate_scope(scope: &ListScope) -> Result<(), ListError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListScope, TaskId, TaskList};
+    use super::{ListScope, MoveDirection, TaskId, TaskList};
 
     #[test]
     fn add_should_assign_id_trim_text_and_preserve_order() {
@@ -302,6 +365,54 @@ mod tests {
         list.tasks[0].text = " one ".into();
         assert!(list.validate().is_err());
         list.tasks[0].text = "one\ntwo".into();
+        assert!(list.validate().is_err());
+    }
+
+    #[test]
+    fn restore_latest_should_survive_interleaved_deletes() {
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first").unwrap();
+        let second = list.add("second").unwrap();
+        list.delete(first).unwrap();
+        list.delete(second).unwrap();
+
+        assert_eq!(list.restore_latest().unwrap(), Some(second));
+        assert_eq!(list.restore_latest().unwrap(), Some(first));
+        assert_eq!(list.restore_latest().unwrap(), None);
+    }
+
+    #[test]
+    fn move_visible_should_swap_across_hidden_tombstone() {
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first").unwrap();
+        let hidden = list.add("hidden").unwrap();
+        let third = list.add("third").unwrap();
+        list.delete(hidden).unwrap();
+
+        assert!(list.move_visible(first, MoveDirection::Down).unwrap());
+        assert_eq!(
+            list.visible_tasks()
+                .map(|task| task.id())
+                .collect::<Vec<_>>(),
+            vec![third, first]
+        );
+        assert_eq!(list.restore_latest().unwrap(), Some(hidden));
+        assert_eq!(
+            list.tasks()
+                .iter()
+                .map(|task| task.text())
+                .collect::<Vec<_>>(),
+            vec!["third", "hidden", "first"]
+        );
+    }
+
+    #[test]
+    fn validate_should_reject_stale_deletion_counter() {
+        let mut list = TaskList::new(ListScope::Global);
+        let id = list.add("task").unwrap();
+        list.delete(id).unwrap();
+        list.next_deletion_sequence = 1;
+
         assert!(list.validate().is_err());
     }
 }
