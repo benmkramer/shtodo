@@ -41,37 +41,61 @@ impl Editor {
         self.cursor += character.len_utf8();
     }
 
-    fn move_left(&mut self) {
-        if let Some((index, _)) = self.buffer[..self.cursor].char_indices().last() {
-            self.cursor = index;
-        }
-    }
-
-    fn move_right(&mut self) {
-        if let Some((index, _)) = self.buffer[self.cursor..].char_indices().nth(1) {
-            self.cursor += index;
-        } else {
-            self.cursor = self.buffer.len();
-        }
-    }
-
-    fn delete_before_cursor(&mut self) {
+    fn move_left(&mut self) -> bool {
         let Some((index, _)) = self.buffer[..self.cursor].char_indices().last() else {
-            return;
+            return false;
+        };
+        self.cursor = index;
+        true
+    }
+
+    fn move_right(&mut self) -> bool {
+        if self.cursor == self.buffer.len() {
+            return false;
+        }
+        let next = self.buffer[self.cursor..]
+            .char_indices()
+            .nth(1)
+            .map_or(self.buffer.len(), |(index, _)| self.cursor + index);
+        self.cursor = next;
+        true
+    }
+
+    fn move_start(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        self.cursor = 0;
+        true
+    }
+
+    fn move_end(&mut self) -> bool {
+        if self.cursor == self.buffer.len() {
+            return false;
+        }
+        self.cursor = self.buffer.len();
+        true
+    }
+
+    fn delete_before_cursor(&mut self) -> bool {
+        let Some((index, _)) = self.buffer[..self.cursor].char_indices().last() else {
+            return false;
         };
         self.buffer.drain(index..self.cursor);
         self.cursor = index;
+        true
     }
 
-    fn delete_at_cursor(&mut self) {
+    fn delete_at_cursor(&mut self) -> bool {
         if self.cursor == self.buffer.len() {
-            return;
+            return false;
         }
         let next = self.buffer[self.cursor..]
             .char_indices()
             .nth(1)
             .map_or(self.buffer.len(), |(index, _)| self.cursor + index);
         self.buffer.drain(self.cursor..next);
+        true
     }
 }
 
@@ -237,8 +261,11 @@ impl App {
         let Some(editor) = self.editor.as_mut() else {
             return Transition::Unchanged;
         };
-        editor.move_left();
-        Transition::Transient
+        if editor.move_left() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
     }
 
     fn move_cursor_right(&mut self) -> Transition {
@@ -248,8 +275,11 @@ impl App {
         let Some(editor) = self.editor.as_mut() else {
             return Transition::Unchanged;
         };
-        editor.move_right();
-        Transition::Transient
+        if editor.move_right() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
     }
 
     fn move_cursor_start(&mut self) -> Transition {
@@ -259,8 +289,11 @@ impl App {
         let Some(editor) = self.editor.as_mut() else {
             return Transition::Unchanged;
         };
-        editor.cursor = 0;
-        Transition::Transient
+        if editor.move_start() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
     }
 
     fn move_cursor_end(&mut self) -> Transition {
@@ -270,8 +303,11 @@ impl App {
         let Some(editor) = self.editor.as_mut() else {
             return Transition::Unchanged;
         };
-        editor.cursor = editor.buffer.len();
-        Transition::Transient
+        if editor.move_end() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
     }
 
     fn delete_before_cursor(&mut self) -> Transition {
@@ -281,8 +317,11 @@ impl App {
         let Some(editor) = self.editor.as_mut() else {
             return Transition::Unchanged;
         };
-        editor.delete_before_cursor();
-        Transition::Transient
+        if editor.delete_before_cursor() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
     }
 
     fn delete_at_cursor(&mut self) -> Transition {
@@ -292,8 +331,11 @@ impl App {
         let Some(editor) = self.editor.as_mut() else {
             return Transition::Unchanged;
         };
-        editor.delete_at_cursor();
-        Transition::Transient
+        if editor.delete_at_cursor() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
     }
 
     fn commit_edit(&mut self) -> Result<Transition, ListError> {
@@ -416,5 +458,43 @@ mod tests {
         );
         assert_eq!(app.mode(), Mode::Insert);
         assert_eq!(app.message(), Some("Task text cannot be empty"));
+    }
+
+    #[test]
+    fn editor_boundary_actions_should_be_unchanged_when_buffer_is_empty() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::StartAdd).unwrap();
+
+        for action in [
+            Action::MoveCursorLeft,
+            Action::MoveCursorRight,
+            Action::MoveCursorStart,
+            Action::MoveCursorEnd,
+            Action::DeleteBeforeCursor,
+            Action::DeleteAtCursor,
+        ] {
+            assert_eq!(app.apply(action).unwrap(), Transition::Unchanged);
+        }
+    }
+
+    #[test]
+    fn editor_should_report_utf8_rightward_cursor_movement_only_when_it_advances() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::StartAdd).unwrap();
+        app.apply(Action::InsertChar('é')).unwrap();
+        assert_eq!(
+            app.apply(Action::MoveCursorStart).unwrap(),
+            Transition::Transient
+        );
+
+        assert_eq!(
+            app.apply(Action::MoveCursorRight).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.editor().unwrap().cursor(), 'é'.len_utf8());
+        assert_eq!(
+            app.apply(Action::MoveCursorRight).unwrap(),
+            Transition::Unchanged
+        );
     }
 }
