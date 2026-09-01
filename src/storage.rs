@@ -46,6 +46,7 @@ impl Store {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&paths.lock_file)
             .wrap_err_with(|| format!("could not open lock file {}", paths.lock_file.display()))?;
         match lock.try_lock() {
@@ -69,10 +70,7 @@ impl Store {
         })
     }
 
-    pub(crate) fn scope(&self) -> &ListScope {
-        &self.scope
-    }
-
+    #[cfg(test)]
     pub(crate) fn paths(&self) -> &StoragePaths {
         &self.paths
     }

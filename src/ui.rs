@@ -1,192 +1,3 @@
-#[cfg(test)]
-mod tests {
-    use ratatui::{
-        Terminal,
-        backend::TestBackend,
-        buffer::{Buffer, Cell},
-        style::Modifier,
-    };
-
-    use super::{editor_window, render};
-    use crate::{
-        action::Action,
-        app::App,
-        task::{ListScope, TaskList},
-    };
-
-    fn render_app(app: &App, width: u16, height: u16) -> Buffer {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, app)).unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    fn buffer_text(buffer: &Buffer) -> String {
-        buffer.content().iter().map(Cell::symbol).collect()
-    }
-
-    #[test]
-    fn empty_list_should_render_brand_scope_mode_and_learning_hints() {
-        let app = App::new(TaskList::new(ListScope::Global));
-        let text = buffer_text(&render_app(&app, 80, 12));
-
-        assert!(text.contains("shtodo"));
-        assert!(text.contains("global"));
-        assert!(text.contains("No tasks yet"));
-        assert!(text.contains("i add"));
-        assert!(text.contains("? help"));
-        assert!(text.contains("NORMAL"));
-    }
-
-    #[test]
-    fn completed_selected_task_should_render_marker_glyph_and_style() {
-        let mut list = TaskList::new(ListScope::Global);
-        let id = list.add("finished").unwrap();
-        list.toggle_complete(id).unwrap();
-        let app = App::new(list);
-        let buffer = render_app(&app, 80, 12);
-
-        assert!(buffer.content().iter().any(|cell| cell.symbol() == "›"));
-        assert!(buffer.content().iter().any(|cell| cell.symbol() == "✓"));
-        assert!(
-            buffer.content().iter().any(|cell| {
-                cell.symbol() == "f" && cell.modifier.contains(Modifier::CROSSED_OUT)
-            })
-        );
-    }
-
-    #[test]
-    fn selected_task_should_remain_visible_when_list_scrolls() {
-        let mut list = TaskList::new(ListScope::Global);
-        for index in 0..10 {
-            list.add(&format!("task {index}")).unwrap();
-        }
-        let mut app = App::new(list);
-        for _ in 0..9 {
-            app.apply(Action::MoveDown).unwrap();
-        }
-
-        let text = buffer_text(&render_app(&app, 80, 8));
-
-        assert!(text.contains("task 9"));
-        assert!(!text.contains("task 0"));
-    }
-
-    #[test]
-    fn insert_mode_should_render_buffer_and_visible_cursor() {
-        let mut app = App::new(TaskList::new(ListScope::Global));
-        app.apply(Action::StartAdd).unwrap();
-        for character in "new task".chars() {
-            app.apply(Action::InsertChar(character)).unwrap();
-        }
-        let backend = TestBackend::new(50, 10);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal.draw(|frame| render(frame, &app)).unwrap();
-
-        terminal.backend_mut().assert_cursor_position((12, 1));
-        let text = buffer_text(terminal.backend().buffer());
-        assert!(text.contains("new task"));
-        assert!(text.contains("INSERT"));
-    }
-
-    #[test]
-    fn help_mode_should_render_bindings_from_table() {
-        let mut app = App::new(TaskList::new(ListScope::Global));
-        app.apply(Action::OpenHelp).unwrap();
-        let text = buffer_text(&render_app(&app, 80, 24));
-
-        assert!(text.contains("Keyboard help"));
-        assert!(text.contains("J"));
-        assert!(text.contains("move task down"));
-        assert!(text.contains("Esc"));
-    }
-
-    #[test]
-    fn help_mode_should_render_every_binding_without_truncating_descriptions() {
-        let mut app = App::new(TaskList::new(ListScope::Global));
-        app.apply(Action::OpenHelp).unwrap();
-        let buffer = render_app(&app, 80, 24);
-        let lines = buffer
-            .content()
-            .chunks(80)
-            .map(|cells| {
-                cells
-                    .iter()
-                    .map(Cell::symbol)
-                    .collect::<String>()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .collect::<Vec<_>>();
-        let expected_rows = [
-            "Ctrl-C quit",
-            "j move down",
-            "Down move down",
-            "k move up",
-            "Up move up",
-            "J move task down",
-            "K move task up",
-            "i add task",
-            "e edit task",
-            "Space toggle complete",
-            "d delete task",
-            "u restore latest",
-            "? show help",
-            "q quit",
-            "Left move cursor left",
-            "Right move cursor right",
-            "Home move cursor start",
-            "End move cursor end",
-            "Backspace delete before cursor",
-            "Delete delete at cursor",
-            "Enter save edit",
-            "Esc cancel edit",
-            "? close help",
-            "Esc close help",
-        ];
-
-        for expected in expected_rows {
-            assert!(
-                lines.iter().any(|line| line.contains(expected)),
-                "missing full help row: {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn validation_message_should_precede_insert_save_and_cancel_hints() {
-        let mut app = App::new(TaskList::new(ListScope::Global));
-        app.apply(Action::StartAdd).unwrap();
-        app.apply(Action::CommitEdit).unwrap();
-        let text = buffer_text(&render_app(&app, 80, 10));
-
-        let message = text.find("Task text cannot be empty").unwrap();
-        let save = text.find("Enter save edit").unwrap();
-        let cancel = text.find("Esc cancel edit").unwrap();
-        assert!(message < save);
-        assert!(save < cancel);
-    }
-
-    #[test]
-    fn undersized_terminal_should_render_only_resize_message() {
-        let app = App::new(TaskList::new(ListScope::Global));
-        let text = buffer_text(&render_app(&app, 30, 6));
-
-        assert!(text.contains("Resize terminal to at least 40x8"));
-        assert!(!text.contains("No tasks yet"));
-    }
-
-    #[test]
-    fn editor_window_should_keep_end_cursor_visible() {
-        let (visible, cursor_column) = editor_window("0123456789", 10, 5);
-
-        assert_eq!(visible, "6789");
-        assert_eq!(cursor_column, 4);
-    }
-}
-
 use std::path::Path;
 
 use ratatui::{
@@ -523,5 +334,194 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Normal => "NORMAL",
         Mode::Insert => "INSERT",
         Mode::Help => "HELP",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        buffer::{Buffer, Cell},
+        style::Modifier,
+    };
+
+    use super::{editor_window, render};
+    use crate::{
+        action::Action,
+        app::App,
+        task::{ListScope, TaskList},
+    };
+
+    fn render_app(app: &App, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        buffer.content().iter().map(Cell::symbol).collect()
+    }
+
+    #[test]
+    fn empty_list_should_render_brand_scope_mode_and_learning_hints() {
+        let app = App::new(TaskList::new(ListScope::Global));
+        let text = buffer_text(&render_app(&app, 80, 12));
+
+        assert!(text.contains("shtodo"));
+        assert!(text.contains("global"));
+        assert!(text.contains("No tasks yet"));
+        assert!(text.contains("i add"));
+        assert!(text.contains("? help"));
+        assert!(text.contains("NORMAL"));
+    }
+
+    #[test]
+    fn completed_selected_task_should_render_marker_glyph_and_style() {
+        let mut list = TaskList::new(ListScope::Global);
+        let id = list.add("finished").unwrap();
+        list.toggle_complete(id).unwrap();
+        let app = App::new(list);
+        let buffer = render_app(&app, 80, 12);
+
+        assert!(buffer.content().iter().any(|cell| cell.symbol() == "›"));
+        assert!(buffer.content().iter().any(|cell| cell.symbol() == "✓"));
+        assert!(
+            buffer.content().iter().any(|cell| {
+                cell.symbol() == "f" && cell.modifier.contains(Modifier::CROSSED_OUT)
+            })
+        );
+    }
+
+    #[test]
+    fn selected_task_should_remain_visible_when_list_scrolls() {
+        let mut list = TaskList::new(ListScope::Global);
+        for index in 0..10 {
+            list.add(&format!("task {index}")).unwrap();
+        }
+        let mut app = App::new(list);
+        for _ in 0..9 {
+            app.apply(Action::MoveDown).unwrap();
+        }
+
+        let text = buffer_text(&render_app(&app, 80, 8));
+
+        assert!(text.contains("task 9"));
+        assert!(!text.contains("task 0"));
+    }
+
+    #[test]
+    fn insert_mode_should_render_buffer_and_visible_cursor() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::StartAdd).unwrap();
+        for character in "new task".chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+
+        terminal.backend_mut().assert_cursor_position((12, 1));
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("new task"));
+        assert!(text.contains("INSERT"));
+    }
+
+    #[test]
+    fn help_mode_should_render_bindings_from_table() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+        let text = buffer_text(&render_app(&app, 80, 24));
+
+        assert!(text.contains("Keyboard help"));
+        assert!(text.contains("J"));
+        assert!(text.contains("move task down"));
+        assert!(text.contains("Esc"));
+    }
+
+    #[test]
+    fn help_mode_should_render_every_binding_without_truncating_descriptions() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+        let buffer = render_app(&app, 80, 24);
+        let lines = buffer
+            .content()
+            .chunks(80)
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(Cell::symbol)
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>();
+        let expected_rows = [
+            "Ctrl-C quit",
+            "j move down",
+            "Down move down",
+            "k move up",
+            "Up move up",
+            "J move task down",
+            "K move task up",
+            "i add task",
+            "e edit task",
+            "Space toggle complete",
+            "d delete task",
+            "u restore latest",
+            "? show help",
+            "q quit",
+            "Left move cursor left",
+            "Right move cursor right",
+            "Home move cursor start",
+            "End move cursor end",
+            "Backspace delete before cursor",
+            "Delete delete at cursor",
+            "Enter save edit",
+            "Esc cancel edit",
+            "? close help",
+            "Esc close help",
+        ];
+
+        for expected in expected_rows {
+            assert!(
+                lines.iter().any(|line| line.contains(expected)),
+                "missing full help row: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_message_should_precede_insert_save_and_cancel_hints() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::StartAdd).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        let text = buffer_text(&render_app(&app, 80, 10));
+
+        let message = text.find("Task text cannot be empty").unwrap();
+        let save = text.find("Enter save edit").unwrap();
+        let cancel = text.find("Esc cancel edit").unwrap();
+        assert!(message < save);
+        assert!(save < cancel);
+    }
+
+    #[test]
+    fn undersized_terminal_should_render_only_resize_message() {
+        let app = App::new(TaskList::new(ListScope::Global));
+        let text = buffer_text(&render_app(&app, 30, 6));
+
+        assert!(text.contains("Resize terminal to at least 40x8"));
+        assert!(!text.contains("No tasks yet"));
+    }
+
+    #[test]
+    fn editor_window_should_keep_end_cursor_visible() {
+        let (visible, cursor_column) = editor_window("0123456789", 10, 5);
+
+        assert_eq!(visible, "6789");
+        assert_eq!(cursor_column, 4);
     }
 }

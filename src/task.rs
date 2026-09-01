@@ -104,6 +104,7 @@ impl TaskList {
         &self.scope
     }
 
+    #[cfg(test)]
     pub(crate) fn tasks(&self) -> &[Task] {
         &self.tasks
     }
