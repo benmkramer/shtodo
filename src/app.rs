@@ -128,28 +128,10 @@ impl App {
     }
 
     pub(crate) fn apply(&mut self, action: Action) -> Result<Transition, ListError> {
-        match action {
-            Action::MoveDown => Ok(self.move_selection(MoveDirection::Down)),
-            Action::MoveUp => Ok(self.move_selection(MoveDirection::Up)),
-            Action::StartAdd => Ok(self.start_add()),
-            Action::StartEdit => Ok(self.start_edit()),
-            Action::OpenHelp => Ok(self.open_help()),
-            Action::CloseHelp => Ok(self.close_help()),
-            Action::InsertChar(character) => Ok(self.insert_char(character)),
-            Action::MoveCursorLeft => Ok(self.move_cursor_left()),
-            Action::MoveCursorRight => Ok(self.move_cursor_right()),
-            Action::MoveCursorStart => Ok(self.move_cursor_start()),
-            Action::MoveCursorEnd => Ok(self.move_cursor_end()),
-            Action::DeleteBeforeCursor => Ok(self.delete_before_cursor()),
-            Action::DeleteAtCursor => Ok(self.delete_at_cursor()),
-            Action::CommitEdit => self.commit_edit(),
-            Action::CancelEdit => Ok(self.cancel_edit()),
-            Action::Quit => Ok(Transition::Quit),
-            Action::MoveTaskDown
-            | Action::MoveTaskUp
-            | Action::ToggleComplete
-            | Action::Delete
-            | Action::RestoreLatest => Ok(Transition::Unchanged),
+        match self.mode {
+            Mode::Normal => self.apply_normal(action),
+            Mode::Insert => self.apply_insert(action),
+            Mode::Help => self.apply_help(action),
         }
     }
 
@@ -177,6 +159,102 @@ impl App {
         self.message.as_deref()
     }
 
+    fn apply_normal(&mut self, action: Action) -> Result<Transition, ListError> {
+        if !matches!(
+            action,
+            Action::MoveDown
+                | Action::MoveUp
+                | Action::MoveTaskDown
+                | Action::MoveTaskUp
+                | Action::StartAdd
+                | Action::StartEdit
+                | Action::ToggleComplete
+                | Action::Delete
+                | Action::RestoreLatest
+                | Action::OpenHelp
+                | Action::Quit
+        ) {
+            return Ok(Transition::Unchanged);
+        }
+
+        let message_was_cleared = self.clear_message();
+        let transition = match action {
+            Action::MoveDown => self.move_selection(MoveDirection::Down),
+            Action::MoveUp => self.move_selection(MoveDirection::Up),
+            Action::MoveTaskDown => self.move_task(MoveDirection::Down)?,
+            Action::MoveTaskUp => self.move_task(MoveDirection::Up)?,
+            Action::StartAdd => self.start_add(),
+            Action::StartEdit => self.start_edit(),
+            Action::ToggleComplete => self.toggle_complete()?,
+            Action::Delete => self.delete_selected()?,
+            Action::RestoreLatest => self.restore_latest()?,
+            Action::OpenHelp => self.open_help(),
+            Action::Quit => Transition::Quit,
+            _ => Transition::Unchanged,
+        };
+        Ok(Self::after_message_clear(transition, message_was_cleared))
+    }
+
+    fn apply_insert(&mut self, action: Action) -> Result<Transition, ListError> {
+        if !matches!(
+            action,
+            Action::InsertChar(_)
+                | Action::MoveCursorLeft
+                | Action::MoveCursorRight
+                | Action::MoveCursorStart
+                | Action::MoveCursorEnd
+                | Action::DeleteBeforeCursor
+                | Action::DeleteAtCursor
+                | Action::CommitEdit
+                | Action::CancelEdit
+                | Action::Quit
+        ) {
+            return Ok(Transition::Unchanged);
+        }
+
+        let message_was_cleared = self.clear_message();
+        let transition = match action {
+            Action::InsertChar(character) => self.insert_char(character),
+            Action::MoveCursorLeft => self.move_cursor_left(),
+            Action::MoveCursorRight => self.move_cursor_right(),
+            Action::MoveCursorStart => self.move_cursor_start(),
+            Action::MoveCursorEnd => self.move_cursor_end(),
+            Action::DeleteBeforeCursor => self.delete_before_cursor(),
+            Action::DeleteAtCursor => self.delete_at_cursor(),
+            Action::CommitEdit => self.commit_edit()?,
+            Action::CancelEdit => self.cancel_edit(),
+            Action::Quit => Transition::Quit,
+            _ => Transition::Unchanged,
+        };
+        Ok(Self::after_message_clear(transition, message_was_cleared))
+    }
+
+    fn apply_help(&mut self, action: Action) -> Result<Transition, ListError> {
+        if !matches!(action, Action::CloseHelp | Action::Quit) {
+            return Ok(Transition::Unchanged);
+        }
+
+        let message_was_cleared = self.clear_message();
+        let transition = match action {
+            Action::CloseHelp => self.close_help(),
+            Action::Quit => Transition::Quit,
+            _ => Transition::Unchanged,
+        };
+        Ok(Self::after_message_clear(transition, message_was_cleared))
+    }
+
+    fn clear_message(&mut self) -> bool {
+        self.message.take().is_some()
+    }
+
+    fn after_message_clear(transition: Transition, message_was_cleared: bool) -> Transition {
+        if message_was_cleared && transition == Transition::Unchanged {
+            Transition::Transient
+        } else {
+            transition
+        }
+    }
+
     fn move_selection(&mut self, direction: MoveDirection) -> Transition {
         if self.mode != Mode::Normal {
             return Transition::Unchanged;
@@ -189,6 +267,47 @@ impl App {
         };
         self.selected = Some(next);
         Transition::Transient
+    }
+
+    fn move_task(&mut self, direction: MoveDirection) -> Result<Transition, ListError> {
+        let Some(selected) = self.selected else {
+            return Ok(Transition::Unchanged);
+        };
+        if self.tasks.move_visible(selected, direction)? {
+            Ok(Transition::Persisted)
+        } else {
+            Ok(Transition::Unchanged)
+        }
+    }
+
+    fn toggle_complete(&mut self) -> Result<Transition, ListError> {
+        let Some(selected) = self.selected else {
+            return Ok(Transition::Unchanged);
+        };
+        self.tasks.toggle_complete(selected)?;
+        Ok(Transition::Persisted)
+    }
+
+    fn delete_selected(&mut self) -> Result<Transition, ListError> {
+        let Some(selected) = self.selected else {
+            return Ok(Transition::Unchanged);
+        };
+        let next_selected = self
+            .tasks
+            .adjacent_visible(selected, MoveDirection::Down)
+            .or_else(|| self.tasks.adjacent_visible(selected, MoveDirection::Up));
+        self.tasks.delete(selected)?;
+        self.selected = next_selected;
+        Ok(Transition::Persisted)
+    }
+
+    fn restore_latest(&mut self) -> Result<Transition, ListError> {
+        let Some(restored) = self.tasks.restore_latest()? else {
+            self.message = Some("Nothing to restore".into());
+            return Ok(Transition::Transient);
+        };
+        self.selected = Some(restored);
+        Ok(Transition::Persisted)
     }
 
     fn start_add(&mut self) -> Transition {
@@ -357,7 +476,14 @@ impl App {
                 let id = self.tasks.add(&text)?;
                 self.selected = Some(id);
             }
-            EditKind::Edit(id) => self.tasks.edit(id, &text)?,
+            EditKind::Edit(id) => {
+                if self.tasks.task(id).map(Task::text) == Some(text.trim()) {
+                    self.mode = Mode::Normal;
+                    self.editor = None;
+                    return Ok(Transition::Transient);
+                }
+                self.tasks.edit(id, &text)?;
+            }
         }
         self.mode = Mode::Normal;
         self.editor = None;
@@ -496,5 +622,113 @@ mod tests {
             app.apply(Action::MoveCursorRight).unwrap(),
             Transition::Unchanged
         );
+    }
+
+    #[test]
+    fn delete_should_select_next_and_restore_should_reselect_tombstone() {
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first").unwrap();
+        let second = list.add("second").unwrap();
+        let mut app = App::new(list);
+
+        assert_eq!(app.apply(Action::Delete).unwrap(), Transition::Persisted);
+        assert_eq!(app.selected(), Some(second));
+        assert_eq!(
+            app.apply(Action::RestoreLatest).unwrap(),
+            Transition::Persisted
+        );
+        assert_eq!(app.selected(), Some(first));
+    }
+
+    #[test]
+    fn restore_without_tombstone_should_show_message_without_persisting() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+
+        assert_eq!(
+            app.apply(Action::RestoreLatest).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.message(), Some("Nothing to restore"));
+    }
+
+    #[test]
+    fn help_should_block_task_actions_until_closed() {
+        let mut list = TaskList::new(ListScope::Global);
+        let id = list.add("task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::OpenHelp).unwrap();
+
+        assert_eq!(
+            app.apply(Action::ToggleComplete).unwrap(),
+            Transition::Unchanged
+        );
+        assert!(!app.tasks().task(id).unwrap().completed());
+        assert_eq!(app.apply(Action::CloseHelp).unwrap(), Transition::Transient);
+    }
+
+    #[test]
+    fn completion_and_reordering_should_persist_only_real_changes() {
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first").unwrap();
+        list.add("second").unwrap();
+        let mut app = App::new(list);
+
+        assert_eq!(
+            app.apply(Action::ToggleComplete).unwrap(),
+            Transition::Persisted
+        );
+        assert!(app.tasks().task(first).unwrap().completed());
+        assert_eq!(
+            app.apply(Action::MoveTaskUp).unwrap(),
+            Transition::Unchanged
+        );
+        assert_eq!(
+            app.apply(Action::MoveTaskDown).unwrap(),
+            Transition::Persisted
+        );
+        assert_eq!(app.selected(), Some(first));
+    }
+
+    #[test]
+    fn unchanged_edit_should_close_without_persisting() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::StartEdit).unwrap();
+
+        assert_eq!(
+            app.apply(Action::CommitEdit).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn valid_noop_action_should_clear_previous_message() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::RestoreLatest).unwrap();
+
+        assert_eq!(app.message(), Some("Nothing to restore"));
+        assert_eq!(
+            app.apply(Action::MoveTaskUp).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.message(), None);
+    }
+
+    #[test]
+    fn insert_action_should_clear_blank_editor_message() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::StartAdd).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+
+        assert_eq!(app.message(), Some("Task text cannot be empty"));
+        assert_eq!(
+            app.apply(Action::InsertChar('t')).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.message(), None);
     }
 }
