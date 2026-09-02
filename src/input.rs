@@ -313,6 +313,10 @@ impl ResolvedBinding {
     pub(crate) fn labels(&self) -> impl Iterator<Item = &str> {
         self.labels.iter()
     }
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "wired by Task 3 doctor integration")
+    )]
     pub(crate) const fn action(&self) -> Action {
         self.action
     }
@@ -693,12 +697,20 @@ impl Keymap {
             .iter()
             .filter(move |binding| binding.mode == mode)
     }
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "wired by Task 3 doctor integration")
+    )]
     pub(crate) fn configurable_action_count(&self) -> usize {
         self.bindings
             .iter()
             .filter(|binding| binding.id.config_name().is_some())
             .count()
     }
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "wired by Task 3 doctor integration")
+    )]
     pub(crate) fn active_binding_count(&self) -> usize {
         self.bindings
             .iter()

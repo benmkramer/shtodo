@@ -93,6 +93,7 @@ pub(crate) struct LoadedKeymap {
     keymap: Keymap,
 }
 
+#[expect(dead_code, reason = "wired by Task 3 doctor integration")]
 impl LoadedKeymap {
     pub(crate) fn path(&self) -> &Path {
         &self.path
@@ -111,6 +112,10 @@ pub(crate) fn config_path(home: &Path) -> PathBuf {
     home.join(".shtodo/config.toml")
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired by Task 3 doctor integration")
+)]
 pub(crate) fn load(home: &Path) -> Result<LoadedKeymap, ConfigError> {
     let path = config_path(home);
     let source = match fs::read_to_string(&path) {
@@ -237,7 +242,7 @@ fn parse_actions(
             };
             values.push(value.to_owned());
         }
-        if valid {
+        if valid || !values.is_empty() {
             overrides.push(BindingOverride {
                 order,
                 path,
@@ -456,6 +461,28 @@ move_cursor_left = ["x"]
         assert_eq!(
             diagnostic_paths(load(home.path()).unwrap_err()),
             vec!["keybindings.normal.move_down[1]"]
+        );
+    }
+
+    #[test]
+    fn load_should_report_semantic_issues_for_strings_in_mixed_arrays() {
+        let home = configured_home("[keybindings.normal]\nmove_down = [\"bad\", 1, \"ctrl-c\"]");
+
+        let diagnostics = match load(home.path()).unwrap_err() {
+            ConfigError::Invalid { diagnostics, .. } => diagnostics,
+            error => panic!("expected invalid configuration, got {error}"),
+        };
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message))
+                .collect::<Vec<_>>(),
+            vec![
+                "keybindings.normal.move_down: invalid key \"bad\": unknown key \"bad\"",
+                "keybindings.normal.move_down: Ctrl-C is reserved and cannot be configured",
+                "keybindings.normal.move_down[1]: expected a string",
+            ]
         );
     }
 
