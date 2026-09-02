@@ -1,6 +1,6 @@
 [package]
 name = "shtodo"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 description = "A blazing fast, fully local TUI based todo app."
 authors = ["Ben Kramer <benmkramer@gmail.com>"]
 license = "MIT"
