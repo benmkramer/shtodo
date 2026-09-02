@@ -64,12 +64,20 @@ Type to enter task text. `q` is ordinary text in this mode.
 | Key | Action |
 | --- | --- |
 | Left or Right | Move the text cursor |
+| Alt-Left or Alt-b | Move to the start of the previous word |
+| Alt-Right or Alt-f | Move to the end of the next word |
 | Home or End | Move the text cursor to the start or end |
 | Backspace | Delete before the cursor |
+| Alt-Backspace or Ctrl-w | Delete the previous word |
 | Delete | Delete at the cursor |
+| Alt-Delete | Delete the next word |
 | Enter | Save the add or edit |
 | Esc | Cancel the add or edit |
 | Ctrl-C | Quit |
+
+On macOS, terminals report Option as Alt when Option is configured as an
+Escape/Meta key. The common Meta-b and Meta-f encodings are supported by the
+Alt-b and Alt-f aliases above.
 
 ### Help mode
 

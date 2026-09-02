@@ -77,6 +77,24 @@ impl Editor {
         true
     }
 
+    fn move_word_left(&mut self) -> bool {
+        let target = previous_word_start(&self.buffer, self.cursor);
+        if target == self.cursor {
+            return false;
+        }
+        self.cursor = target;
+        true
+    }
+
+    fn move_word_right(&mut self) -> bool {
+        let target = next_word_end(&self.buffer, self.cursor);
+        if target == self.cursor {
+            return false;
+        }
+        self.cursor = target;
+        true
+    }
+
     fn delete_before_cursor(&mut self) -> bool {
         let Some((index, _)) = self.buffer[..self.cursor].char_indices().last() else {
             return false;
@@ -97,6 +115,73 @@ impl Editor {
         self.buffer.drain(self.cursor..next);
         true
     }
+
+    fn delete_word_before_cursor(&mut self) -> bool {
+        let target = previous_word_start(&self.buffer, self.cursor);
+        if target == self.cursor {
+            return false;
+        }
+        self.buffer.drain(target..self.cursor);
+        self.cursor = target;
+        true
+    }
+
+    fn delete_word_at_cursor(&mut self) -> bool {
+        let target = next_word_end(&self.buffer, self.cursor);
+        if target == self.cursor {
+            return false;
+        }
+        self.buffer.drain(self.cursor..target);
+        true
+    }
+}
+
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn previous_word_start(buffer: &str, cursor: usize) -> usize {
+    let mut target = cursor;
+    let mut characters = buffer[..cursor].char_indices().rev().peekable();
+
+    while let Some(&(index, character)) = characters.peek() {
+        if is_word_character(character) {
+            break;
+        }
+        target = index;
+        characters.next();
+    }
+    while let Some(&(index, character)) = characters.peek() {
+        if !is_word_character(character) {
+            break;
+        }
+        target = index;
+        characters.next();
+    }
+
+    target
+}
+
+fn next_word_end(buffer: &str, cursor: usize) -> usize {
+    let mut target = cursor;
+    let mut characters = buffer[cursor..].char_indices().peekable();
+
+    while let Some(&(index, character)) = characters.peek() {
+        if is_word_character(character) {
+            break;
+        }
+        target = cursor + index + character.len_utf8();
+        characters.next();
+    }
+    while let Some(&(index, character)) = characters.peek() {
+        if !is_word_character(character) {
+            break;
+        }
+        target = cursor + index + character.len_utf8();
+        characters.next();
+    }
+
+    target
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,8 +288,12 @@ impl App {
                 | Action::MoveCursorRight
                 | Action::MoveCursorStart
                 | Action::MoveCursorEnd
+                | Action::MoveWordLeft
+                | Action::MoveWordRight
                 | Action::DeleteBeforeCursor
                 | Action::DeleteAtCursor
+                | Action::DeleteWordBeforeCursor
+                | Action::DeleteWordAtCursor
                 | Action::CommitEdit
                 | Action::CancelEdit
                 | Action::Quit
@@ -219,8 +308,12 @@ impl App {
             Action::MoveCursorRight => self.move_cursor_right(),
             Action::MoveCursorStart => self.move_cursor_start(),
             Action::MoveCursorEnd => self.move_cursor_end(),
+            Action::MoveWordLeft => self.move_word_left(),
+            Action::MoveWordRight => self.move_word_right(),
             Action::DeleteBeforeCursor => self.delete_before_cursor(),
             Action::DeleteAtCursor => self.delete_at_cursor(),
+            Action::DeleteWordBeforeCursor => self.delete_word_before_cursor(),
+            Action::DeleteWordAtCursor => self.delete_word_at_cursor(),
             Action::CommitEdit => self.commit_edit()?,
             Action::CancelEdit => self.cancel_edit(),
             Action::Quit => Transition::Quit,
@@ -429,6 +522,28 @@ impl App {
         }
     }
 
+    fn move_word_left(&mut self) -> Transition {
+        let Some(editor) = self.editor.as_mut() else {
+            return Transition::Unchanged;
+        };
+        if editor.move_word_left() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
+    }
+
+    fn move_word_right(&mut self) -> Transition {
+        let Some(editor) = self.editor.as_mut() else {
+            return Transition::Unchanged;
+        };
+        if editor.move_word_right() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
+    }
+
     fn delete_before_cursor(&mut self) -> Transition {
         if self.mode != Mode::Insert {
             return Transition::Unchanged;
@@ -451,6 +566,28 @@ impl App {
             return Transition::Unchanged;
         };
         if editor.delete_at_cursor() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
+    }
+
+    fn delete_word_before_cursor(&mut self) -> Transition {
+        let Some(editor) = self.editor.as_mut() else {
+            return Transition::Unchanged;
+        };
+        if editor.delete_word_before_cursor() {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
+    }
+
+    fn delete_word_at_cursor(&mut self) -> Transition {
+        let Some(editor) = self.editor.as_mut() else {
+            return Transition::Unchanged;
+        };
+        if editor.delete_word_at_cursor() {
             Transition::Transient
         } else {
             Transition::Unchanged
@@ -510,6 +647,15 @@ mod tests {
     };
 
     use super::{App, Mode, Transition};
+
+    fn app_with_editor(text: &str) -> App {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::StartAdd).unwrap();
+        for character in text.chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+        app
+    }
 
     #[test]
     fn add_editor_should_commit_trimmed_text_and_select_new_task() {
@@ -574,6 +720,73 @@ mod tests {
     }
 
     #[test]
+    fn editor_should_move_left_to_previous_unicode_word_starts_across_punctuation() {
+        let mut app = app_with_editor("café API-v2");
+
+        assert_eq!(
+            app.apply(Action::MoveWordLeft).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.editor().unwrap().cursor(), 10);
+        assert_eq!(
+            app.apply(Action::MoveWordLeft).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.editor().unwrap().cursor(), 6);
+    }
+
+    #[test]
+    fn editor_should_move_right_to_unicode_word_ends_across_punctuation() {
+        let mut app = app_with_editor("café API-v2");
+        app.apply(Action::MoveCursorStart).unwrap();
+
+        assert_eq!(
+            app.apply(Action::MoveWordRight).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.editor().unwrap().cursor(), 5);
+        assert_eq!(
+            app.apply(Action::MoveWordRight).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.editor().unwrap().cursor(), 9);
+    }
+
+    #[test]
+    fn editor_should_delete_the_previous_word_without_crossing_punctuation() {
+        let mut app = app_with_editor("ship API-v2");
+
+        assert_eq!(
+            app.apply(Action::DeleteWordBeforeCursor).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.editor().unwrap().buffer(), "ship API-");
+        assert_eq!(app.editor().unwrap().cursor(), 9);
+    }
+
+    #[test]
+    fn editor_should_delete_the_next_word_from_the_cursor() {
+        let mut app = app_with_editor("ship API-v2");
+        app.apply(Action::MoveCursorStart).unwrap();
+
+        assert_eq!(
+            app.apply(Action::DeleteWordAtCursor).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.editor().unwrap().buffer(), " API-v2");
+        assert_eq!(app.editor().unwrap().cursor(), 0);
+    }
+
+    #[test]
+    fn editor_should_delete_separator_space_with_the_previous_word() {
+        let mut app = app_with_editor("ship   ");
+
+        app.apply(Action::DeleteWordBeforeCursor).unwrap();
+
+        assert_eq!(app.editor().unwrap().buffer(), "");
+    }
+
+    #[test]
     fn blank_commit_should_remain_in_insert_mode_with_validation_message() {
         let mut app = App::new(TaskList::new(ListScope::Global));
         app.apply(Action::StartAdd).unwrap();
@@ -598,6 +811,10 @@ mod tests {
             Action::MoveCursorEnd,
             Action::DeleteBeforeCursor,
             Action::DeleteAtCursor,
+            Action::MoveWordLeft,
+            Action::MoveWordRight,
+            Action::DeleteWordBeforeCursor,
+            Action::DeleteWordAtCursor,
         ] {
             assert_eq!(app.apply(action).unwrap(), Transition::Unchanged);
         }

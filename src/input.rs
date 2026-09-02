@@ -60,6 +60,7 @@ pub(crate) struct Binding {
     pub(crate) key_label: &'static str,
     pub(crate) description: &'static str,
     pub(crate) show_in_footer: bool,
+    pub(crate) show_in_help: bool,
 }
 
 static BINDINGS: &[Binding] = &[
@@ -70,6 +71,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Ctrl-C",
         description: "quit",
         show_in_footer: false,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -78,6 +80,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "j",
         description: "move down",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -86,6 +89,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Down",
         description: "move down",
         show_in_footer: false,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -94,6 +98,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "k",
         description: "move up",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -102,6 +107,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Up",
         description: "move up",
         show_in_footer: false,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -110,6 +116,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "J",
         description: "move task down",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -118,6 +125,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "K",
         description: "move task up",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -126,6 +134,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "i",
         description: "add task",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -134,6 +143,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "e",
         description: "edit task",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -142,6 +152,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Space",
         description: "toggle complete",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -150,6 +161,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "d",
         description: "delete task",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -158,6 +170,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "u",
         description: "restore latest",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -166,6 +179,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "?",
         description: "show help",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Normal,
@@ -174,6 +188,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "q",
         description: "quit",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Insert,
@@ -182,6 +197,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Ctrl-C",
         description: "quit",
         show_in_footer: false,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Insert,
@@ -190,6 +206,25 @@ static BINDINGS: &[Binding] = &[
         key_label: "Left",
         description: "move cursor left",
         show_in_footer: true,
+        show_in_help: true,
+    },
+    Binding {
+        mode: Mode::Insert,
+        chord: KeyChord::new(KeyCode::Left, KeyModifiers::ALT),
+        action: Action::MoveWordLeft,
+        key_label: "Alt-Left",
+        description: "move one word left",
+        show_in_footer: false,
+        show_in_help: true,
+    },
+    Binding {
+        mode: Mode::Insert,
+        chord: KeyChord::characters(&['b', 'B'], KeyModifiers::ALT),
+        action: Action::MoveWordLeft,
+        key_label: "Alt-b",
+        description: "move one word left",
+        show_in_footer: false,
+        show_in_help: false,
     },
     Binding {
         mode: Mode::Insert,
@@ -198,6 +233,25 @@ static BINDINGS: &[Binding] = &[
         key_label: "Right",
         description: "move cursor right",
         show_in_footer: true,
+        show_in_help: true,
+    },
+    Binding {
+        mode: Mode::Insert,
+        chord: KeyChord::new(KeyCode::Right, KeyModifiers::ALT),
+        action: Action::MoveWordRight,
+        key_label: "Alt-Right",
+        description: "move one word right",
+        show_in_footer: false,
+        show_in_help: true,
+    },
+    Binding {
+        mode: Mode::Insert,
+        chord: KeyChord::characters(&['f', 'F'], KeyModifiers::ALT),
+        action: Action::MoveWordRight,
+        key_label: "Alt-f",
+        description: "move one word right",
+        show_in_footer: false,
+        show_in_help: false,
     },
     Binding {
         mode: Mode::Insert,
@@ -206,6 +260,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Home",
         description: "move cursor start",
         show_in_footer: false,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Insert,
@@ -214,6 +269,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "End",
         description: "move cursor end",
         show_in_footer: false,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Insert,
@@ -222,6 +278,25 @@ static BINDINGS: &[Binding] = &[
         key_label: "Backspace",
         description: "delete before cursor",
         show_in_footer: true,
+        show_in_help: true,
+    },
+    Binding {
+        mode: Mode::Insert,
+        chord: KeyChord::new(KeyCode::Backspace, KeyModifiers::ALT),
+        action: Action::DeleteWordBeforeCursor,
+        key_label: "Alt-Backspace",
+        description: "delete previous word",
+        show_in_footer: false,
+        show_in_help: true,
+    },
+    Binding {
+        mode: Mode::Insert,
+        chord: KeyChord::characters(&['w', 'W'], KeyModifiers::CONTROL),
+        action: Action::DeleteWordBeforeCursor,
+        key_label: "Ctrl-w",
+        description: "delete previous word",
+        show_in_footer: false,
+        show_in_help: false,
     },
     Binding {
         mode: Mode::Insert,
@@ -230,6 +305,16 @@ static BINDINGS: &[Binding] = &[
         key_label: "Delete",
         description: "delete at cursor",
         show_in_footer: false,
+        show_in_help: true,
+    },
+    Binding {
+        mode: Mode::Insert,
+        chord: KeyChord::new(KeyCode::Delete, KeyModifiers::ALT),
+        action: Action::DeleteWordAtCursor,
+        key_label: "Alt-Delete",
+        description: "delete next word",
+        show_in_footer: false,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Insert,
@@ -238,6 +323,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Enter",
         description: "save edit",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Insert,
@@ -246,6 +332,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Esc",
         description: "cancel edit",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Help,
@@ -254,6 +341,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Ctrl-C",
         description: "quit",
         show_in_footer: false,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Help,
@@ -262,6 +350,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "?",
         description: "close help",
         show_in_footer: true,
+        show_in_help: true,
     },
     Binding {
         mode: Mode::Help,
@@ -270,6 +359,7 @@ static BINDINGS: &[Binding] = &[
         key_label: "Esc",
         description: "close help",
         show_in_footer: true,
+        show_in_help: true,
     },
 ];
 
@@ -471,6 +561,53 @@ mod tests {
                     Mode::Insert,
                     key(code, KeyModifiers::NONE, KeyEventKind::Press)
                 ),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn word_editing_keys_should_map_native_and_meta_terminal_encodings() {
+        let cases = [
+            (KeyCode::Left, KeyModifiers::ALT, Action::MoveWordLeft),
+            (KeyCode::Char('b'), KeyModifiers::ALT, Action::MoveWordLeft),
+            (
+                KeyCode::Char('B'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+                Action::MoveWordLeft,
+            ),
+            (KeyCode::Right, KeyModifiers::ALT, Action::MoveWordRight),
+            (KeyCode::Char('f'), KeyModifiers::ALT, Action::MoveWordRight),
+            (
+                KeyCode::Char('F'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+                Action::MoveWordRight,
+            ),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::ALT,
+                Action::DeleteWordBeforeCursor,
+            ),
+            (
+                KeyCode::Delete,
+                KeyModifiers::ALT,
+                Action::DeleteWordAtCursor,
+            ),
+            (
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+                Action::DeleteWordBeforeCursor,
+            ),
+            (
+                KeyCode::Char('W'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                Action::DeleteWordBeforeCursor,
+            ),
+        ];
+
+        for (code, modifiers, expected) in cases {
+            assert_eq!(
+                map_key(Mode::Insert, key(code, modifiers, KeyEventKind::Press)),
                 Some(expected)
             );
         }

@@ -206,7 +206,7 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
 }
 
 fn render_help(frame: &mut Frame<'_>) {
-    let area = centered_rect(frame.area(), 76, 19);
+    let area = centered_rect(frame.area(), 76, 23);
     let block = Block::bordered().title("Keyboard help");
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -268,7 +268,7 @@ fn help_lines(mode: Mode) -> Vec<Line<'static>> {
     )];
     lines.extend(
         bindings()
-            .filter(|binding| binding.mode == mode)
+            .filter(|binding| binding.mode == mode && binding.show_in_help)
             .map(|binding| Line::from(format!("{} {}", binding.key_label, binding.description))),
     );
     lines
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn help_mode_should_render_every_binding_without_truncating_descriptions() {
+    fn help_mode_should_render_every_documented_binding_without_truncating_descriptions() {
         let mut app = App::new(TaskList::new(ListScope::Global));
         app.apply(Action::OpenHelp).unwrap();
         let buffer = render_app(&app, 80, 24);
@@ -517,11 +517,15 @@ mod tests {
             "? show help",
             "q quit",
             "Left move cursor left",
+            "Alt-Left move one word left",
             "Right move cursor right",
+            "Alt-Right move one word right",
             "Home move cursor start",
             "End move cursor end",
             "Backspace delete before cursor",
+            "Alt-Backspace delete previous word",
             "Delete delete at cursor",
+            "Alt-Delete delete next word",
             "Enter save edit",
             "Esc cancel edit",
             "? close help",
