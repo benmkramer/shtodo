@@ -53,6 +53,11 @@ fn editor_window(buffer: &str, cursor: usize, width: u16) -> (&str, u16) {
 }
 
 pub(crate) fn render(frame: &mut Frame<'_>, app: &App) {
+    if app.celebration().is_some() {
+        render_celebration(frame);
+        return;
+    }
+
     if frame.area().width < MIN_WIDTH || frame.area().height < MIN_HEIGHT {
         render_resize_message(frame);
         return;
@@ -71,6 +76,57 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App) {
     if app.mode() == Mode::Help {
         render_help(frame);
     }
+}
+
+fn render_celebration(frame: &mut Frame<'_>) {
+    const CARD_WIDTH: u16 = 36;
+    const CARD_HEIGHT: u16 = 5;
+    const EMOJI_WIDTH: u16 = 2;
+    const MESSAGE: &str = "congrats, you got shit done";
+
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+    if area.width < CARD_WIDTH || area.height < CARD_HEIGHT {
+        render_resize_message(frame);
+        return;
+    }
+
+    let card = Rect::new(
+        area.x + (area.width - CARD_WIDTH) / 2,
+        area.y + (area.height - CARD_HEIGHT) / 2,
+        CARD_WIDTH,
+        CARD_HEIGHT,
+    );
+    let text_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
+
+    for x in (card.x..card.right()).step_by(usize::from(EMOJI_WIDTH)) {
+        frame.render_widget(Paragraph::new("💩"), Rect::new(x, card.y, EMOJI_WIDTH, 1));
+        frame.render_widget(
+            Paragraph::new("💩"),
+            Rect::new(x, card.bottom() - 1, EMOJI_WIDTH, 1),
+        );
+    }
+    for y in card.y + 1..card.bottom() - 1 {
+        frame.render_widget(Paragraph::new("💩"), Rect::new(card.x, y, EMOJI_WIDTH, 1));
+        frame.render_widget(
+            Paragraph::new("💩"),
+            Rect::new(card.right() - EMOJI_WIDTH, y, EMOJI_WIDTH, 1),
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(MESSAGE)
+            .style(text_style)
+            .alignment(Alignment::Center),
+        Rect::new(
+            card.x + EMOJI_WIDTH,
+            card.y + 2,
+            card.width - EMOJI_WIDTH * 2,
+            1,
+        ),
+    );
 }
 
 fn render_resize_message(frame: &mut Frame<'_>) {
@@ -398,6 +454,43 @@ mod tests {
                 cell.symbol() == "f" && cell.modifier.contains(Modifier::CROSSED_OUT)
             })
         );
+    }
+
+    #[test]
+    fn completing_the_final_open_task_should_render_a_centered_enclosed_card() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("last task").unwrap();
+        let mut app = App::new(list);
+
+        app.apply(Action::ToggleComplete).unwrap();
+        let buffer = render_app(&app, 80, 12);
+
+        for x in (22..58).step_by(2) {
+            assert_eq!(buffer[(x, 3)].symbol(), "💩", "missing top edge at {x}");
+            assert_eq!(buffer[(x, 7)].symbol(), "💩", "missing bottom edge at {x}");
+        }
+        for y in 4..7 {
+            assert_eq!(buffer[(22, y)].symbol(), "💩", "missing left edge at {y}");
+            assert_eq!(buffer[(56, y)].symbol(), "💩", "missing right edge at {y}");
+        }
+        assert!(
+            buffer_row(&buffer, 80, 5).contains("congrats, you got shit done"),
+            "missing celebration message"
+        );
+    }
+
+    #[test]
+    fn advancing_the_celebration_should_keep_the_card_stable() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("last task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::ToggleComplete).unwrap();
+        let first_frame = render_app(&app, 40, 8);
+
+        app.advance_celebration();
+        let second_frame = render_app(&app, 40, 8);
+
+        assert_eq!(second_frame, first_frame);
     }
 
     #[test]
