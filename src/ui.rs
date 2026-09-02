@@ -193,14 +193,14 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
     let visible_tasks = app.tasks().visible_tasks().collect::<Vec<_>>();
     let editor = app.editor();
     if visible_tasks.is_empty() && editor.is_none() {
-        frame.render_widget(
-            Paragraph::new(format!(
-                "No tasks yet\nPress {} to add · {} for help",
-                binding_label(keymap, Mode::Normal, BindingId::StartAdd).unwrap_or("i"),
-                binding_label(keymap, Mode::Normal, BindingId::OpenHelp).unwrap_or("?"),
-            )),
-            area,
-        );
+        let mut text = "No tasks yet".to_owned();
+        if let (Some(add), Some(help)) = (
+            binding_label(keymap, Mode::Normal, BindingId::StartAdd),
+            binding_label(keymap, Mode::Normal, BindingId::OpenHelp),
+        ) {
+            text.push_str(&format!("\nPress {add} to add · {help} for help"));
+        }
+        frame.render_widget(Paragraph::new(text), area);
         return;
     }
 
@@ -267,7 +267,7 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
 }
 
 fn render_help(frame: &mut Frame<'_>, keymap: &Keymap) {
-    let area = centered_rect(frame.area(), 76, 23);
+    let area = frame.area();
     let block = Block::bordered().title("Keyboard help");
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -277,49 +277,81 @@ fn render_help(frame: &mut Frame<'_>, keymap: &Keymap) {
     let mut insert_and_help = help_lines(keymap, Mode::Insert);
     insert_and_help.push(Line::default());
     insert_and_help.extend(help_lines(keymap, Mode::Help));
-    let normal_width = line_width(&normal);
-    let insert_and_help_width = line_width(&insert_and_help);
-    let fits_two_columns = normal_width
-        .saturating_add(1)
-        .saturating_add(insert_and_help_width)
-        <= inner.width
-        && normal.len() <= usize::from(inner.height)
-        && insert_and_help.len() <= usize::from(inner.height);
-
-    if fits_two_columns {
-        let columns = Layout::horizontal([
-            Constraint::Min(1),
-            Constraint::Length(insert_and_help_width),
-        ])
-        .split(inner);
-        frame.render_widget(Paragraph::new(normal), columns[0]);
-        frame.render_widget(Paragraph::new(insert_and_help), columns[1]);
+    if let Some(normal_width) = help_column_width(&normal, &insert_and_help, inner) {
+        let columns =
+            Layout::horizontal([Constraint::Length(normal_width), Constraint::Min(1)]).split(inner);
+        frame.render_widget(
+            Paragraph::new(wrap_help_lines(&normal, columns[0].width)),
+            columns[0],
+        );
+        frame.render_widget(
+            Paragraph::new(wrap_help_lines(&insert_and_help, columns[1].width)),
+            columns[1],
+        );
     } else {
         let mut all_modes = normal;
         all_modes.push(Line::default());
         all_modes.extend(insert_and_help);
-        frame.render_widget(Paragraph::new(all_modes), inner);
+        frame.render_widget(
+            Paragraph::new(wrap_help_lines(&all_modes, inner.width)),
+            inner,
+        );
     }
 }
 
-fn line_width(lines: &[Line<'_>]) -> u16 {
-    lines
-        .iter()
-        .map(Line::width)
-        .max()
-        .unwrap_or(0)
-        .min(usize::from(u16::MAX)) as u16
+fn help_column_width(normal: &[Line<'_>], other: &[Line<'_>], area: Rect) -> Option<u16> {
+    let mut best = None::<(usize, usize, u16, u16)>;
+    for normal_width in 1..area.width {
+        let other_width = area.width - normal_width;
+        let normal_height = wrap_help_lines(normal, normal_width).len();
+        let other_height = wrap_help_lines(other, other_width).len();
+        if normal_height > usize::from(area.height) || other_height > usize::from(area.height) {
+            continue;
+        }
+        let score = (
+            normal_height.max(other_height),
+            normal_height + other_height,
+            normal_width.abs_diff(other_width),
+            normal_width,
+        );
+        if best.is_none_or(|current| score < current) {
+            best = Some(score);
+        }
+    }
+    best.map(|(_, _, _, width)| width)
 }
 
-fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
-    let width = max_width.min(area.width.saturating_sub(2));
-    let height = max_height.min(area.height.saturating_sub(2));
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
+fn wrap_help_lines(lines: &[Line<'_>], width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+    for line in lines {
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        if text.is_empty() {
+            wrapped.push(Line::default());
+            continue;
+        }
+        let mut segment = String::new();
+        let mut segment_width = 0_usize;
+        for character in text.chars() {
+            let character_width = Line::from(character.to_string()).width();
+            if !segment.is_empty()
+                && segment_width.saturating_add(character_width) > usize::from(width)
+            {
+                wrapped.push(Line::styled(segment, line.style));
+                segment = character.to_string();
+                segment_width = character_width;
+            } else {
+                segment.push(character);
+                segment_width = segment_width.saturating_add(character_width);
+            }
+        }
+        wrapped.push(Line::styled(segment, line.style));
+    }
+    wrapped
 }
 
 fn help_lines(keymap: &Keymap, mode: Mode) -> Vec<Line<'static>> {
@@ -500,6 +532,24 @@ mod tests {
         app.apply(Action::OpenHelp).unwrap();
         let help = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
         assert!(help.contains("h / ? show help"));
+    }
+
+    #[test]
+    fn help_should_wrap_long_alias_lists_without_hiding_aliases_or_emergency_quit() {
+        let aliases = [
+            "α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "λ", "μ", "ν", "ξ", "ο", "π", "ρ", "σ",
+        ];
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::OpenHelp, &aliases)]).unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+
+        for alias in aliases {
+            assert!(text.contains(alias), "missing active Help alias: {alias}");
+        }
+        assert_eq!(text.matches("Ctrl-C").count(), 3);
     }
 
     #[test]

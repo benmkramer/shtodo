@@ -262,7 +262,6 @@ fn parse_actions(
         };
 
         let mut values = Vec::with_capacity(keys.len());
-        let mut valid = true;
         for (index, value) in keys.iter().enumerate() {
             let member_order = take_order(next_order);
             let Some(value) = value.as_str() else {
@@ -271,19 +270,16 @@ fn parse_actions(
                     format!("{path}[{index}]"),
                     "expected a string",
                 ));
-                valid = false;
                 continue;
             };
             values.push(value.to_owned());
         }
-        if valid || !values.is_empty() {
-            overrides.push(BindingOverride {
-                order,
-                path,
-                id,
-                keys: values,
-            });
-        }
+        overrides.push(BindingOverride {
+            order,
+            path,
+            id,
+            keys: values,
+        });
     }
 }
 
@@ -517,6 +513,29 @@ move_cursor_left = ["x"]
                 "keybindings.normal.move_down: Ctrl-C is reserved and cannot be configured",
                 "keybindings.normal.move_down[1]: expected a string",
             ]
+        );
+    }
+
+    #[test]
+    fn malformed_override_should_not_leave_its_default_active_for_conflicts() {
+        let home = configured_home(
+            r#"
+[keybindings.normal]
+move_down = ["dn"]
+add_task = ["j"]
+"#,
+        );
+
+        let diagnostics = match load(home.path()).unwrap_err() {
+            ConfigError::Invalid { diagnostics, .. } => diagnostics,
+            error => panic!("expected invalid configuration, got {error}"),
+        };
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].path, "keybindings.normal.move_down");
+        assert_eq!(
+            diagnostics[0].message,
+            "invalid key \"dn\": unknown key \"dn\""
         );
     }
 

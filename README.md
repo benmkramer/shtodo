@@ -142,7 +142,12 @@ shown in Help. Accepted named keys are `up`, `down`, `left`, `right`, `home`,
 `end`, `page-up`, `page-down`, `tab`, `backtab`, `enter`, `esc`, `space`,
 `backspace`, `delete`, and `insert`. Ctrl and Alt modifiers use forms such as
 `ctrl-n`, `alt-left`, and `ctrl-alt-x`; shifted printable characters use the
-resulting character such as `J`.
+resulting character such as `J`. Named keys and modifier names are ASCII
+case-insensitive, while unmodified printable characters remain case-sensitive.
+Modified ASCII letters normalize to lowercase for matching and conflict
+detection. Help and diagnostics show canonical labels generated from that
+normalized form, such as `Down`, `Ctrl-n`, and `Alt-Left`, regardless of the
+casing used in the config file.
 
 `Ctrl-C` is fixed in all modes and cannot be configured. Invalid config stops
 interactive startup and points to `shtodo doctor`. `shtodo doctor` checks the

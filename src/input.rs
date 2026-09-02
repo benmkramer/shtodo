@@ -588,47 +588,49 @@ impl Keymap {
         let mut sources = vec![None::<(usize, String)>; DEFINITIONS.len()];
         let mut issues = Vec::new();
         for override_ in ordered {
+            let index = definition_index(override_.id);
             if override_.keys.is_empty() {
                 issues.push(issue(override_, "must contain at least one key"));
+                keys[index].clear();
+                sources[index] = Some((override_.order, override_.path.clone()));
                 continue;
             }
             let mut parsed = Vec::new();
+            let mut seen_in_override = Vec::new();
             for key in &override_.keys {
                 match KeyChord::parse(key) {
-                    Ok(chord)
-                        if chord == KeyChord::new(KeyCode::Char('c'), KeyModifiers::CONTROL) =>
-                    {
-                        issues.push(issue(
-                            override_,
-                            "Ctrl-C is reserved and cannot be configured",
-                        ))
+                    Ok(chord) => {
+                        let duplicate = seen_in_override.contains(&chord);
+                        if duplicate {
+                            issues.push(issue(
+                                override_,
+                                format!("duplicate key \"{}\"", chord.label()),
+                            ));
+                        } else {
+                            seen_in_override.push(chord);
+                        }
+                        if chord == KeyChord::new(KeyCode::Char('c'), KeyModifiers::CONTROL) {
+                            issues.push(issue(
+                                override_,
+                                "Ctrl-C is reserved and cannot be configured",
+                            ));
+                        } else if !duplicate {
+                            parsed.push(chord);
+                        }
                     }
-                    Ok(chord) if parsed.contains(&chord) => issues.push(issue(
-                        override_,
-                        format!("duplicate key \"{}\"", chord.label()),
-                    )),
-                    Ok(chord) => parsed.push(chord),
                     Err(error) => {
                         issues.push(issue(override_, format!("invalid key {key:?}: {error}")))
                     }
                 }
             }
-            if !parsed.is_empty() {
-                let index = definition_index(override_.id);
-                keys[index] = parsed;
-                sources[index] = Some((override_.order, override_.path.clone()));
-            }
+            keys[index] = parsed;
+            sources[index] = Some((override_.order, override_.path.clone()));
         }
-        let bindings = DEFINITIONS
-            .iter()
-            .enumerate()
-            .filter_map(|(index, definition)| resolved(*definition, keys[index].clone()))
-            .collect::<Vec<_>>();
         let mut seen = Vec::<(KeyChord, usize)>::new();
-        for (index, binding) in bindings.iter().enumerate() {
-            for chord in &binding.chords {
+        for (index, definition) in DEFINITIONS.iter().enumerate() {
+            for chord in keys[index].iter().chain(definition.fixed) {
                 if let Some((_, previous)) = seen.iter().find(|(seen, previous)| {
-                    seen == chord && bindings[*previous].mode == binding.mode
+                    seen == chord && DEFINITIONS[*previous].id.mode() == definition.id.mode()
                 }) {
                     let (report, other) = match (&sources[*previous], &sources[index]) {
                         (Some((old, _)), Some((new, _))) if old > new => (*previous, index),
@@ -646,7 +648,7 @@ impl Keymap {
                         message: format!(
                             "\"{}\" conflicts with {}",
                             chord.label(),
-                            bindings[other].id.config_name().unwrap_or("quit")
+                            DEFINITIONS[other].id.config_name().unwrap_or("quit")
                         ),
                     });
                 } else {
@@ -656,6 +658,11 @@ impl Keymap {
         }
         issues.sort_by_key(|issue| issue.order);
         if issues.is_empty() {
+            let bindings = DEFINITIONS
+                .iter()
+                .enumerate()
+                .filter_map(|(index, definition)| resolved(*definition, keys[index].clone()))
+                .collect::<Vec<_>>();
             Ok(Self { bindings })
         } else {
             Err(issues)
@@ -847,6 +854,107 @@ mod tests {
                 "\"d\" conflicts with delete_task"
             ]
         );
+    }
+
+    #[test]
+    fn invalid_override_should_replace_defaults_during_conflict_detection() {
+        let issues = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.normal.move_down".into(),
+                id: BindingId::MoveDown,
+                keys: vec!["dn".into()],
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.add_task".into(),
+                id: BindingId::StartAdd,
+                keys: vec!["j".into()],
+            },
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            issues
+                .into_iter()
+                .map(|issue| issue.message)
+                .collect::<Vec<_>>(),
+            vec!["invalid key \"dn\": unknown key \"dn\""]
+        );
+    }
+
+    #[test]
+    fn reserved_keys_should_still_participate_in_duplicate_detection() {
+        let issues = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.quit".into(),
+            id: BindingId::NormalQuit,
+            keys: vec!["ctrl-c".into(), "CTRL-C".into()],
+        }])
+        .unwrap_err();
+
+        assert_eq!(
+            issues
+                .into_iter()
+                .map(|issue| issue.message)
+                .collect::<Vec<_>>(),
+            vec![
+                "Ctrl-C is reserved and cannot be configured",
+                "duplicate key \"Ctrl-C\"",
+                "Ctrl-C is reserved and cannot be configured",
+            ]
+        );
+    }
+
+    #[test]
+    fn printable_case_is_distinct_but_modified_ascii_case_conflicts() {
+        let keymap = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.normal.move_down".into(),
+                id: BindingId::MoveDown,
+                keys: vec!["x".into()],
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.move_up".into(),
+                id: BindingId::MoveUp,
+                keys: vec!["X".into()],
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('x'), KeyModifiers::NONE)
+            ),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('X'), KeyModifiers::SHIFT)
+            ),
+            Some(Action::MoveUp)
+        );
+
+        let issues = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.normal.move_down".into(),
+                id: BindingId::MoveDown,
+                keys: vec!["ctrl-x".into()],
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.move_up".into(),
+                id: BindingId::MoveUp,
+                keys: vec!["CTRL-X".into()],
+            },
+        ])
+        .unwrap_err();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].message, "\"Ctrl-x\" conflicts with move_down");
     }
 
     #[test]
