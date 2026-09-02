@@ -6,7 +6,7 @@ use crossterm::event::{self, Event, KeyEventKind};
 use crate::{
     action::Action,
     app::{App, Mode, Transition},
-    input,
+    input::Keymap,
     storage::Store,
     ui,
 };
@@ -47,9 +47,9 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn action_for_event(mode: Mode, event: Event) -> Option<Action> {
+fn action_for_event(keymap: &Keymap, mode: Mode, event: Event) -> Option<Action> {
     match event {
-        Event::Key(key) => input::map_key(mode, key),
+        Event::Key(key) => keymap.map_key(mode, key),
         _ => None,
     }
 }
@@ -61,10 +61,10 @@ enum CelebrationEvent {
     Wait,
 }
 
-fn celebration_event(event: Event) -> CelebrationEvent {
+fn celebration_event(keymap: &Keymap, event: Event) -> CelebrationEvent {
     match event {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-            if input::map_key(Mode::Normal, key) == Some(Action::Quit) {
+            if keymap.map_key(Mode::Normal, key) == Some(Action::Quit) {
                 CelebrationEvent::Quit
             } else {
                 CelebrationEvent::Dismiss
@@ -74,8 +74,8 @@ fn celebration_event(event: Event) -> CelebrationEvent {
     }
 }
 
-fn handle_celebration_event(app: &mut App, event: Event) -> bool {
-    match celebration_event(event) {
+fn handle_celebration_event(app: &mut App, keymap: &Keymap, event: Event) -> bool {
+    match celebration_event(keymap, event) {
         CelebrationEvent::Dismiss => {
             app.dismiss_celebration();
             false
@@ -88,19 +88,19 @@ fn handle_celebration_event(app: &mut App, event: Event) -> bool {
     }
 }
 
-pub(crate) fn run(mut app: App, store: &Store) -> Result<()> {
+pub(crate) fn run(mut app: App, store: &Store, keymap: &Keymap) -> Result<()> {
     let mut terminal = TerminalGuard::init().wrap_err("could not initialize terminal")?;
 
     loop {
         terminal
             .terminal
-            .draw(|frame| ui::render(frame, &app))
+            .draw(|frame| ui::render(frame, &app, keymap))
             .wrap_err("could not draw terminal")?;
 
         if app.celebration().is_some() {
             if event::poll(CELEBRATION_FRAME_INTERVAL).wrap_err("could not poll terminal event")? {
                 let event = event::read().wrap_err("could not read terminal event")?;
-                if handle_celebration_event(&mut app, event) {
+                if handle_celebration_event(&mut app, keymap, event) {
                     break;
                 }
             } else {
@@ -110,7 +110,7 @@ pub(crate) fn run(mut app: App, store: &Store) -> Result<()> {
         }
 
         let event = event::read().wrap_err("could not read terminal event")?;
-        let Some(action) = action_for_event(app.mode(), event) else {
+        let Some(action) = action_for_event(keymap, app.mode(), event) else {
             continue;
         };
 
@@ -138,9 +138,14 @@ mod tests {
 
     #[test]
     fn action_for_event_should_ignore_resize_and_key_release() {
-        assert_eq!(action_for_event(Mode::Normal, Event::Resize(80, 24)), None);
+        let keymap = Keymap::defaults();
+        assert_eq!(
+            action_for_event(&keymap, Mode::Normal, Event::Resize(80, 24)),
+            None
+        );
         assert_eq!(
             action_for_event(
+                &keymap,
                 Mode::Normal,
                 Event::Key(KeyEvent::new_with_kind(
                     KeyCode::Char('q'),
@@ -152,6 +157,7 @@ mod tests {
         );
         assert_eq!(
             action_for_event(
+                &keymap,
                 Mode::Normal,
                 Event::Mouse(MouseEvent {
                     kind: MouseEventKind::Moved,
@@ -166,42 +172,49 @@ mod tests {
 
     #[test]
     fn celebration_event_should_dismiss_for_an_ordinary_key() {
+        let keymap = Keymap::defaults();
         let event = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
 
-        assert_eq!(celebration_event(event), CelebrationEvent::Dismiss);
+        assert_eq!(celebration_event(&keymap, event), CelebrationEvent::Dismiss);
     }
 
     #[test]
     fn celebration_event_should_quit_for_normal_quit_keys() {
+        let keymap = Keymap::defaults();
         for key in [
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         ] {
-            assert_eq!(celebration_event(Event::Key(key)), CelebrationEvent::Quit);
+            assert_eq!(
+                celebration_event(&keymap, Event::Key(key)),
+                CelebrationEvent::Quit
+            );
         }
     }
 
     #[test]
     fn handling_an_ordinary_celebration_key_should_dismiss_the_animation() {
+        let keymap = Keymap::defaults();
         let mut list = crate::task::TaskList::new(crate::task::ListScope::Global);
         list.add("task").unwrap();
         let mut app = App::new(list);
         app.apply(Action::ToggleComplete).unwrap();
         let event = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
 
-        handle_celebration_event(&mut app, event);
+        handle_celebration_event(&mut app, &keymap, event);
 
         assert_eq!(app.celebration(), None);
     }
 
     #[test]
     fn handling_a_non_key_event_should_advance_the_animation() {
+        let keymap = Keymap::defaults();
         let mut list = crate::task::TaskList::new(crate::task::ListScope::Global);
         list.add("task").unwrap();
         let mut app = App::new(list);
         app.apply(Action::ToggleComplete).unwrap();
 
-        handle_celebration_event(&mut app, Event::Resize(100, 30));
+        handle_celebration_event(&mut app, &keymap, Event::Resize(100, 30));
 
         assert_eq!(app.celebration().unwrap().frame(), 1);
     }

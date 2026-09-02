@@ -42,7 +42,8 @@ pub fn run() -> Result<()> {
             let scope = storage::scope_from_environment(choice)?;
             let store = storage::Store::open(&home, scope)?;
             let app = app::App::new(store.load()?);
-            terminal::run(app, &store)?;
+            let keymap = input::Keymap::defaults();
+            terminal::run(app, &store, &keymap)?;
         }
     }
     Ok(())

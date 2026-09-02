@@ -10,7 +10,7 @@ use ratatui::{
 
 use crate::{
     app::{App, EditKind, Mode},
-    input::{Binding, bindings, bindings_for},
+    input::{BindingId, Keymap, ResolvedBinding},
     task::{ListScope, Task},
 };
 
@@ -52,7 +52,7 @@ fn editor_window(buffer: &str, cursor: usize, width: u16) -> (&str, u16) {
     )
 }
 
-pub(crate) fn render(frame: &mut Frame<'_>, app: &App) {
+pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
     if app.celebration().is_some() {
         render_celebration(frame);
         return;
@@ -71,10 +71,10 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App) {
     .split(frame.area());
 
     render_header(frame, regions[0], app);
-    render_content(frame, regions[1], app);
-    render_footer(frame, regions[2], app);
+    render_content(frame, regions[1], app, keymap);
+    render_footer(frame, regions[2], app, keymap);
     if app.mode() == Mode::Help {
-        render_help(frame);
+        render_help(frame, keymap);
     }
 }
 
@@ -189,12 +189,16 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
     );
 }
 
-fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) {
+fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, keymap: &Keymap) {
     let visible_tasks = app.tasks().visible_tasks().collect::<Vec<_>>();
     let editor = app.editor();
     if visible_tasks.is_empty() && editor.is_none() {
         frame.render_widget(
-            Paragraph::new("No tasks yet\nPress i to add · ? for help"),
+            Paragraph::new(format!(
+                "No tasks yet\nPress {} to add · {} for help",
+                binding_label(keymap, Mode::Normal, BindingId::StartAdd),
+                binding_label(keymap, Mode::Normal, BindingId::OpenHelp),
+            )),
             area,
         );
         return;
@@ -241,11 +245,12 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App)
     }
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) {
-    let mut bindings = bindings_for(app.mode())
-        .filter(|binding| binding.show_in_footer)
+fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, keymap: &Keymap) {
+    let mut bindings = keymap
+        .bindings_for(app.mode())
+        .filter(|binding| binding.footer_priority().is_some())
         .collect::<Vec<_>>();
-    bindings.sort_by_key(|binding| footer_priority(app.mode(), binding.key_label));
+    bindings.sort_by_key(|binding| binding.footer_priority());
     let hints = bindings
         .into_iter()
         .map(footer_binding)
@@ -261,17 +266,17 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
     frame.render_widget(Paragraph::new(text), area);
 }
 
-fn render_help(frame: &mut Frame<'_>) {
+fn render_help(frame: &mut Frame<'_>, keymap: &Keymap) {
     let area = centered_rect(frame.area(), 76, 23);
     let block = Block::bordered().title("Keyboard help");
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let normal = help_lines(Mode::Normal);
-    let mut insert_and_help = help_lines(Mode::Insert);
+    let normal = help_lines(keymap, Mode::Normal);
+    let mut insert_and_help = help_lines(keymap, Mode::Insert);
     insert_and_help.push(Line::default());
-    insert_and_help.extend(help_lines(Mode::Help));
+    insert_and_help.extend(help_lines(keymap, Mode::Help));
     let normal_width = line_width(&normal);
     let insert_and_help_width = line_width(&insert_and_help);
     let fits_two_columns = normal_width
@@ -317,16 +322,18 @@ fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
     )
 }
 
-fn help_lines(mode: Mode) -> Vec<Line<'static>> {
+fn help_lines(keymap: &Keymap, mode: Mode) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(
         mode_name(mode),
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    lines.extend(
-        bindings()
-            .filter(|binding| binding.mode == mode && binding.show_in_help)
-            .map(|binding| Line::from(format!("{} {}", binding.key_label, binding.description))),
-    );
+    lines.extend(keymap.bindings_for(mode).map(|binding| {
+        Line::from(format!(
+            "{} {}",
+            binding.labels().collect::<Vec<_>>().join(" / "),
+            binding.description()
+        ))
+    }));
     lines
 }
 
@@ -369,20 +376,20 @@ fn editor_item(text: &str) -> ListItem<'static> {
     ]))
 }
 
-fn footer_binding(binding: &Binding) -> String {
-    let description = match binding.description.strip_prefix("show ") {
-        Some(description) => description,
-        None => binding.description,
-    };
-    format!("{} {description}", binding.key_label)
+fn binding_label(keymap: &Keymap, mode: Mode, id: BindingId) -> &str {
+    keymap
+        .bindings_for(mode)
+        .find(|binding| binding.id() == id)
+        .expect("validated keymaps include every configured binding")
+        .preferred_label()
 }
 
-fn footer_priority(mode: Mode, key_label: &str) -> u8 {
-    match (mode, key_label) {
-        (Mode::Normal, "i") | (Mode::Insert, "Enter") | (Mode::Help, "?") => 0,
-        (Mode::Normal, "?") | (Mode::Insert, "Esc") | (Mode::Help, "Esc") => 1,
-        _ => 2,
-    }
+fn footer_binding(binding: &ResolvedBinding) -> String {
+    let description = match binding.description().strip_prefix("show ") {
+        Some(description) => description,
+        None => binding.description(),
+    };
+    format!("{} {description}", binding.preferred_label())
 }
 
 fn mode_label(mode: Mode) -> &'static str {
@@ -406,14 +413,37 @@ mod tests {
     use crate::{
         action::Action,
         app::App,
+        input::{BindingId, BindingOverride, Keymap},
         task::{ListScope, TaskList},
     };
 
     fn render_app(app: &App, width: u16, height: u16) -> Buffer {
+        let keymap = Keymap::defaults();
+        render_app_with_keymap(app, &keymap, width, height)
+    }
+
+    fn render_app_with_keymap(app: &App, keymap: &Keymap, width: u16, height: u16) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.draw(|frame| render(frame, app, keymap)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    fn override_for(id: BindingId, keys: &[&str]) -> BindingOverride {
+        BindingOverride {
+            order: 0,
+            path: format!(
+                "keybindings.{}.{}",
+                match id.mode() {
+                    crate::app::Mode::Normal => "normal",
+                    crate::app::Mode::Insert => "insert",
+                    crate::app::Mode::Help => "help",
+                },
+                id.config_name().unwrap()
+            ),
+            id,
+            keys: keys.iter().map(|key| (*key).into()).collect(),
+        }
     }
 
     fn buffer_text(buffer: &Buffer) -> String {
@@ -437,6 +467,41 @@ mod tests {
         assert!(text.contains("i add"));
         assert!(text.contains("? help"));
         assert!(text.contains("NORMAL"));
+    }
+
+    #[test]
+    fn custom_keymap_should_drive_footer_help_and_empty_state() {
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::StartAdd, &["a"]),
+            override_for(BindingId::OpenHelp, &["h", "?"]),
+        ])
+        .unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+
+        let normal = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 12));
+        assert!(normal.contains("Press a to add · h for help"));
+        assert!(normal.contains("a add task"));
+        assert!(normal.contains("h help"));
+        assert!(!normal.contains("i add task"));
+
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+        assert!(help.contains("h / ? show help"));
+    }
+
+    #[test]
+    fn custom_footer_should_prioritize_actions_instead_of_literal_keys() {
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::StartAdd, &["z"]),
+            override_for(BindingId::OpenHelp, &["h"]),
+        ])
+        .unwrap();
+        let app = App::new(TaskList::new(ListScope::Global));
+        let buffer = render_app_with_keymap(&app, &keymap, 40, 8);
+        let footer = buffer_row(&buffer, 40, 7);
+
+        assert!(footer.contains("z add task"));
+        assert!(footer.contains("h help"));
     }
 
     #[test]
@@ -539,8 +604,9 @@ mod tests {
         }
         let backend = TestBackend::new(50, 10);
         let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = Keymap::defaults();
 
-        terminal.draw(|frame| render(frame, &app)).unwrap();
+        terminal.draw(|frame| render(frame, &app, &keymap)).unwrap();
 
         terminal.backend_mut().assert_cursor_position((12, 1));
         let text = buffer_text(terminal.backend().buffer());
@@ -556,8 +622,9 @@ mod tests {
         app.apply(Action::StartEdit).unwrap();
         let backend = TestBackend::new(50, 10);
         let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = Keymap::defaults();
 
-        terminal.draw(|frame| render(frame, &app)).unwrap();
+        terminal.draw(|frame| render(frame, &app, &keymap)).unwrap();
 
         assert_eq!(terminal.backend().buffer()[(4, 1)].symbol(), "d");
         assert_eq!(terminal.backend().buffer()[(8, 1)].symbol(), "t");
@@ -565,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn help_mode_should_render_bindings_from_table() {
+    fn help_mode_should_render_bindings_from_keymap() {
         let mut app = App::new(TaskList::new(ListScope::Global));
         app.apply(Action::OpenHelp).unwrap();
         let text = buffer_text(&render_app(&app, 80, 24));
@@ -595,11 +662,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let expected_rows = [
-            "Ctrl-C quit",
-            "j move down",
-            "Down move down",
-            "k move up",
-            "Up move up",
+            "Normal",
+            "j / Down move down",
+            "k / Up move up",
             "J move task down",
             "K move task up",
             "i add task",
@@ -608,21 +673,23 @@ mod tests {
             "d delete task",
             "u restore latest",
             "? show help",
-            "q quit",
+            "q / Ctrl-C quit",
+            "Insert",
             "Left move cursor left",
-            "Alt-Left move one word left",
             "Right move cursor right",
-            "Alt-Right move one word right",
             "Home move cursor start",
             "End move cursor end",
+            "Alt-Left / Alt-b move one word left",
+            "Alt-Right / Alt-f move one word right",
             "Backspace delete before cursor",
-            "Alt-Backspace delete previous word",
             "Delete delete at cursor",
+            "Alt-Backspace / Ctrl-w delete previous word",
             "Alt-Delete delete next word",
             "Enter save edit",
             "Esc cancel edit",
-            "? close help",
-            "Esc close help",
+            "Ctrl-C quit",
+            "Help",
+            "? / Esc close help",
         ];
 
         for expected in expected_rows {

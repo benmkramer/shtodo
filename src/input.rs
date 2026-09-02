@@ -1,395 +1,713 @@
+use std::fmt;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::{action::Action, app::Mode};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum KeyCodePattern {
-    Exact(KeyCode),
-    Characters(&'static [char]),
+pub(crate) enum BindingId {
+    MoveDown,
+    MoveUp,
+    MoveTaskDown,
+    MoveTaskUp,
+    StartAdd,
+    StartEdit,
+    ToggleComplete,
+    Delete,
+    RestoreLatest,
+    OpenHelp,
+    NormalQuit,
+    MoveCursorLeft,
+    MoveCursorRight,
+    MoveCursorStart,
+    MoveCursorEnd,
+    MoveWordLeft,
+    MoveWordRight,
+    DeleteBeforeCursor,
+    DeleteAtCursor,
+    DeleteWordBeforeCursor,
+    DeleteWordAtCursor,
+    CommitEdit,
+    CancelEdit,
+    CloseHelp,
+    InsertEmergencyQuit,
+    HelpEmergencyQuit,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct KeyChord {
-    code: KeyCodePattern,
-    modifiers: KeyModifiers,
-}
+impl BindingId {
+    pub(crate) fn from_config(mode: Mode, name: &str) -> Option<Self> {
+        Some(match (mode, name) {
+            (Mode::Normal, "move_down") => Self::MoveDown,
+            (Mode::Normal, "move_up") => Self::MoveUp,
+            (Mode::Normal, "move_task_down") => Self::MoveTaskDown,
+            (Mode::Normal, "move_task_up") => Self::MoveTaskUp,
+            (Mode::Normal, "add_task") => Self::StartAdd,
+            (Mode::Normal, "edit_task") => Self::StartEdit,
+            (Mode::Normal, "toggle_complete") => Self::ToggleComplete,
+            (Mode::Normal, "delete_task") => Self::Delete,
+            (Mode::Normal, "restore_latest") => Self::RestoreLatest,
+            (Mode::Normal, "open_help") => Self::OpenHelp,
+            (Mode::Normal, "quit") => Self::NormalQuit,
+            (Mode::Insert, "move_cursor_left") => Self::MoveCursorLeft,
+            (Mode::Insert, "move_cursor_right") => Self::MoveCursorRight,
+            (Mode::Insert, "move_cursor_start") => Self::MoveCursorStart,
+            (Mode::Insert, "move_cursor_end") => Self::MoveCursorEnd,
+            (Mode::Insert, "move_word_left") => Self::MoveWordLeft,
+            (Mode::Insert, "move_word_right") => Self::MoveWordRight,
+            (Mode::Insert, "delete_before_cursor") => Self::DeleteBeforeCursor,
+            (Mode::Insert, "delete_at_cursor") => Self::DeleteAtCursor,
+            (Mode::Insert, "delete_word_before_cursor") => Self::DeleteWordBeforeCursor,
+            (Mode::Insert, "delete_word_at_cursor") => Self::DeleteWordAtCursor,
+            (Mode::Insert, "commit_edit") => Self::CommitEdit,
+            (Mode::Insert, "cancel_edit") => Self::CancelEdit,
+            (Mode::Help, "close_help") => Self::CloseHelp,
+            _ => return None,
+        })
+    }
 
-impl KeyChord {
-    const fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
-        Self {
-            code: KeyCodePattern::Exact(code),
-            modifiers,
+    pub(crate) const fn config_name(self) -> Option<&'static str> {
+        match self {
+            Self::MoveDown => Some("move_down"),
+            Self::MoveUp => Some("move_up"),
+            Self::MoveTaskDown => Some("move_task_down"),
+            Self::MoveTaskUp => Some("move_task_up"),
+            Self::StartAdd => Some("add_task"),
+            Self::StartEdit => Some("edit_task"),
+            Self::ToggleComplete => Some("toggle_complete"),
+            Self::Delete => Some("delete_task"),
+            Self::RestoreLatest => Some("restore_latest"),
+            Self::OpenHelp => Some("open_help"),
+            Self::NormalQuit => Some("quit"),
+            Self::MoveCursorLeft => Some("move_cursor_left"),
+            Self::MoveCursorRight => Some("move_cursor_right"),
+            Self::MoveCursorStart => Some("move_cursor_start"),
+            Self::MoveCursorEnd => Some("move_cursor_end"),
+            Self::MoveWordLeft => Some("move_word_left"),
+            Self::MoveWordRight => Some("move_word_right"),
+            Self::DeleteBeforeCursor => Some("delete_before_cursor"),
+            Self::DeleteAtCursor => Some("delete_at_cursor"),
+            Self::DeleteWordBeforeCursor => Some("delete_word_before_cursor"),
+            Self::DeleteWordAtCursor => Some("delete_word_at_cursor"),
+            Self::CommitEdit => Some("commit_edit"),
+            Self::CancelEdit => Some("cancel_edit"),
+            Self::CloseHelp => Some("close_help"),
+            Self::InsertEmergencyQuit | Self::HelpEmergencyQuit => None,
         }
     }
 
-    const fn characters(characters: &'static [char], modifiers: KeyModifiers) -> Self {
-        Self {
-            code: KeyCodePattern::Characters(characters),
-            modifiers,
+    pub(crate) const fn mode(self) -> Mode {
+        match self {
+            Self::MoveDown
+            | Self::MoveUp
+            | Self::MoveTaskDown
+            | Self::MoveTaskUp
+            | Self::StartAdd
+            | Self::StartEdit
+            | Self::ToggleComplete
+            | Self::Delete
+            | Self::RestoreLatest
+            | Self::OpenHelp
+            | Self::NormalQuit => Mode::Normal,
+            Self::MoveCursorLeft
+            | Self::MoveCursorRight
+            | Self::MoveCursorStart
+            | Self::MoveCursorEnd
+            | Self::MoveWordLeft
+            | Self::MoveWordRight
+            | Self::DeleteBeforeCursor
+            | Self::DeleteAtCursor
+            | Self::DeleteWordBeforeCursor
+            | Self::DeleteWordAtCursor
+            | Self::CommitEdit
+            | Self::CancelEdit
+            | Self::InsertEmergencyQuit => Mode::Insert,
+            Self::CloseHelp | Self::HelpEmergencyQuit => Mode::Help,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct KeyChord {
+    code: KeyCode,
+    modifiers: KeyModifiers,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct KeyParseError(String);
+impl fmt::Display for KeyParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for KeyParseError {}
+
+impl KeyChord {
+    const fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
+        Self { code, modifiers }
+    }
+
+    pub(crate) fn parse(value: &str) -> Result<Self, KeyParseError> {
+        let mut modifiers = KeyModifiers::NONE;
+        let mut remainder = value;
+        loop {
+            let lower = remainder.to_ascii_lowercase();
+            if lower.starts_with("ctrl-") {
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    return Err(KeyParseError("duplicate Ctrl modifier".into()));
+                }
+                modifiers.insert(KeyModifiers::CONTROL);
+                remainder = &remainder[5..];
+            } else if lower.starts_with("alt-") {
+                if modifiers.contains(KeyModifiers::ALT) {
+                    return Err(KeyParseError("duplicate Alt modifier".into()));
+                }
+                modifiers.insert(KeyModifiers::ALT);
+                remainder = &remainder[4..];
+            } else if lower.starts_with("shift-") {
+                return Err(KeyParseError("Shift modifier is not supported".into()));
+            } else {
+                break;
+            }
+        }
+        if remainder.is_empty() {
+            return Err(KeyParseError("key is missing after modifier".into()));
+        }
+        let lower = remainder.to_ascii_lowercase();
+        let code = match lower.as_str() {
+            "up" => KeyCode::Up,
+            "down" => KeyCode::Down,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "page-up" => KeyCode::PageUp,
+            "page-down" => KeyCode::PageDown,
+            "tab" => KeyCode::Tab,
+            "backtab" => KeyCode::BackTab,
+            "enter" => KeyCode::Enter,
+            "esc" => KeyCode::Esc,
+            "space" => KeyCode::Char(' '),
+            "backspace" => KeyCode::Backspace,
+            "delete" => KeyCode::Delete,
+            "insert" => KeyCode::Insert,
+            _ => {
+                let mut chars = remainder.chars();
+                let character = chars
+                    .next()
+                    .filter(|_| chars.next().is_none())
+                    .ok_or_else(|| KeyParseError(format!("unknown key {remainder:?}")))?;
+                if character.is_control() {
+                    return Err(KeyParseError("control characters are not supported".into()));
+                }
+                KeyCode::Char(normalize_character(character, modifiers))
+            }
+        };
+        Ok(Self::new(code, modifiers))
     }
 
     fn from_event(event: KeyEvent) -> Self {
         let mut modifiers = event.modifiers;
-        if matches!(event.code, KeyCode::Char(_)) {
+        if matches!(event.code, KeyCode::Char(_) | KeyCode::BackTab) {
             modifiers.remove(KeyModifiers::SHIFT);
         }
-        Self::new(event.code, modifiers)
+        let code = match event.code {
+            KeyCode::Char(character) => KeyCode::Char(normalize_character(character, modifiers)),
+            code => code,
+        };
+        Self::new(code, modifiers)
     }
 
-    fn matches(self, event: Self) -> bool {
-        self.modifiers == event.modifiers
-            && match (self.code, event.code) {
-                (KeyCodePattern::Exact(expected), KeyCodePattern::Exact(actual)) => {
-                    expected == actual
-                }
-                (
-                    KeyCodePattern::Characters(characters),
-                    KeyCodePattern::Exact(KeyCode::Char(actual)),
-                ) => characters.contains(&actual),
-                _ => false,
-            }
+    pub(crate) fn label(&self) -> String {
+        let mut label = String::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            label.push_str("Ctrl-");
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            label.push_str("Alt-");
+        }
+        label.push_str(match self.code {
+            KeyCode::Up => "Up",
+            KeyCode::Down => "Down",
+            KeyCode::Left => "Left",
+            KeyCode::Right => "Right",
+            KeyCode::Home => "Home",
+            KeyCode::End => "End",
+            KeyCode::PageUp => "Page-Up",
+            KeyCode::PageDown => "Page-Down",
+            KeyCode::Tab => "Tab",
+            KeyCode::BackTab => "Backtab",
+            KeyCode::Enter => "Enter",
+            KeyCode::Esc => "Esc",
+            KeyCode::Backspace => "Backspace",
+            KeyCode::Delete => "Delete",
+            KeyCode::Insert => "Insert",
+            KeyCode::Char(' ') => "Space",
+            KeyCode::Char('c') if self.modifiers == KeyModifiers::CONTROL => "C",
+            KeyCode::Char(character) => return format!("{label}{character}"),
+            _ => "Unknown",
+        });
+        label
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Binding {
-    pub(crate) mode: Mode,
-    pub(crate) chord: KeyChord,
-    pub(crate) action: Action,
-    pub(crate) key_label: &'static str,
-    pub(crate) description: &'static str,
-    pub(crate) show_in_footer: bool,
-    pub(crate) show_in_help: bool,
+const fn normalize_character(character: char, modifiers: KeyModifiers) -> char {
+    if !modifiers.is_empty() && character.is_ascii_alphabetic() {
+        character.to_ascii_lowercase()
+    } else {
+        character
+    }
 }
 
-static BINDINGS: &[Binding] = &[
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::characters(&['c', 'C'], KeyModifiers::CONTROL),
-        action: Action::Quit,
-        key_label: "Ctrl-C",
-        description: "quit",
-        show_in_footer: false,
-        show_in_help: true,
-    },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('j'), KeyModifiers::NONE),
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BindingOverride {
+    pub(crate) order: usize,
+    pub(crate) path: String,
+    pub(crate) id: BindingId,
+    pub(crate) keys: Vec<String>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct KeymapIssue {
+    pub(crate) order: usize,
+    pub(crate) path: String,
+    pub(crate) message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedBinding {
+    id: BindingId,
+    mode: Mode,
+    action: Action,
+    description: &'static str,
+    footer_priority: Option<u8>,
+    chords: Vec<KeyChord>,
+    labels: Vec<String>,
+}
+impl ResolvedBinding {
+    pub(crate) const fn id(&self) -> BindingId {
+        self.id
+    }
+    pub(crate) fn preferred_label(&self) -> &str {
+        &self.labels[0]
+    }
+    pub(crate) fn labels(&self) -> impl Iterator<Item = &str> {
+        self.labels.iter().map(String::as_str)
+    }
+    pub(crate) const fn action(&self) -> Action {
+        self.action
+    }
+    pub(crate) const fn description(&self) -> &'static str {
+        self.description
+    }
+    pub(crate) const fn footer_priority(&self) -> Option<u8> {
+        self.footer_priority
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Keymap {
+    bindings: Vec<ResolvedBinding>,
+}
+
+#[derive(Clone, Copy)]
+struct Definition {
+    id: BindingId,
+    action: Action,
+    description: &'static str,
+    footer_priority: Option<u8>,
+    defaults: &'static [KeyChord],
+    fixed: &'static [KeyChord],
+}
+const fn chord(code: KeyCode, modifiers: KeyModifiers) -> KeyChord {
+    KeyChord::new(code, modifiers)
+}
+
+static DEFINITIONS: &[Definition] = &[
+    Definition {
+        id: BindingId::MoveDown,
         action: Action::MoveDown,
-        key_label: "j",
         description: "move down",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[
+            chord(KeyCode::Char('j'), KeyModifiers::NONE),
+            chord(KeyCode::Down, KeyModifiers::NONE),
+        ],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Down, KeyModifiers::NONE),
-        action: Action::MoveDown,
-        key_label: "Down",
-        description: "move down",
-        show_in_footer: false,
-        show_in_help: true,
-    },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('k'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::MoveUp,
         action: Action::MoveUp,
-        key_label: "k",
         description: "move up",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[
+            chord(KeyCode::Char('k'), KeyModifiers::NONE),
+            chord(KeyCode::Up, KeyModifiers::NONE),
+        ],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Up, KeyModifiers::NONE),
-        action: Action::MoveUp,
-        key_label: "Up",
-        description: "move up",
-        show_in_footer: false,
-        show_in_help: true,
-    },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('J'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::MoveTaskDown,
         action: Action::MoveTaskDown,
-        key_label: "J",
         description: "move task down",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Char('J'), KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('K'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::MoveTaskUp,
         action: Action::MoveTaskUp,
-        key_label: "K",
         description: "move task up",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Char('K'), KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('i'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::StartAdd,
         action: Action::StartAdd,
-        key_label: "i",
         description: "add task",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(0),
+        defaults: &[chord(KeyCode::Char('i'), KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('e'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::StartEdit,
         action: Action::StartEdit,
-        key_label: "e",
         description: "edit task",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Char('e'), KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char(' '), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::ToggleComplete,
         action: Action::ToggleComplete,
-        key_label: "Space",
         description: "toggle complete",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Char(' '), KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('d'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::Delete,
         action: Action::Delete,
-        key_label: "d",
         description: "delete task",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Char('d'), KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('u'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::RestoreLatest,
         action: Action::RestoreLatest,
-        key_label: "u",
         description: "restore latest",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Char('u'), KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('?'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::OpenHelp,
         action: Action::OpenHelp,
-        key_label: "?",
         description: "show help",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Char('?'), KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Normal,
-        chord: KeyChord::new(KeyCode::Char('q'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::NormalQuit,
         action: Action::Quit,
-        key_label: "q",
         description: "quit",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Char('q'), KeyModifiers::NONE)],
+        fixed: &[chord(KeyCode::Char('c'), KeyModifiers::CONTROL)],
     },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::characters(&['c', 'C'], KeyModifiers::CONTROL),
-        action: Action::Quit,
-        key_label: "Ctrl-C",
-        description: "quit",
-        show_in_footer: false,
-        show_in_help: true,
-    },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Left, KeyModifiers::NONE),
+    Definition {
+        id: BindingId::MoveCursorLeft,
         action: Action::MoveCursorLeft,
-        key_label: "Left",
         description: "move cursor left",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Left, KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Left, KeyModifiers::ALT),
-        action: Action::MoveWordLeft,
-        key_label: "Alt-Left",
-        description: "move one word left",
-        show_in_footer: false,
-        show_in_help: true,
-    },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::characters(&['b', 'B'], KeyModifiers::ALT),
-        action: Action::MoveWordLeft,
-        key_label: "Alt-b",
-        description: "move one word left",
-        show_in_footer: false,
-        show_in_help: false,
-    },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Right, KeyModifiers::NONE),
+    Definition {
+        id: BindingId::MoveCursorRight,
         action: Action::MoveCursorRight,
-        key_label: "Right",
         description: "move cursor right",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Right, KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Right, KeyModifiers::ALT),
-        action: Action::MoveWordRight,
-        key_label: "Alt-Right",
-        description: "move one word right",
-        show_in_footer: false,
-        show_in_help: true,
-    },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::characters(&['f', 'F'], KeyModifiers::ALT),
-        action: Action::MoveWordRight,
-        key_label: "Alt-f",
-        description: "move one word right",
-        show_in_footer: false,
-        show_in_help: false,
-    },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Home, KeyModifiers::NONE),
+    Definition {
+        id: BindingId::MoveCursorStart,
         action: Action::MoveCursorStart,
-        key_label: "Home",
         description: "move cursor start",
-        show_in_footer: false,
-        show_in_help: true,
+        footer_priority: None,
+        defaults: &[chord(KeyCode::Home, KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::End, KeyModifiers::NONE),
+    Definition {
+        id: BindingId::MoveCursorEnd,
         action: Action::MoveCursorEnd,
-        key_label: "End",
         description: "move cursor end",
-        show_in_footer: false,
-        show_in_help: true,
+        footer_priority: None,
+        defaults: &[chord(KeyCode::End, KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Backspace, KeyModifiers::NONE),
+    Definition {
+        id: BindingId::MoveWordLeft,
+        action: Action::MoveWordLeft,
+        description: "move one word left",
+        footer_priority: None,
+        defaults: &[
+            chord(KeyCode::Left, KeyModifiers::ALT),
+            chord(KeyCode::Char('b'), KeyModifiers::ALT),
+        ],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::MoveWordRight,
+        action: Action::MoveWordRight,
+        description: "move one word right",
+        footer_priority: None,
+        defaults: &[
+            chord(KeyCode::Right, KeyModifiers::ALT),
+            chord(KeyCode::Char('f'), KeyModifiers::ALT),
+        ],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::DeleteBeforeCursor,
         action: Action::DeleteBeforeCursor,
-        key_label: "Backspace",
         description: "delete before cursor",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Backspace, KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Backspace, KeyModifiers::ALT),
-        action: Action::DeleteWordBeforeCursor,
-        key_label: "Alt-Backspace",
-        description: "delete previous word",
-        show_in_footer: false,
-        show_in_help: true,
-    },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::characters(&['w', 'W'], KeyModifiers::CONTROL),
-        action: Action::DeleteWordBeforeCursor,
-        key_label: "Ctrl-w",
-        description: "delete previous word",
-        show_in_footer: false,
-        show_in_help: false,
-    },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Delete, KeyModifiers::NONE),
+    Definition {
+        id: BindingId::DeleteAtCursor,
         action: Action::DeleteAtCursor,
-        key_label: "Delete",
         description: "delete at cursor",
-        show_in_footer: false,
-        show_in_help: true,
+        footer_priority: None,
+        defaults: &[chord(KeyCode::Delete, KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Delete, KeyModifiers::ALT),
+    Definition {
+        id: BindingId::DeleteWordBeforeCursor,
+        action: Action::DeleteWordBeforeCursor,
+        description: "delete previous word",
+        footer_priority: None,
+        defaults: &[
+            chord(KeyCode::Backspace, KeyModifiers::ALT),
+            chord(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        ],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::DeleteWordAtCursor,
         action: Action::DeleteWordAtCursor,
-        key_label: "Alt-Delete",
         description: "delete next word",
-        show_in_footer: false,
-        show_in_help: true,
+        footer_priority: None,
+        defaults: &[chord(KeyCode::Delete, KeyModifiers::ALT)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Enter, KeyModifiers::NONE),
+    Definition {
+        id: BindingId::CommitEdit,
         action: Action::CommitEdit,
-        key_label: "Enter",
         description: "save edit",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(0),
+        defaults: &[chord(KeyCode::Enter, KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Insert,
-        chord: KeyChord::new(KeyCode::Esc, KeyModifiers::NONE),
+    Definition {
+        id: BindingId::CancelEdit,
         action: Action::CancelEdit,
-        key_label: "Esc",
         description: "cancel edit",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Esc, KeyModifiers::NONE)],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Help,
-        chord: KeyChord::characters(&['c', 'C'], KeyModifiers::CONTROL),
+    Definition {
+        id: BindingId::InsertEmergencyQuit,
         action: Action::Quit,
-        key_label: "Ctrl-C",
         description: "quit",
-        show_in_footer: false,
-        show_in_help: true,
+        footer_priority: None,
+        defaults: &[],
+        fixed: &[chord(KeyCode::Char('c'), KeyModifiers::CONTROL)],
     },
-    Binding {
-        mode: Mode::Help,
-        chord: KeyChord::new(KeyCode::Char('?'), KeyModifiers::NONE),
+    Definition {
+        id: BindingId::CloseHelp,
         action: Action::CloseHelp,
-        key_label: "?",
         description: "close help",
-        show_in_footer: true,
-        show_in_help: true,
+        footer_priority: Some(0),
+        defaults: &[
+            chord(KeyCode::Char('?'), KeyModifiers::NONE),
+            chord(KeyCode::Esc, KeyModifiers::NONE),
+        ],
+        fixed: &[],
     },
-    Binding {
-        mode: Mode::Help,
-        chord: KeyChord::new(KeyCode::Esc, KeyModifiers::NONE),
-        action: Action::CloseHelp,
-        key_label: "Esc",
-        description: "close help",
-        show_in_footer: true,
-        show_in_help: true,
+    Definition {
+        id: BindingId::HelpEmergencyQuit,
+        action: Action::Quit,
+        description: "quit",
+        footer_priority: None,
+        defaults: &[],
+        fixed: &[chord(KeyCode::Char('c'), KeyModifiers::CONTROL)],
     },
 ];
 
-pub(crate) fn bindings() -> impl Iterator<Item = &'static Binding> {
-    BINDINGS.iter()
-}
-
-pub(crate) fn bindings_for(mode: Mode) -> impl Iterator<Item = &'static Binding> {
-    bindings().filter(move |binding| binding.mode == mode)
-}
-
-pub(crate) fn map_key(mode: Mode, event: KeyEvent) -> Option<Action> {
-    if !matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-        return None;
+impl Keymap {
+    pub(crate) fn defaults() -> Self {
+        Self {
+            bindings: DEFINITIONS
+                .iter()
+                .map(|definition| resolved(*definition, definition.defaults.to_vec()))
+                .collect(),
+        }
     }
 
-    let chord = KeyChord::from_event(event);
-    if let Some(binding) = bindings_for(mode).find(|binding| binding.chord.matches(chord)) {
-        return Some(binding.action);
+    pub(crate) fn with_overrides(overrides: &[BindingOverride]) -> Result<Self, Vec<KeymapIssue>> {
+        let mut ordered = overrides.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|override_| override_.order);
+        let mut keys = DEFINITIONS
+            .iter()
+            .map(|definition| definition.defaults.to_vec())
+            .collect::<Vec<_>>();
+        let mut sources = vec![None::<(usize, String)>; DEFINITIONS.len()];
+        let mut issues = Vec::new();
+        for override_ in ordered {
+            if override_.keys.is_empty() {
+                issues.push(issue(override_, "must contain at least one key"));
+                continue;
+            }
+            let mut parsed = Vec::new();
+            for key in &override_.keys {
+                match KeyChord::parse(key) {
+                    Ok(chord)
+                        if chord == KeyChord::new(KeyCode::Char('c'), KeyModifiers::CONTROL) =>
+                    {
+                        issues.push(issue(
+                            override_,
+                            "Ctrl-C is reserved and cannot be configured",
+                        ))
+                    }
+                    Ok(chord) if parsed.contains(&chord) => issues.push(issue(
+                        override_,
+                        format!("duplicate key \"{}\"", chord.label()),
+                    )),
+                    Ok(chord) => parsed.push(chord),
+                    Err(error) => {
+                        issues.push(issue(override_, format!("invalid key {key:?}: {error}")))
+                    }
+                }
+            }
+            if !parsed.is_empty() {
+                let index = definition_index(override_.id);
+                keys[index] = parsed;
+                sources[index] = Some((override_.order, override_.path.clone()));
+            }
+        }
+        let bindings = DEFINITIONS
+            .iter()
+            .enumerate()
+            .map(|(index, definition)| resolved(*definition, keys[index].clone()))
+            .collect::<Vec<_>>();
+        let mut seen = Vec::<(KeyChord, usize)>::new();
+        for (index, binding) in bindings.iter().enumerate() {
+            for chord in &binding.chords {
+                if let Some((_, previous)) = seen.iter().find(|(seen, previous)| {
+                    seen == chord && bindings[*previous].mode == binding.mode
+                }) {
+                    let (report, other) = match (&sources[*previous], &sources[index]) {
+                        (Some((old, _)), Some((new, _))) if old > new => (*previous, index),
+                        (Some(_), Some(_)) => (index, *previous),
+                        (Some(_), None) => (*previous, index),
+                        (None, Some(_)) => (index, *previous),
+                        (None, None) => continue,
+                    };
+                    let (order, path) = sources[report].as_ref().expect("override source");
+                    issues.push(KeymapIssue {
+                        order: *order,
+                        path: path.clone(),
+                        message: format!(
+                            "\"{}\" conflicts with {}",
+                            chord.label(),
+                            bindings[other].id.config_name().unwrap_or("quit")
+                        ),
+                    });
+                } else {
+                    seen.push((*chord, index));
+                }
+            }
+        }
+        issues.sort_by_key(|issue| issue.order);
+        if issues.is_empty() {
+            Ok(Self { bindings })
+        } else {
+            Err(issues)
+        }
     }
 
-    match (mode, chord) {
-        (
-            Mode::Insert,
-            KeyChord {
-                code: KeyCodePattern::Exact(KeyCode::Char(character)),
-                modifiers,
-            },
-        ) if modifiers == KeyModifiers::NONE => Some(Action::InsertChar(character)),
-        _ => None,
+    pub(crate) fn map_key(&self, mode: Mode, event: KeyEvent) -> Option<Action> {
+        if !matches!(event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return None;
+        }
+        let chord = KeyChord::from_event(event);
+        if let Some(binding) = self
+            .bindings_for(mode)
+            .find(|binding| binding.chords.contains(&chord))
+        {
+            return Some(binding.action);
+        }
+        match (mode, chord) {
+            (
+                Mode::Insert,
+                KeyChord {
+                    code: KeyCode::Char(character),
+                    modifiers,
+                },
+            ) if modifiers == KeyModifiers::NONE => Some(Action::InsertChar(character)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn bindings_for(&self, mode: Mode) -> impl Iterator<Item = &ResolvedBinding> {
+        self.bindings
+            .iter()
+            .filter(move |binding| binding.mode == mode)
+    }
+    pub(crate) fn configurable_action_count(&self) -> usize {
+        self.bindings
+            .iter()
+            .filter(|binding| binding.id.config_name().is_some())
+            .count()
+    }
+    pub(crate) fn active_binding_count(&self) -> usize {
+        self.bindings
+            .iter()
+            .map(|binding| binding.chords.len())
+            .sum()
+    }
+}
+
+fn resolved(definition: Definition, mut chords: Vec<KeyChord>) -> ResolvedBinding {
+    chords.extend_from_slice(definition.fixed);
+    let labels = chords.iter().map(KeyChord::label).collect();
+    ResolvedBinding {
+        id: definition.id,
+        mode: definition.id.mode(),
+        action: definition.action,
+        description: definition.description,
+        footer_priority: definition.footer_priority,
+        chords,
+        labels,
+    }
+}
+fn definition_index(id: BindingId) -> usize {
+    DEFINITIONS
+        .iter()
+        .position(|definition| definition.id == id)
+        .expect("every binding id has a definition")
+}
+fn issue(override_: &BindingOverride, message: impl Into<String>) -> KeymapIssue {
+    KeymapIssue {
+        order: override_.order,
+        path: override_.path.clone(),
+        message: message.into(),
     }
 }
 
@@ -397,25 +715,145 @@ pub(crate) fn map_key(mode: Mode, event: KeyEvent) -> Option<Action> {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-    use super::{KeyChord, bindings_for, map_key};
+    use super::{BindingId, BindingOverride, KeyChord, Keymap};
     use crate::{action::Action, app::Mode};
 
-    fn key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
-        KeyEvent::new_with_kind(code, modifiers, kind)
+    fn pressed(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Press)
     }
 
     #[test]
-    fn normal_keys_should_map_to_semantic_actions() {
-        let cases = [
-            (KeyCode::Char('j'), KeyModifiers::NONE, Action::MoveDown),
-            (KeyCode::Down, KeyModifiers::NONE, Action::MoveDown),
-            (KeyCode::Char('k'), KeyModifiers::NONE, Action::MoveUp),
-            (KeyCode::Up, KeyModifiers::NONE, Action::MoveUp),
+    fn key_chord_should_parse_supported_forms_and_generate_canonical_labels() {
+        for (source, expected) in [
+            ("J", "J"),
+            ("down", "Down"),
+            ("space", "Space"),
+            ("ctrl-n", "Ctrl-n"),
+            ("ALT-left", "Alt-Left"),
+            ("ctrl-alt-x", "Ctrl-Alt-x"),
+        ] {
+            assert_eq!(KeyChord::parse(source).unwrap().label(), expected);
+        }
+    }
+
+    #[test]
+    fn with_overrides_should_replace_one_action_and_preserve_other_defaults() {
+        let keymap = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.move_down".into(),
+            id: BindingId::MoveDown,
+            keys: vec!["x".into(), "ctrl-n".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('x'), KeyModifiers::NONE)
+            ),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('j'), KeyModifiers::NONE)
+            ),
+            None
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('k'), KeyModifiers::NONE)
+            ),
+            Some(Action::MoveUp)
+        );
+    }
+
+    #[test]
+    fn with_overrides_should_collect_empty_duplicate_conflict_and_reserved_issues() {
+        let result = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.normal.move_down".into(),
+                id: BindingId::MoveDown,
+                keys: Vec::new(),
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.move_up".into(),
+                id: BindingId::MoveUp,
+                keys: vec!["x".into(), "x".into()],
+            },
+            BindingOverride {
+                order: 2,
+                path: "keybindings.normal.add_task".into(),
+                id: BindingId::StartAdd,
+                keys: vec!["d".into(), "ctrl-c".into()],
+            },
+        ]);
+        assert_eq!(
+            result
+                .unwrap_err()
+                .into_iter()
+                .map(|issue| issue.message)
+                .collect::<Vec<_>>(),
+            vec![
+                "must contain at least one key",
+                "duplicate key \"x\"",
+                "Ctrl-C is reserved and cannot be configured",
+                "\"d\" conflicts with delete_task"
+            ]
+        );
+    }
+
+    #[test]
+    fn defaults_should_preserve_normal_insert_and_help_behavior() {
+        let keymap = Keymap::defaults();
+        for (mode, code, modifiers, expected) in [
             (
+                Mode::Normal,
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+                Action::MoveDown,
+            ),
+            (
+                Mode::Normal,
                 KeyCode::Char('J'),
                 KeyModifiers::SHIFT,
                 Action::MoveTaskDown,
             ),
+            (
+                Mode::Insert,
+                KeyCode::Char('B'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+                Action::MoveWordLeft,
+            ),
+            (
+                Mode::Help,
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                Action::CloseHelp,
+            ),
+            (
+                Mode::Insert,
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                Action::Quit,
+            ),
+        ] {
+            assert_eq!(
+                keymap.map_key(mode, pressed(code, modifiers)),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_should_map_all_normal_actions_and_keep_q_as_insert_text() {
+        let keymap = Keymap::defaults();
+        for (code, modifiers, action) in [
+            (KeyCode::Down, KeyModifiers::NONE, Action::MoveDown),
+            (KeyCode::Char('k'), KeyModifiers::NONE, Action::MoveUp),
+            (KeyCode::Up, KeyModifiers::NONE, Action::MoveUp),
             (KeyCode::Char('K'), KeyModifiers::SHIFT, Action::MoveTaskUp),
             (KeyCode::Char('i'), KeyModifiers::NONE, Action::StartAdd),
             (KeyCode::Char('e'), KeyModifiers::NONE, Action::StartEdit),
@@ -432,101 +870,67 @@ mod tests {
             ),
             (KeyCode::Char('?'), KeyModifiers::SHIFT, Action::OpenHelp),
             (KeyCode::Char('q'), KeyModifiers::NONE, Action::Quit),
-        ];
-        for (code, modifiers, expected) in cases {
+        ] {
             assert_eq!(
-                map_key(Mode::Normal, key(code, modifiers, KeyEventKind::Press)),
-                Some(expected)
+                keymap.map_key(Mode::Normal, pressed(code, modifiers)),
+                Some(action)
             );
         }
-    }
-
-    #[test]
-    fn q_should_type_in_insert_and_quit_in_normal() {
-        let q = key(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Press);
-        assert_eq!(map_key(Mode::Insert, q), Some(Action::InsertChar('q')));
-        assert_eq!(map_key(Mode::Normal, q), Some(Action::Quit));
-    }
-
-    #[test]
-    fn control_c_should_quit_in_every_mode_and_release_should_be_ignored() {
-        let control_c = key(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-            KeyEventKind::Repeat,
-        );
-        assert_eq!(map_key(Mode::Normal, control_c), Some(Action::Quit));
-        assert_eq!(map_key(Mode::Insert, control_c), Some(Action::Quit));
-        assert_eq!(map_key(Mode::Help, control_c), Some(Action::Quit));
-        let control_shift_c = key(
-            KeyCode::Char('C'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            KeyEventKind::Press,
-        );
-        assert_eq!(map_key(Mode::Insert, control_shift_c), Some(Action::Quit));
         assert_eq!(
-            map_key(
-                Mode::Normal,
-                key(
-                    KeyCode::Char('q'),
-                    KeyModifiers::NONE,
-                    KeyEventKind::Release
-                )
+            keymap.map_key(
+                Mode::Insert,
+                pressed(KeyCode::Char('q'), KeyModifiers::NONE)
             ),
-            None
+            Some(Action::InsertChar('q'))
         );
     }
 
     #[test]
-    fn control_c_bindings_should_declare_both_characters_without_duplicate_rows() {
-        for mode in [Mode::Normal, Mode::Insert, Mode::Help] {
-            let control_c_bindings = bindings_for(mode)
-                .filter(|binding| binding.key_label == "Ctrl-C")
-                .collect::<Vec<_>>();
-            assert_eq!(control_c_bindings.len(), 1);
-
-            for code in [KeyCode::Char('c'), KeyCode::Char('C')] {
-                assert!(
-                    control_c_bindings[0]
-                        .chord
-                        .matches(KeyChord::from_event(key(
-                            code,
-                            KeyModifiers::CONTROL,
-                            KeyEventKind::Press,
-                        )))
-                );
-            }
+    fn defaults_should_support_word_aliases_and_fixed_control_c_in_every_mode() {
+        let keymap = Keymap::defaults();
+        for (code, modifiers, action) in [
+            (KeyCode::Left, KeyModifiers::ALT, Action::MoveWordLeft),
+            (KeyCode::Char('b'), KeyModifiers::ALT, Action::MoveWordLeft),
+            (KeyCode::Right, KeyModifiers::ALT, Action::MoveWordRight),
+            (KeyCode::Char('f'), KeyModifiers::ALT, Action::MoveWordRight),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::ALT,
+                Action::DeleteWordBeforeCursor,
+            ),
+            (
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+                Action::DeleteWordBeforeCursor,
+            ),
+            (
+                KeyCode::Delete,
+                KeyModifiers::ALT,
+                Action::DeleteWordAtCursor,
+            ),
+        ] {
+            assert_eq!(
+                keymap.map_key(Mode::Insert, pressed(code, modifiers)),
+                Some(action)
+            );
         }
-    }
-
-    #[test]
-    fn declared_control_c_chords_should_quit_in_every_mode() {
-        for mode in [Mode::Normal, Mode::Insert, Mode::Help] {
-            for (code, modifiers) in [
-                (KeyCode::Char('c'), KeyModifiers::CONTROL),
-                (
-                    KeyCode::Char('C'),
-                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-                ),
-            ] {
-                assert_eq!(
-                    map_key(mode, key(code, modifiers, KeyEventKind::Press)),
-                    Some(Action::Quit)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn control_alt_c_should_not_map_in_any_mode() {
         for mode in [Mode::Normal, Mode::Insert, Mode::Help] {
             assert_eq!(
-                map_key(
+                keymap.map_key(
                     mode,
-                    key(
+                    pressed(
+                        KeyCode::Char('C'),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    )
+                ),
+                Some(Action::Quit)
+            );
+            assert_eq!(
+                keymap.map_key(
+                    mode,
+                    pressed(
                         KeyCode::Char('c'),
-                        KeyModifiers::CONTROL | KeyModifiers::ALT,
-                        KeyEventKind::Press,
+                        KeyModifiers::CONTROL | KeyModifiers::ALT
                     )
                 ),
                 None
@@ -535,17 +939,9 @@ mod tests {
     }
 
     #[test]
-    fn normal_descriptions_should_include_help_and_reorder() {
-        let descriptions = bindings_for(Mode::Normal)
-            .map(|binding| binding.description)
-            .collect::<Vec<_>>();
-        assert!(descriptions.contains(&"show help"));
-        assert!(descriptions.contains(&"move task down"));
-    }
-
-    #[test]
-    fn editing_keys_should_map_to_editor_actions() {
-        let cases = [
+    fn defaults_should_map_all_standard_editor_actions_and_help_aliases() {
+        let keymap = Keymap::defaults();
+        for (code, action) in [
             (KeyCode::Left, Action::MoveCursorLeft),
             (KeyCode::Right, Action::MoveCursorRight),
             (KeyCode::Home, Action::MoveCursorStart),
@@ -554,104 +950,85 @@ mod tests {
             (KeyCode::Delete, Action::DeleteAtCursor),
             (KeyCode::Enter, Action::CommitEdit),
             (KeyCode::Esc, Action::CancelEdit),
-        ];
-        for (code, expected) in cases {
+        ] {
             assert_eq!(
-                map_key(
-                    Mode::Insert,
-                    key(code, KeyModifiers::NONE, KeyEventKind::Press)
-                ),
-                Some(expected)
+                keymap.map_key(Mode::Insert, pressed(code, KeyModifiers::NONE)),
+                Some(action)
             );
         }
-    }
-
-    #[test]
-    fn word_editing_keys_should_map_native_and_meta_terminal_encodings() {
-        let cases = [
-            (KeyCode::Left, KeyModifiers::ALT, Action::MoveWordLeft),
-            (KeyCode::Char('b'), KeyModifiers::ALT, Action::MoveWordLeft),
-            (
-                KeyCode::Char('B'),
-                KeyModifiers::ALT | KeyModifiers::SHIFT,
-                Action::MoveWordLeft,
-            ),
-            (KeyCode::Right, KeyModifiers::ALT, Action::MoveWordRight),
-            (KeyCode::Char('f'), KeyModifiers::ALT, Action::MoveWordRight),
-            (
-                KeyCode::Char('F'),
-                KeyModifiers::ALT | KeyModifiers::SHIFT,
-                Action::MoveWordRight,
-            ),
-            (
-                KeyCode::Backspace,
-                KeyModifiers::ALT,
-                Action::DeleteWordBeforeCursor,
-            ),
-            (
-                KeyCode::Delete,
-                KeyModifiers::ALT,
-                Action::DeleteWordAtCursor,
-            ),
-            (
-                KeyCode::Char('w'),
-                KeyModifiers::CONTROL,
-                Action::DeleteWordBeforeCursor,
-            ),
-            (
-                KeyCode::Char('W'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-                Action::DeleteWordBeforeCursor,
-            ),
-        ];
-
-        for (code, modifiers, expected) in cases {
-            assert_eq!(
-                map_key(Mode::Insert, key(code, modifiers, KeyEventKind::Press)),
-                Some(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn help_keys_should_close_overlay() {
         for code in [KeyCode::Char('?'), KeyCode::Esc] {
             assert_eq!(
-                map_key(
-                    Mode::Help,
-                    key(code, KeyModifiers::NONE, KeyEventKind::Press)
-                ),
+                keymap.map_key(Mode::Help, pressed(code, KeyModifiers::NONE)),
                 Some(Action::CloseHelp)
             );
         }
     }
 
     #[test]
-    fn insert_should_accept_repeat_and_unmodified_printable_unicode() {
-        assert_eq!(
-            map_key(
-                Mode::Insert,
-                key(KeyCode::Char('é'), KeyModifiers::NONE, KeyEventKind::Repeat)
-            ),
-            Some(Action::InsertChar('é'))
-        );
+    fn control_c_should_have_one_group_in_each_mode_and_normal_should_describe_help_and_reorder() {
+        let keymap = Keymap::defaults();
+        for mode in [Mode::Normal, Mode::Insert, Mode::Help] {
+            assert_eq!(
+                keymap
+                    .bindings_for(mode)
+                    .filter(|binding| binding.labels().any(|label| label == "Ctrl-C"))
+                    .count(),
+                1
+            );
+        }
+        let descriptions = keymap
+            .bindings_for(Mode::Normal)
+            .map(|binding| binding.description())
+            .collect::<Vec<_>>();
+        assert!(descriptions.contains(&"show help"));
+        assert!(descriptions.contains(&"move task down"));
     }
 
     #[test]
-    fn insert_should_reject_modified_printable_characters() {
-        for modifiers in [
-            KeyModifiers::ALT,
-            KeyModifiers::SUPER,
-            KeyModifiers::HYPER,
-            KeyModifiers::CONTROL,
-        ] {
-            assert_eq!(
-                map_key(
-                    Mode::Insert,
-                    key(KeyCode::Char('x'), modifiers, KeyEventKind::Press)
-                ),
-                None
-            );
-        }
+    fn keymap_should_expose_configurable_and_active_binding_counts() {
+        let keymap = Keymap::defaults();
+        assert_eq!(keymap.configurable_action_count(), 24);
+        assert_eq!(keymap.active_binding_count(), 33);
+        assert_eq!(
+            BindingId::from_config(Mode::Normal, "move_down"),
+            Some(BindingId::MoveDown)
+        );
+        assert_eq!(BindingId::from_config(Mode::Help, "quit"), None);
+        let binding = keymap
+            .bindings_for(Mode::Normal)
+            .find(|binding| binding.id() == BindingId::MoveDown)
+            .unwrap();
+        assert_eq!(binding.action(), Action::MoveDown);
+    }
+
+    #[test]
+    fn map_key_should_ignore_releases_and_fall_back_to_unmodified_insert_characters() {
+        let keymap = Keymap::defaults();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                KeyEvent::new_with_kind(
+                    KeyCode::Char('q'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Release
+                )
+            ),
+            None
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Insert,
+                KeyEvent::new_with_kind(
+                    KeyCode::Char('é'),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Repeat
+                )
+            ),
+            Some(Action::InsertChar('é'))
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Insert, pressed(KeyCode::Char('x'), KeyModifiers::ALT)),
+            None
+        );
     }
 }
