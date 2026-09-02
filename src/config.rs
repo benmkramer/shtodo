@@ -147,7 +147,7 @@ impl ConfigError {
 }
 
 pub(crate) fn config_path(home: &Path) -> PathBuf {
-    home.join(".shtodo/config.toml")
+    home.join(".shtodo").join("config.toml")
 }
 
 pub(crate) fn load(home: &Path) -> Result<LoadedKeymap, ConfigError> {
@@ -603,9 +603,10 @@ add_task = ["j"]
     }
 
     #[test]
-    fn config_path_should_resolve_under_the_given_home() {
+    fn config_path_should_join_native_path_components() {
         let home = Path::new("/example/home");
+        let expected = home.join(".shtodo").join("config.toml");
 
-        assert_eq!(super::config_path(home), home.join(".shtodo/config.toml"));
+        assert_eq!(super::config_path(home).as_os_str(), expected.as_os_str());
     }
 }
