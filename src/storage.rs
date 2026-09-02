@@ -297,9 +297,10 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 mod tests {
     use std::{ffi::OsString, path::Path};
 
+    #[cfg(unix)]
+    use super::canonical_path_string;
     use super::{
-        Store, canonical_path_string, load_snapshot, paths_for_home, project_folder_name,
-        resolve_home, resolve_scope,
+        Store, load_snapshot, paths_for_home, project_folder_name, resolve_home, resolve_scope,
     };
     use crate::{
         cli::ScopeChoice,

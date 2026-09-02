@@ -578,14 +578,18 @@ add_task = ["j"]
     }
 
     #[test]
-    fn load_should_include_path_for_toml_syntax_error() {
+    fn load_should_report_native_config_path_for_toml_syntax_error() {
         let home = configured_home("[keybindings.normal\nmove_down = [\"j\"]");
-        let path = home.path().join(".shtodo/config.toml");
+        let path = home.path().join(".shtodo").join("config.toml");
 
         let error = load(home.path()).unwrap_err();
 
         assert!(matches!(error, ConfigError::Parse { .. }));
-        assert!(error.to_string().contains(path.to_string_lossy().as_ref()));
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("could not parse config {}:", path.display()))
+        );
     }
 
     #[test]
