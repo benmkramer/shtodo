@@ -4,7 +4,33 @@
 one global list by default and can keep an independent list for an exact
 project directory.
 
-## Install from source
+## Installation
+
+### Prebuilt binaries
+
+Prebuilt archives for Apple Silicon macOS, Intel macOS, and x86-64 Linux are
+attached to each [GitHub Release]. Each archive has a corresponding SHA-256
+checksum.
+
+The repository is currently private, so downloading a release requires GitHub
+read access. An authenticated GitHub CLI session can download and run the
+installer:
+
+```sh
+gh release download --repo benmkramer/shtodo --pattern shtodo-installer.sh
+SHTODO_GITHUB_TOKEN="$(gh auth token)" sh ./shtodo-installer.sh
+```
+
+If the repository becomes public, the shell installer can be run directly and
+will select the correct archive and install `shtodo` into Cargo's binary
+directory:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/benmkramer/shtodo/releases/latest/download/shtodo-installer.sh | sh
+```
+
+### Install from source
 
 `shtodo` requires Rust 1.89 or newer. From a checkout with its lockfile:
 
@@ -122,13 +148,25 @@ and permanently removes tombstones; a sidebar for global, project, trash, and
 later views; a `~/.shtodo/config` format for keybindings and themes; and
 configuration validation, conflict reporting, and fallback behavior. Editing
 is scalar-value-based, so grapheme-cluster-aware editing is deferred if it
-becomes necessary. Automated GitHub release binaries, installers, Homebrew and
-other package-manager distribution, and broader Windows runtime testing and
-support are also deferred. Windows is kept build-compatible where practical,
-but full Windows runtime support is not a version-one promise.
+becomes necessary. Homebrew and other package-manager distribution, plus
+broader Windows runtime testing and support, are also deferred. Windows is kept
+build-compatible where practical, but full Windows runtime support is not a
+version-one promise.
 
 Version one also does not promise cross-device conflict resolution or
 compatibility with task-manager formats.
+
+## Releasing
+
+Release preparation happens in a normal pull request. Update the version in
+`Cargo.toml`, refresh `Cargo.lock`, move the completed notes from `Unreleased`
+into a versioned `CHANGELOG.md` section, and merge only after CI passes.
+
+To rehearse a release, open the `Release` workflow in GitHub Actions, select
+`main`, leave the tag as `dry-run`, and run the workflow. To publish, run the
+same workflow from `main` with a tag matching the package version, such as
+`v0.1.0`. The workflow creates the tag and GitHub Release only after all target
+artifacts build successfully.
 
 ## License
 
@@ -138,3 +176,4 @@ This project is licensed under the MIT license ([LICENSE] or
 <http://opensource.org/licenses/MIT>)
 
 [LICENSE]: ./LICENSE
+[GitHub Release]: https://github.com/benmkramer/shtodo/releases

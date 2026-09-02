@@ -1,0 +1,25 @@
+name: Release guard
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: The cargo-dist release plan
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  require-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the main branch
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          if [ "$RELEASE_REF" != "refs/heads/main" ]; then
+            echo "Release dispatches must target the main branch, not $RELEASE_REF" >&2
+            exit 1
+          fi

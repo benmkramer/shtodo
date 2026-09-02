@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A blazing fast, fully local TUI based todo app."
 authors = ["Ben Kramer <benmkramer@gmail.com>"]
 license = "MIT"
+repository = "https://github.com/benmkramer/shtodo"
 edition = "2024"
 rust-version = "1.89"
 
@@ -23,3 +24,8 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
