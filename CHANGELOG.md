@@ -7,6 +7,8 @@ All notable changes to shtodo are documented in this file.
 ### Added
 
 - A centered poop-framed celebration when the final open task is completed.
+- User-configured keybindings from `~/.shtodo/config.toml`, reflected in input, footer hints, empty-state guidance, and keyboard help.
+- `shtodo doctor` for validating keybinding syntax, reserved keys, and conflicts without opening task storage or the terminal UI.
 
 ## [0.1.0] - 2026-09-01
 

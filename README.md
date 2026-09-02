@@ -49,6 +49,9 @@ cargo build --release --locked
 ```text
 shtodo
 shtodo --local
+shtodo add "Fix the bug"
+shtodo --local add "Run the tests"
+shtodo doctor
 shtodo --help
 shtodo --version
 ```
@@ -112,6 +115,82 @@ Alt-b and Alt-f aliases above.
 | `?` or Esc | Close keyboard help |
 | Ctrl-C | Quit |
 
+## Configuring keybindings
+
+The optional configuration file is `~/.shtodo/config.toml`; shtodo does not
+create it. When the file is missing, shtodo uses its compiled defaults.
+Configuring an action replaces that action's defaults; omitted actions retain
+their defaults.
+
+```toml
+[keybindings.normal]
+move_down = ["j", "down", "ctrl-n"]
+move_up = ["k", "up", "ctrl-p"]
+add_task = ["a"]
+open_help = ["?"]
+
+[keybindings.insert]
+commit_edit = ["enter"]
+cancel_edit = ["esc"]
+
+[keybindings.help]
+close_help = ["?", "esc"]
+```
+
+Array order matters: the first key is used in the footer and every key is
+shown in Help. Accepted named keys are `up`, `down`, `left`, `right`, `home`,
+`end`, `page-up`, `page-down`, `tab`, `backtab`, `enter`, `esc`, `space`,
+`backspace`, `delete`, and `insert`. Ctrl and Alt modifiers use forms such as
+`ctrl-n`, `alt-left`, and `ctrl-alt-x`; shifted printable characters use the
+resulting character such as `J`.
+
+`Ctrl-C` is fixed in all modes and cannot be configured. Invalid config stops
+interactive startup and points to `shtodo doctor`. `shtodo doctor` checks the
+same parser and validator without opening task storage or the TUI.
+
+### Default actions
+
+#### Normal
+
+| Action | Default keys |
+| --- | --- |
+| `move_down` | `j`, `down` |
+| `move_up` | `k`, `up` |
+| `move_task_down` | `J` |
+| `move_task_up` | `K` |
+| `add_task` | `i` |
+| `edit_task` | `e` |
+| `toggle_complete` | `space` |
+| `delete_task` | `d` |
+| `restore_latest` | `u` |
+| `open_help` | `?` |
+| `quit` | `q` |
+
+#### Insert
+
+| Action | Default keys |
+| --- | --- |
+| `move_cursor_left` | `left` |
+| `move_cursor_right` | `right` |
+| `move_cursor_start` | `home` |
+| `move_cursor_end` | `end` |
+| `move_word_left` | `alt-left`, `alt-b` |
+| `move_word_right` | `alt-right`, `alt-f` |
+| `delete_before_cursor` | `backspace` |
+| `delete_at_cursor` | `delete` |
+| `delete_word_before_cursor` | `alt-backspace`, `ctrl-w` |
+| `delete_word_at_cursor` | `alt-delete` |
+| `commit_edit` | `enter` |
+| `cancel_edit` | `esc` |
+
+#### Help
+
+| Action | Default keys |
+| --- | --- |
+| `close_help` | `?`, `esc` |
+
+`Ctrl-C` is a fixed emergency quit key in all three modes.
+
 ## Storage and project lists
 
 The global list is stored at `~/.shtodo/global/tasks.json`. A local list is
@@ -139,19 +218,16 @@ Version one is intentionally local and narrow. It does not include accounts,
 synchronization, network access, sharing or collaboration, recurring tasks,
 reminders, notifications, dates or due dates, priorities, tags, or multiple
 named lists. It has no trash view, sidebar, mouse interaction, Git-root
-discovery for local scope, runtime plugins or extensions, user-editable
-keybindings, custom themes, configuration files, search, filtering, import,
-export, or additional task-management modes.
+discovery for local scope, runtime plugins or extensions, custom themes,
+search, filtering, import, export, or additional task-management modes.
 
 The following work is explicitly deferred: a trash view that lists, restores,
 and permanently removes tombstones; a sidebar for global, project, trash, and
-later views; a `~/.shtodo/config` format for keybindings and themes; and
-configuration validation, conflict reporting, and fallback behavior. Editing
-is scalar-value-based, so grapheme-cluster-aware editing is deferred if it
-becomes necessary. Homebrew and other package-manager distribution, plus
-broader Windows runtime testing and support, are also deferred. Windows is kept
-build-compatible where practical, but full Windows runtime support is not a
-version-one promise.
+later views. Editing is scalar-value-based, so grapheme-cluster-aware editing
+is deferred if it becomes necessary. Homebrew and other package-manager
+distribution, plus broader Windows runtime testing and support, are also
+deferred. Windows is kept build-compatible where practical, but full Windows
+runtime support is not a version-one promise.
 
 Version one also does not promise cross-device conflict resolution or
 compatibility with task-manager formats.
