@@ -1,6 +1,7 @@
 mod action;
 mod app;
 mod cli;
+mod config;
 mod input;
 mod storage;
 mod task;
