@@ -196,8 +196,8 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         frame.render_widget(
             Paragraph::new(format!(
                 "No tasks yet\nPress {} to add · {} for help",
-                binding_label(keymap, Mode::Normal, BindingId::StartAdd),
-                binding_label(keymap, Mode::Normal, BindingId::OpenHelp),
+                binding_label(keymap, Mode::Normal, BindingId::StartAdd).unwrap_or("i"),
+                binding_label(keymap, Mode::Normal, BindingId::OpenHelp).unwrap_or("?"),
             )),
             area,
         );
@@ -376,12 +376,11 @@ fn editor_item(text: &str) -> ListItem<'static> {
     ]))
 }
 
-fn binding_label(keymap: &Keymap, mode: Mode, id: BindingId) -> &str {
+fn binding_label(keymap: &Keymap, mode: Mode, id: BindingId) -> Option<&str> {
     keymap
         .bindings_for(mode)
         .find(|binding| binding.id() == id)
-        .expect("validated keymaps include every configured binding")
-        .preferred_label()
+        .map(ResolvedBinding::preferred_label)
 }
 
 fn footer_binding(binding: &ResolvedBinding) -> String {
@@ -409,7 +408,7 @@ mod tests {
         style::{Color, Modifier},
     };
 
-    use super::{editor_window, render};
+    use super::{binding_label, editor_window, render};
     use crate::{
         action::Action,
         app::App,
@@ -467,6 +466,20 @@ mod tests {
         assert!(text.contains("i add"));
         assert!(text.contains("? help"));
         assert!(text.contains("NORMAL"));
+    }
+
+    #[test]
+    fn binding_label_should_make_missing_bindings_explicit() {
+        let keymap = Keymap::defaults();
+
+        assert_eq!(
+            binding_label(&keymap, crate::app::Mode::Normal, BindingId::StartAdd),
+            Some("i")
+        );
+        assert_eq!(
+            binding_label(&keymap, crate::app::Mode::Normal, BindingId::MoveCursorLeft),
+            None
+        );
     }
 
     #[test]

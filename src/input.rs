@@ -280,17 +280,38 @@ pub(crate) struct ResolvedBinding {
     description: &'static str,
     footer_priority: Option<u8>,
     chords: Vec<KeyChord>,
-    labels: Vec<String>,
+    labels: BindingLabels,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BindingLabels {
+    preferred: String,
+    aliases: Vec<String>,
+}
+
+impl BindingLabels {
+    fn from_chords(chords: &[KeyChord]) -> Option<Self> {
+        let mut labels = chords.iter().map(KeyChord::label);
+        Some(Self {
+            preferred: labels.next()?,
+            aliases: labels.collect(),
+        })
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.preferred.as_str()).chain(self.aliases.iter().map(String::as_str))
+    }
+}
+
 impl ResolvedBinding {
     pub(crate) const fn id(&self) -> BindingId {
         self.id
     }
     pub(crate) fn preferred_label(&self) -> &str {
-        &self.labels[0]
+        &self.labels.preferred
     }
     pub(crate) fn labels(&self) -> impl Iterator<Item = &str> {
-        self.labels.iter().map(String::as_str)
+        self.labels.iter()
     }
     pub(crate) const fn action(&self) -> Action {
         self.action
@@ -555,7 +576,7 @@ impl Keymap {
         Self {
             bindings: DEFINITIONS
                 .iter()
-                .map(|definition| resolved(*definition, definition.defaults.to_vec()))
+                .filter_map(|definition| resolved(*definition, definition.defaults.to_vec()))
                 .collect(),
         }
     }
@@ -604,7 +625,7 @@ impl Keymap {
         let bindings = DEFINITIONS
             .iter()
             .enumerate()
-            .map(|(index, definition)| resolved(*definition, keys[index].clone()))
+            .filter_map(|(index, definition)| resolved(*definition, keys[index].clone()))
             .collect::<Vec<_>>();
         let mut seen = Vec::<(KeyChord, usize)>::new();
         for (index, binding) in bindings.iter().enumerate() {
@@ -619,7 +640,9 @@ impl Keymap {
                         (None, Some(_)) => (index, *previous),
                         (None, None) => continue,
                     };
-                    let (order, path) = sources[report].as_ref().expect("override source");
+                    let Some((order, path)) = sources[report].as_ref() else {
+                        continue;
+                    };
                     issues.push(KeymapIssue {
                         order: *order,
                         path: path.clone(),
@@ -684,10 +707,10 @@ impl Keymap {
     }
 }
 
-fn resolved(definition: Definition, mut chords: Vec<KeyChord>) -> ResolvedBinding {
+fn resolved(definition: Definition, mut chords: Vec<KeyChord>) -> Option<ResolvedBinding> {
     chords.extend_from_slice(definition.fixed);
-    let labels = chords.iter().map(KeyChord::label).collect();
-    ResolvedBinding {
+    let labels = BindingLabels::from_chords(&chords)?;
+    Some(ResolvedBinding {
         id: definition.id,
         mode: definition.id.mode(),
         action: definition.action,
@@ -695,13 +718,37 @@ fn resolved(definition: Definition, mut chords: Vec<KeyChord>) -> ResolvedBindin
         footer_priority: definition.footer_priority,
         chords,
         labels,
-    }
+    })
 }
 fn definition_index(id: BindingId) -> usize {
-    DEFINITIONS
-        .iter()
-        .position(|definition| definition.id == id)
-        .expect("every binding id has a definition")
+    match id {
+        BindingId::MoveDown => 0,
+        BindingId::MoveUp => 1,
+        BindingId::MoveTaskDown => 2,
+        BindingId::MoveTaskUp => 3,
+        BindingId::StartAdd => 4,
+        BindingId::StartEdit => 5,
+        BindingId::ToggleComplete => 6,
+        BindingId::Delete => 7,
+        BindingId::RestoreLatest => 8,
+        BindingId::OpenHelp => 9,
+        BindingId::NormalQuit => 10,
+        BindingId::MoveCursorLeft => 11,
+        BindingId::MoveCursorRight => 12,
+        BindingId::MoveCursorStart => 13,
+        BindingId::MoveCursorEnd => 14,
+        BindingId::MoveWordLeft => 15,
+        BindingId::MoveWordRight => 16,
+        BindingId::DeleteBeforeCursor => 17,
+        BindingId::DeleteAtCursor => 18,
+        BindingId::DeleteWordBeforeCursor => 19,
+        BindingId::DeleteWordAtCursor => 20,
+        BindingId::CommitEdit => 21,
+        BindingId::CancelEdit => 22,
+        BindingId::InsertEmergencyQuit => 23,
+        BindingId::CloseHelp => 24,
+        BindingId::HelpEmergencyQuit => 25,
+    }
 }
 fn issue(override_: &BindingOverride, message: impl Into<String>) -> KeymapIssue {
     KeymapIssue {
