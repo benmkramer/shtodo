@@ -53,6 +53,11 @@ fn editor_window(buffer: &str, cursor: usize, width: u16) -> (&str, u16) {
 }
 
 pub(crate) fn render(frame: &mut Frame<'_>, app: &App) {
+    if let Some(celebration) = app.celebration() {
+        render_celebration(frame, celebration.frame());
+        return;
+    }
+
     if frame.area().width < MIN_WIDTH || frame.area().height < MIN_HEIGHT {
         render_resize_message(frame);
         return;
@@ -70,6 +75,50 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App) {
     render_footer(frame, regions[2], app);
     if app.mode() == Mode::Help {
         render_help(frame);
+    }
+}
+
+fn render_celebration(frame: &mut Frame<'_>, tick: u16) {
+    const COLUMN_SPACING: usize = 4;
+    const TRAIL_LENGTH: u16 = 4;
+
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+    if area.width < 2 || area.height == 0 {
+        return;
+    }
+
+    let cycle = area.height.saturating_add(TRAIL_LENGTH);
+    for (column_index, x) in (area.x..area.right().saturating_sub(1))
+        .step_by(COLUMN_SPACING)
+        .enumerate()
+    {
+        let phase = (u16::try_from(column_index)
+            .unwrap_or(u16::MAX)
+            .saturating_mul(5))
+            % cycle;
+        let head = tick.wrapping_add(phase) % cycle;
+        for trail_offset in 0..TRAIL_LENGTH {
+            let Some(row) = head.checked_sub(trail_offset) else {
+                continue;
+            };
+            if row >= area.height {
+                continue;
+            }
+            let style = if trail_offset == 0 {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM)
+            };
+            frame.render_widget(
+                Paragraph::new("💩").style(style),
+                Rect::new(x, area.y.saturating_add(row), 2, 1),
+            );
+        }
     }
 }
 
@@ -398,6 +447,40 @@ mod tests {
                 cell.symbol() == "f" && cell.modifier.contains(Modifier::CROSSED_OUT)
             })
         );
+    }
+
+    #[test]
+    fn completing_the_final_open_task_should_render_a_pooper_matrix() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("last task").unwrap();
+        let mut app = App::new(list);
+
+        app.apply(Action::ToggleComplete).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        let poop_count = buffer
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "💩")
+            .count();
+
+        assert!(
+            poop_count >= 4,
+            "expected a poop matrix, found {poop_count}"
+        );
+    }
+
+    #[test]
+    fn advancing_the_celebration_should_move_the_pooper_matrix() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("last task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::ToggleComplete).unwrap();
+        let first_frame = render_app(&app, 40, 8);
+
+        app.advance_celebration();
+        let second_frame = render_app(&app, 40, 8);
+
+        assert_ne!(second_frame, first_frame);
     }
 
     #[test]

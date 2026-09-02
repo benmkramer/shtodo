@@ -3,6 +3,8 @@ use crate::{
     task::{ListError, MoveDirection, Task, TaskId, TaskList},
 };
 
+const CELEBRATION_FRAME_COUNT: u16 = 24;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Mode {
     Normal,
@@ -192,12 +194,24 @@ pub(crate) enum Transition {
     Quit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Celebration {
+    frame: u16,
+}
+
+impl Celebration {
+    pub(crate) fn frame(self) -> u16 {
+        self.frame
+    }
+}
+
 pub(crate) struct App {
     tasks: TaskList,
     mode: Mode,
     selected: Option<TaskId>,
     editor: Option<Editor>,
     message: Option<String>,
+    celebration: Option<Celebration>,
 }
 
 impl App {
@@ -209,6 +223,7 @@ impl App {
             selected,
             editor: None,
             message: None,
+            celebration: None,
         }
     }
 
@@ -242,6 +257,21 @@ impl App {
 
     pub(crate) fn message(&self) -> Option<&str> {
         self.message.as_deref()
+    }
+
+    pub(crate) fn celebration(&self) -> Option<Celebration> {
+        self.celebration
+    }
+
+    pub(crate) fn advance_celebration(&mut self) {
+        if let Some(mut celebration) = self.celebration {
+            celebration.frame = celebration.frame.saturating_add(1);
+            self.celebration = (celebration.frame < CELEBRATION_FRAME_COUNT).then_some(celebration);
+        }
+    }
+
+    pub(crate) fn dismiss_celebration(&mut self) {
+        self.celebration = None;
     }
 
     fn apply_normal(&mut self, action: Action) -> Result<Transition, ListError> {
@@ -377,7 +407,10 @@ impl App {
         let Some(selected) = self.selected else {
             return Ok(Transition::Unchanged);
         };
+        let had_open_tasks = self.tasks.visible_tasks().any(|task| !task.completed());
         self.tasks.toggle_complete(selected)?;
+        let has_open_tasks = self.tasks.visible_tasks().any(|task| !task.completed());
+        self.celebration = (had_open_tasks && !has_open_tasks).then_some(Celebration { frame: 0 });
         Ok(Transition::Persisted)
     }
 
@@ -904,6 +937,92 @@ mod tests {
             Transition::Persisted
         );
         assert_eq!(app.selected(), Some(first));
+    }
+
+    #[test]
+    fn reopening_a_task_should_clear_the_active_celebration() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::ToggleComplete).unwrap();
+
+        app.apply(Action::ToggleComplete).unwrap();
+
+        assert_eq!(app.celebration(), None);
+    }
+
+    #[test]
+    fn completing_a_task_should_not_celebrate_while_another_task_is_open() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("first").unwrap();
+        list.add("second").unwrap();
+        let mut app = App::new(list);
+
+        app.apply(Action::ToggleComplete).unwrap();
+
+        assert_eq!(app.celebration(), None);
+    }
+
+    #[test]
+    fn loading_an_already_completed_list_should_not_celebrate() {
+        let mut list = TaskList::new(ListScope::Global);
+        let id = list.add("task").unwrap();
+        list.toggle_complete(id).unwrap();
+
+        let app = App::new(list);
+
+        assert_eq!(app.celebration(), None);
+    }
+
+    #[test]
+    fn deleting_the_final_open_task_should_not_celebrate() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("task").unwrap();
+        let mut app = App::new(list);
+
+        app.apply(Action::Delete).unwrap();
+
+        assert_eq!(app.celebration(), None);
+    }
+
+    #[test]
+    fn recompleting_a_reopened_task_should_start_a_new_celebration() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::ToggleComplete).unwrap();
+        app.dismiss_celebration();
+        app.apply(Action::ToggleComplete).unwrap();
+
+        app.apply(Action::ToggleComplete).unwrap();
+
+        assert_eq!(app.celebration().unwrap().frame(), 0);
+    }
+
+    #[test]
+    fn celebration_should_finish_after_twenty_four_frames() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::ToggleComplete).unwrap();
+
+        for _ in 0..24 {
+            app.advance_celebration();
+        }
+
+        assert_eq!(app.celebration(), None);
+    }
+
+    #[test]
+    fn dismissing_celebration_should_restore_the_normal_interface() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::ToggleComplete).unwrap();
+
+        app.dismiss_celebration();
+
+        assert_eq!(app.celebration(), None);
     }
 
     #[test]
