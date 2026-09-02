@@ -93,7 +93,6 @@ pub(crate) struct LoadedKeymap {
     keymap: Keymap,
 }
 
-#[expect(dead_code, reason = "wired by Task 3 doctor integration")]
 impl LoadedKeymap {
     pub(crate) fn path(&self) -> &Path {
         &self.path
@@ -106,16 +105,51 @@ impl LoadedKeymap {
     pub(crate) fn keymap(&self) -> &Keymap {
         &self.keymap
     }
+
+    pub(crate) fn doctor_report(&self) -> String {
+        let result = match self.source() {
+            ConfigSource::Defaults => "OK: no config file; using defaults".to_owned(),
+            ConfigSource::File => format!(
+                "OK: {} configurable actions, {} active bindings",
+                self.keymap().configurable_action_count(),
+                self.keymap().active_binding_count()
+            ),
+        };
+        format!("Config: {}\n{result}\n", self.path().display())
+    }
+}
+
+impl ConfigError {
+    pub(crate) fn doctor_report(&self) -> String {
+        match self {
+            Self::Invalid { path, diagnostics } => {
+                let details = diagnostics
+                    .iter()
+                    .map(|diagnostic| format!("  {}: {}", diagnostic.path, diagnostic.message))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Config: {}\nInvalid configuration:\n{details}",
+                    path.display()
+                )
+            }
+            Self::Read { path, source } => {
+                format!(
+                    "Config: {}\nCould not read configuration: {source}",
+                    path.display()
+                )
+            }
+            Self::Parse { path, source } => {
+                format!("Config: {}\nInvalid TOML: {source}", path.display())
+            }
+        }
+    }
 }
 
 pub(crate) fn config_path(home: &Path) -> PathBuf {
     home.join(".shtodo/config.toml")
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired by Task 3 doctor integration")
-)]
 pub(crate) fn load(home: &Path) -> Result<LoadedKeymap, ConfigError> {
     let path = config_path(home);
     let source = match fs::read_to_string(&path) {

@@ -38,13 +38,24 @@ pub fn run() -> Result<()> {
         cli::Command::Add(choice, argument) => {
             add_task(choice, argument)?;
         }
+        cli::Command::Doctor => {
+            let home = storage::home_from_environment()?;
+            match config::load(&home) {
+                Ok(loaded) => std::io::stdout()
+                    .lock()
+                    .write_all(loaded.doctor_report().as_bytes())?,
+                Err(error) => return Err(eyre!("{}", error.doctor_report())),
+            }
+        }
         cli::Command::Run(choice) => {
             let home = storage::home_from_environment()?;
+            let loaded = config::load(&home).map_err(|error| {
+                eyre!("{}\nRun `shtodo doctor` for a focused config check.", error)
+            })?;
             let scope = storage::scope_from_environment(choice)?;
             let store = storage::Store::open(&home, scope)?;
             let app = app::App::new(store.load()?);
-            let keymap = input::Keymap::defaults();
-            terminal::run(app, &store, &keymap)?;
+            terminal::run(app, &store, loaded.keymap())?;
         }
     }
     Ok(())

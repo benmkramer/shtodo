@@ -16,6 +16,8 @@ fn help_should_exit_successfully_without_starting_tui() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("A fast, fully local terminal todo list"));
     assert!(stdout.contains("shtodo add <TASK>"));
+    assert!(stdout.contains("shtodo doctor"));
+    assert!(stdout.contains("Validate ~/.shtodo/config.toml"));
     assert!(stdout.contains("  add <TASK>  Add one task without opening the terminal UI.\n              When TASK is omitted, read it from standard input."));
     assert!(stdout.contains("printf 'Fix the bug\\n' | shtodo --local add"));
 }
@@ -140,6 +142,98 @@ fn add_should_reject_multiline_stdin_without_persisting() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("non-empty single line"));
     assert!(!home.path().join(".shtodo/global/tasks.json").exists());
+}
+
+#[test]
+fn doctor_should_accept_missing_config_without_creating_storage() {
+    let home = tempfile::tempdir().unwrap();
+
+    let output = run_with_home(home.path(), &["doctor"]);
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Config:"));
+    assert!(stdout.contains("OK: no config file; using defaults"));
+    assert!(!home.path().join(".shtodo").exists());
+}
+
+#[test]
+fn doctor_should_summarize_valid_effective_keymap_without_task_storage() {
+    let home = tempfile::tempdir().unwrap();
+    write_config(home.path(), "[keybindings.normal]\nmove_down = [\"x\"]\n");
+
+    let output = run_with_home(home.path(), &["doctor"]);
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("OK: 24 configurable actions, 32 active bindings")
+    );
+    assert!(!home.path().join(".shtodo/global").exists());
+    assert!(!home.path().join(".shtodo/projects").exists());
+}
+
+#[test]
+fn doctor_should_report_all_available_invalid_config_issues() {
+    let home = tempfile::tempdir().unwrap();
+    write_config(
+        home.path(),
+        "[keybindings.normal]\nmove_down = [\"dn\"]\nadd_task = [\"d\"]\n",
+    );
+
+    let output = run_with_home(home.path(), &["doctor"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Invalid configuration:"));
+    assert!(stderr.contains("keybindings.normal.move_down"));
+    assert!(stderr.contains("unknown key \"dn\""));
+    assert!(stderr.contains("keybindings.normal.add_task"));
+    assert!(stderr.contains("conflicts with delete_task"));
+    assert!(!home.path().join(".shtodo/global").exists());
+}
+
+#[test]
+fn interactive_startup_should_reject_invalid_config_before_creating_task_storage() {
+    let home = tempfile::tempdir().unwrap();
+    write_config(home.path(), "[keybindings.normal]\nmove_down = [\"dn\"]\n");
+
+    let output = run_with_home(home.path(), &[]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown key \"dn\""));
+    assert!(stderr.contains("Run `shtodo doctor`"));
+    assert!(!home.path().join(".shtodo/global").exists());
+}
+
+#[test]
+fn add_should_remain_available_while_interactive_config_is_invalid() {
+    let home = tempfile::tempdir().unwrap();
+    write_config(home.path(), "[keybindings.normal]\nmove_down = [\"dn\"]\n");
+
+    let output = run_with_home(home.path(), &["add", "repair config later"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        stored_task_text(home.path(), "global"),
+        "repair config later"
+    );
+}
+
+fn write_config(home: &std::path::Path, source: &str) {
+    let directory = home.join(".shtodo");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("config.toml"), source).unwrap();
+}
+
+fn run_with_home(home: &std::path::Path, arguments: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_shtodo"))
+        .args(arguments)
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
 }
 
 fn stored_task_text(home: &std::path::Path, scope: &str) -> String {

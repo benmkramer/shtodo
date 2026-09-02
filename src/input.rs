@@ -313,13 +313,6 @@ impl ResolvedBinding {
     pub(crate) fn labels(&self) -> impl Iterator<Item = &str> {
         self.labels.iter()
     }
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by Task 3 doctor integration")
-    )]
-    pub(crate) const fn action(&self) -> Action {
-        self.action
-    }
     pub(crate) const fn description(&self) -> &'static str {
         self.description
     }
@@ -697,20 +690,12 @@ impl Keymap {
             .iter()
             .filter(move |binding| binding.mode == mode)
     }
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by Task 3 doctor integration")
-    )]
     pub(crate) fn configurable_action_count(&self) -> usize {
         self.bindings
             .iter()
             .filter(|binding| binding.id.config_name().is_some())
             .count()
     }
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by Task 3 doctor integration")
-    )]
     pub(crate) fn active_binding_count(&self) -> usize {
         self.bindings
             .iter()
@@ -1053,11 +1038,6 @@ mod tests {
             Some(BindingId::MoveDown)
         );
         assert_eq!(BindingId::from_config(Mode::Help, "quit"), None);
-        let binding = keymap
-            .bindings_for(Mode::Normal)
-            .find(|binding| binding.id() == BindingId::MoveDown)
-            .unwrap();
-        assert_eq!(binding.action(), Action::MoveDown);
     }
 
     #[test]

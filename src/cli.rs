@@ -10,6 +10,7 @@ pub(crate) enum ScopeChoice {
 pub(crate) enum Command {
     Run(ScopeChoice),
     Add(ScopeChoice, Option<OsString>),
+    Doctor,
     Help,
     Version,
 }
@@ -50,6 +51,7 @@ where
         [local, command, text] if local == "--local" && command == "add" => {
             Ok(Command::Add(ScopeChoice::Local, Some(text.clone())))
         }
+        [command] if command == "doctor" => Ok(Command::Doctor),
         [value] if value == "--help" || value == "-h" => Ok(Command::Help),
         [value] if value == "--version" || value == "-V" => Ok(Command::Version),
         [value, ..] => Err(CliError {
@@ -69,12 +71,14 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo --local add <TASK>\n",
         "  shtodo add\n",
         "  shtodo --local add\n",
+        "  shtodo doctor\n",
         "  shtodo --help\n",
         "  shtodo --version\n",
         "\n",
         "Commands:\n",
         "  add <TASK>  Add one task without opening the terminal UI.\n",
         "              When TASK is omitted, read it from standard input.\n",
+        "  doctor      Validate ~/.shtodo/config.toml without opening the terminal UI.\n",
         "\n",
         "Options:\n",
         "  --local     Use the list for the current directory instead of the global list.\n",
@@ -118,6 +122,13 @@ mod tests {
     fn parse_args_should_accept_help_and_version_aliases() {
         assert_eq!(parse_args(args(&["-h"])), Ok(Command::Help));
         assert_eq!(parse_args(args(&["-V"])), Ok(Command::Version));
+    }
+
+    #[test]
+    fn parse_args_should_accept_only_the_exact_doctor_command() {
+        assert_eq!(parse_args(args(&["doctor"])), Ok(Command::Doctor));
+        assert!(parse_args(args(&["--local", "doctor"])).is_err());
+        assert!(parse_args(args(&["doctor", "extra"])).is_err());
     }
 
     #[test]
