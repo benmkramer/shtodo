@@ -74,7 +74,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
     render_content(frame, regions[1], app, keymap);
     render_footer(frame, regions[2], app, keymap);
     if app.mode() == Mode::Help {
-        render_help(frame, keymap);
+        render_help(frame, regions[1], keymap);
     }
 }
 
@@ -266,8 +266,7 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
     frame.render_widget(Paragraph::new(text), area);
 }
 
-fn render_help(frame: &mut Frame<'_>, keymap: &Keymap) {
-    let area = frame.area();
+fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap) {
     let block = Block::bordered().title("Keyboard help");
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -539,17 +538,23 @@ mod tests {
         let aliases = [
             "α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "λ", "μ", "ν", "ξ", "ο", "π", "ρ", "σ",
         ];
-        let keymap =
-            Keymap::with_overrides(&[override_for(BindingId::OpenHelp, &aliases)]).unwrap();
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::OpenHelp, &aliases),
+            override_for(BindingId::CloseHelp, &["x", "esc"]),
+        ])
+        .unwrap();
         let mut app = App::new(TaskList::new(ListScope::Global));
         app.apply(Action::OpenHelp).unwrap();
 
-        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+        let buffer = render_app_with_keymap(&app, &keymap, 80, 24);
+        let text = buffer_text(&buffer);
 
         for alias in aliases {
             assert!(text.contains(alias), "missing active Help alias: {alias}");
         }
         assert_eq!(text.matches("Ctrl-C").count(), 3);
+        assert!(buffer_row(&buffer, 80, 0).contains("shtodo global"));
+        assert!(buffer_row(&buffer, 80, 23).contains("HELP  x close help"));
     }
 
     #[test]

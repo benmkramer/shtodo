@@ -171,7 +171,17 @@ pub(crate) fn load(home: &Path) -> Result<LoadedKeymap, ConfigError> {
     let keymap = match Keymap::with_overrides(&overrides) {
         Ok(keymap) => Some(keymap),
         Err(issues) => {
-            diagnostics.extend(issues.into_iter().map(ConfigDiagnostic::from));
+            for issue in issues {
+                let member_prefix = format!("{}[", issue.path);
+                let explained_by_member_errors = issue.message == "must contain at least one key"
+                    && diagnostics.iter().any(|diagnostic| {
+                        diagnostic.path.starts_with(&member_prefix)
+                            && diagnostic.message == "expected a string"
+                    });
+                if !explained_by_member_errors {
+                    diagnostics.push(ConfigDiagnostic::from(issue));
+                }
+            }
             None
         }
     };
@@ -492,6 +502,34 @@ move_cursor_left = ["x"]
             diagnostic_paths(load(home.path()).unwrap_err()),
             vec!["keybindings.normal.move_down[1]"]
         );
+    }
+
+    #[test]
+    fn all_non_string_members_should_not_also_report_an_empty_array() {
+        let home = configured_home("[keybindings.normal]\nmove_down = [1]");
+
+        let diagnostics = match load(home.path()).unwrap_err() {
+            ConfigError::Invalid { diagnostics, .. } => diagnostics,
+            error => panic!("expected invalid configuration, got {error}"),
+        };
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].path, "keybindings.normal.move_down[0]");
+        assert_eq!(diagnostics[0].message, "expected a string");
+    }
+
+    #[test]
+    fn genuinely_empty_array_should_report_the_empty_array_error() {
+        let home = configured_home("[keybindings.normal]\nmove_down = []");
+
+        let diagnostics = match load(home.path()).unwrap_err() {
+            ConfigError::Invalid { diagnostics, .. } => diagnostics,
+            error => panic!("expected invalid configuration, got {error}"),
+        };
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].path, "keybindings.normal.move_down");
+        assert_eq!(diagnostics[0].message, "must contain at least one key");
     }
 
     #[test]
