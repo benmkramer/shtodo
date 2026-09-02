@@ -200,6 +200,7 @@ pub(crate) struct Celebration {
 }
 
 impl Celebration {
+    #[cfg(test)]
     pub(crate) fn frame(self) -> u16 {
         self.frame
     }

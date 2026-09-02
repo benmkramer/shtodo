@@ -6,7 +6,7 @@ All notable changes to shtodo are documented in this file.
 
 ### Added
 
-- A full-terminal falling poop celebration when the final open task is completed.
+- A centered poop-framed celebration when the final open task is completed.
 
 ## [0.1.0] - 2026-09-01
 
