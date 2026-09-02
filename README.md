@@ -1,4 +1,4 @@
-# shtodo
+# shtodo 💩
 
 `shtodo` is a deliberately small, keyboard-first terminal todo list. It keeps
 one global list by default and can keep an independent list for an exact
