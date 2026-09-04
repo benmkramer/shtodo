@@ -119,7 +119,7 @@ pub(crate) fn usage() -> &'static str {
         "Commands:\n",
         "  add <TASK>  Add one task without opening the terminal UI.\n",
         "              When TASK is omitted, read it from standard input.\n",
-        "  list        List active tasks with their IDs and states.\n",
+        "  list        List non-deleted tasks with their IDs and states.\n",
         "  delete <ID> Soft-delete one task by its scope-local ID.\n",
         "  doctor      Validate ~/.shtodo/config.toml without opening the terminal UI.\n",
         "\n",

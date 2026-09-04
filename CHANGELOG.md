@@ -4,6 +4,11 @@ All notable changes to shtodo are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Plain-text `list` commands with scope-local task IDs and open/done states.
+- Recoverable, idempotent task deletion by ID from global or exact-directory scopes.
+
 ## [0.1.0-beta.1] - 2026-09-02
 
 ### Added

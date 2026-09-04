@@ -16,6 +16,10 @@ fn help_should_exit_successfully_without_starting_tui() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("A fast, fully local terminal todo list"));
     assert!(stdout.contains("shtodo add <TASK>"));
+    assert!(stdout.contains("shtodo list"));
+    assert!(stdout.contains("shtodo --local list"));
+    assert!(stdout.contains("shtodo delete <ID>"));
+    assert!(stdout.contains("shtodo --local delete <ID>"));
     assert!(stdout.contains("shtodo doctor"));
     assert!(stdout.contains("Validate ~/.shtodo/config.toml"));
     assert!(stdout.contains("  add <TASK>  Add one task without opening the terminal UI.\n              When TASK is omitted, read it from standard input."));

@@ -7,6 +7,10 @@ shtodo
 shtodo --local
 shtodo add "Fix the bug"
 shtodo --local add "Run the tests"
+shtodo list
+shtodo --local list
+shtodo delete 3
+shtodo --local delete 3
 shtodo doctor
 shtodo --help
 shtodo --version
@@ -16,6 +20,48 @@ Running `shtodo` opens the default global list. Running `shtodo --local` opens
 a list for the exact directory from which it is run. `--local` does not search
 parent directories or use a repository root. Use `--help` (or `-h`) for usage
 and `--version` (or `-V`) for the installed version.
+
+### Shell listing and deletion
+
+`shtodo list` prints every non-deleted global task in canonical order. Use
+`shtodo --local list` for the exact current-directory scope. Each task occupies
+one line, with two ASCII spaces between its persisted ID, lowercase state, and
+text:
+
+```text
+1  open  Fix the bug
+2  done  Run the tests
+```
+
+There is no heading or summary. An empty or never-created list prints nothing
+and exits successfully. Listing is a side-effect-free reader: it does not
+create `~/.shtodo`, a scope directory, or a lock file, and it can read the last
+complete atomically saved snapshot while another process holds the writer
+lock. Snapshot validation errors still fail the command without changing the
+snapshot. This readable text is a display contract, not a serialization
+format.
+
+`shtodo delete <ID>` and `shtodo --local delete <ID>` soft-delete exactly one
+task from the selected scope. IDs are positive integers local to their scope,
+so global task `3` and local task `3` may be different tasks. A successful
+delete prints:
+
+```text
+Deleted 3: Fix the bug
+```
+
+Repeating the command is an idempotent success that does not rewrite the
+snapshot:
+
+```text
+Already deleted 3: Fix the bug
+```
+
+Deleted tasks retain their tombstones and can be restored with `u` in the TUI.
+An unknown ID fails with `task 3 was not found`. Missing, zero, signed,
+nonnumeric, and extra IDs are usage errors. Deletion uses the selected scope's
+writer lock and atomic save path, so it fails if another writer holds that
+lock. Invalid keybinding configuration does not block either shell command.
 
 The interface has Normal, Insert, and Help modes. Add or edit tasks in Insert
 mode, then press Enter to save. Task text is trimmed, must be non-empty and
@@ -92,7 +138,8 @@ Each list scope has its own process lock. A second `shtodo` process for the
 same global or local list is rejected while the first holds the lock; a global
 and a different local list can be open independently. Local-list identity is
 the canonical absolute directory path. Moving a directory therefore creates a
-different local-list identity, even if its name is unchanged.
+different local-list identity, even if its name is unchanged. The read-only
+`list` command does not acquire this writer lock.
 
 ## Version-one limits
 
@@ -101,7 +148,8 @@ synchronization, network access, sharing or collaboration, recurring tasks,
 reminders, notifications, dates or due dates, priorities, tags, or multiple
 named lists. It has no trash view, sidebar, mouse interaction, Git-root
 discovery for local scope, runtime plugins or extensions, custom themes,
-search, filtering, import, export, or additional task-management modes.
+search, filtering, import, export, structured JSON output, bulk commands,
+permanent deletion, or additional task-management modes.
 
 The following work is explicitly deferred: a trash view that lists, restores,
 and permanently removes tombstones; a sidebar for global, project, trash, and
