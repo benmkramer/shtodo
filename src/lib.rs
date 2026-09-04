@@ -105,6 +105,21 @@ fn delete_task(choice: cli::ScopeChoice, raw_id: u64) -> Result<()> {
     let home = storage::home_from_environment()?;
     let scope = storage::scope_from_environment(choice)?;
     let store = storage::Store::open(&home, scope)?;
+    let (id, text, already_deleted) = delete_task_in_store(&store, raw_id)?;
+
+    let prefix = if already_deleted {
+        "Already deleted"
+    } else {
+        "Deleted"
+    };
+    writeln!(std::io::stdout().lock(), "{prefix} {}: {}", id.get(), text)?;
+    Ok(())
+}
+
+fn delete_task_in_store(
+    store: &storage::Store,
+    raw_id: u64,
+) -> Result<(task::TaskId, String, bool)> {
     let mut tasks = store.load()?;
     let id = task::TaskId::from_shell_integer(raw_id)
         .ok_or_else(|| eyre!("task ID must be a positive integer"))?;
@@ -114,19 +129,12 @@ fn delete_task(choice: cli::ScopeChoice, raw_id: u64) -> Result<()> {
     };
 
     if already_deleted {
-        writeln!(
-            std::io::stdout().lock(),
-            "Already deleted {}: {}",
-            id.get(),
-            text
-        )?;
-        return Ok(());
+        return Ok((id, text, true));
     }
 
     tasks.delete(id)?;
     store.save(&tasks)?;
-    writeln!(std::io::stdout().lock(), "Deleted {}: {}", id.get(), text)?;
-    Ok(())
+    Ok((id, text, false))
 }
 
 fn read_task_from_stdin() -> Result<String> {
@@ -145,4 +153,23 @@ fn read_task_from_stdin() -> Result<String> {
 
 fn missing_task_text() -> color_eyre::Report {
     eyre!("task text is required\n\n{}", cli::usage())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_task_in_store, storage, task};
+
+    #[test]
+    fn cli_delete_should_remain_restorable_after_storage_round_trip() {
+        let home = tempfile::tempdir().unwrap();
+        let store = storage::Store::open(home.path(), task::ListScope::Global).unwrap();
+        let mut tasks = task::TaskList::new(task::ListScope::Global);
+        let id = tasks.add("restore me").unwrap();
+        store.save(&tasks).unwrap();
+
+        delete_task_in_store(&store, id.get()).unwrap();
+        let mut loaded = store.load().unwrap();
+
+        assert_eq!(loaded.restore_latest().unwrap(), Some(id));
+    }
 }
