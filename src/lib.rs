@@ -41,8 +41,8 @@ pub fn run() -> Result<()> {
         cli::Command::List(choice) => {
             list_tasks(choice)?;
         }
-        cli::Command::Delete(_, _) => {
-            return Err(eyre!("command is not implemented"));
+        cli::Command::Delete(choice, id) => {
+            delete_task(choice, id)?;
         }
         cli::Command::Doctor => {
             let home = storage::home_from_environment()?;
@@ -98,6 +98,34 @@ fn list_tasks(choice: cli::ScopeChoice) -> Result<()> {
         let state = if task.completed() { "done" } else { "open" };
         writeln!(stdout, "{}  {}  {}", task.id().get(), state, task.text())?;
     }
+    Ok(())
+}
+
+fn delete_task(choice: cli::ScopeChoice, raw_id: u64) -> Result<()> {
+    let home = storage::home_from_environment()?;
+    let scope = storage::scope_from_environment(choice)?;
+    let store = storage::Store::open(&home, scope)?;
+    let mut tasks = store.load()?;
+    let id = task::TaskId::from_shell_integer(raw_id)
+        .ok_or_else(|| eyre!("task ID must be a positive integer"))?;
+    let (text, already_deleted) = {
+        let selected = tasks.task(id).ok_or(task::ListError::TaskNotFound(id))?;
+        (selected.text().to_owned(), selected.is_deleted())
+    };
+
+    if already_deleted {
+        writeln!(
+            std::io::stdout().lock(),
+            "Already deleted {}: {}",
+            id.get(),
+            text
+        )?;
+        return Ok(());
+    }
+
+    tasks.delete(id)?;
+    store.save(&tasks)?;
+    writeln!(std::io::stdout().lock(), "Deleted {}: {}", id.get(), text)?;
     Ok(())
 }
 

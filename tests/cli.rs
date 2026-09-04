@@ -357,6 +357,160 @@ fn list_should_ignore_invalid_interactive_config() {
     );
 }
 
+#[test]
+fn delete_should_tombstone_one_global_task_after_persisting() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        run_with_home(home.path(), &["add", "Fix the bug"])
+            .status
+            .success()
+    );
+    assert!(
+        run_with_home(home.path(), &["add", "Keep this task"])
+            .status
+            .success()
+    );
+
+    let output = run_with_home(home.path(), &["delete", "1"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Deleted 1: Fix the bug\n"
+    );
+    assert!(output.stderr.is_empty());
+    let snapshot = read_snapshot(&snapshot_path(home.path(), "global"));
+    assert_eq!(snapshot["tasks"][0]["deletion_sequence"], Value::from(1));
+    assert_eq!(snapshot["next_deletion_sequence"], Value::from(2));
+    assert_eq!(snapshot["tasks"][1]["text"], "Keep this task");
+    assert_eq!(snapshot["tasks"][1]["deletion_sequence"], Value::Null);
+}
+
+#[test]
+fn repeated_delete_should_be_an_idempotent_no_write_success() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        run_with_home(home.path(), &["add", "Fix the bug"])
+            .status
+            .success()
+    );
+    assert!(
+        run_with_home(home.path(), &["delete", "1"])
+            .status
+            .success()
+    );
+    let path = snapshot_path(home.path(), "global");
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run_with_home(home.path(), &["delete", "1"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Already deleted 1: Fix the bug\n"
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn delete_unknown_id_should_fail_without_writing() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        run_with_home(home.path(), &["add", "existing"])
+            .status
+            .success()
+    );
+    let path = snapshot_path(home.path(), "global");
+    let before = std::fs::read(&path).unwrap();
+
+    let output = run_with_home(home.path(), &["delete", "3"]);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("task 3 was not found"));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn invalid_delete_ids_should_fail_before_creating_storage() {
+    for arguments in [
+        &["delete"] as &[&str],
+        &["delete", "0"],
+        &["delete", "-1"],
+        &["delete", "three"],
+        &["delete", "1", "extra"],
+    ] {
+        let home = tempfile::tempdir().unwrap();
+
+        let output = run_with_home(home.path(), arguments);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+        assert!(!home.path().join(".shtodo").exists());
+    }
+}
+
+#[test]
+fn local_delete_should_change_only_the_exact_directory_scope() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    assert!(
+        run_with_home(home.path(), &["add", "global task"])
+            .status
+            .success()
+    );
+    assert!(
+        run_with_home_at(
+            home.path(),
+            project.path(),
+            &["--local", "add", "local task"]
+        )
+        .status
+        .success()
+    );
+    let global_path = snapshot_path(home.path(), "global");
+    let global_before = std::fs::read(&global_path).unwrap();
+
+    let output = run_with_home_at(home.path(), project.path(), &["--local", "delete", "1"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Deleted 1: local task\n"
+    );
+    assert_eq!(std::fs::read(global_path).unwrap(), global_before);
+    assert_eq!(
+        String::from_utf8_lossy(&run_with_home_at(home.path(), project.path(), &["list"]).stdout),
+        "1  open  global task\n"
+    );
+    assert!(
+        run_with_home_at(home.path(), project.path(), &["--local", "list"])
+            .stdout
+            .is_empty()
+    );
+}
+
+#[test]
+fn delete_should_ignore_invalid_interactive_config() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        run_with_home(home.path(), &["add", "repair config later"])
+            .status
+            .success()
+    );
+    write_config(home.path(), "[keybindings.normal]\nmove_down = [\"dn\"]\n");
+
+    let output = run_with_home(home.path(), &["delete", "1"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Deleted 1: repair config later\n"
+    );
+}
+
 fn write_config(home: &std::path::Path, source: &str) {
     let directory = home.join(".shtodo");
     std::fs::create_dir_all(&directory).unwrap();
