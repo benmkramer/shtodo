@@ -1,6 +1,6 @@
 # shtodo 💩
 
-`shtodo` is a deliberately small, keyboard-first terminal todo list. It keeps
+For people who have *sh*it _todo_ and want to track it in their terminal. `shtodo` is a deliberately small, keyboard-first terminal todo list. It keeps
 one global list by default and can keep an independent list for an exact
 project directory.
 
@@ -72,37 +72,37 @@ mode, saves nothing, and shows `Task text cannot be empty`.
 
 ### Normal mode
 
-| Key | Action |
-| --- | --- |
-| `j` or Down | Move selection down |
-| `k` or Up | Move selection up |
-| `J` | Move the selected task down |
-| `K` | Move the selected task up |
-| `i` | Add a task |
-| `e` | Edit the selected task |
-| Space | Toggle the selected task complete or incomplete |
-| `d` | Delete the selected task |
-| `u` | Restore the most recently deleted task |
-| `?` | Open keyboard help |
-| `q` or Ctrl-C | Quit |
+| Key           | Action                                          |
+| ------------- | ----------------------------------------------- |
+| `j` or Down   | Move selection down                             |
+| `k` or Up     | Move selection up                               |
+| `J`           | Move the selected task down                     |
+| `K`           | Move the selected task up                       |
+| `i`           | Add a task                                      |
+| `e`           | Edit the selected task                          |
+| Space         | Toggle the selected task complete or incomplete |
+| `d`           | Delete the selected task                        |
+| `u`           | Restore the most recently deleted task          |
+| `?`           | Open keyboard help                              |
+| `q` or Ctrl-C | Quit                                            |
 
 ### Insert mode
 
 Type to enter task text. `q` is ordinary text in this mode.
 
-| Key | Action |
-| --- | --- |
-| Left or Right | Move the text cursor |
-| Alt-Left or Alt-b | Move to the start of the previous word |
-| Alt-Right or Alt-f | Move to the end of the next word |
-| Home or End | Move the text cursor to the start or end |
-| Backspace | Delete before the cursor |
-| Alt-Backspace or Ctrl-w | Delete the previous word |
-| Delete | Delete at the cursor |
-| Alt-Delete | Delete the next word |
-| Enter | Save the add or edit |
-| Esc | Cancel the add or edit |
-| Ctrl-C | Quit |
+| Key                     | Action                                   |
+| ----------------------- | ---------------------------------------- |
+| Left or Right           | Move the text cursor                     |
+| Alt-Left or Alt-b       | Move to the start of the previous word   |
+| Alt-Right or Alt-f      | Move to the end of the next word         |
+| Home or End             | Move the text cursor to the start or end |
+| Backspace               | Delete before the cursor                 |
+| Alt-Backspace or Ctrl-w | Delete the previous word                 |
+| Delete                  | Delete at the cursor                     |
+| Alt-Delete              | Delete the next word                     |
+| Enter                   | Save the add or edit                     |
+| Esc                     | Cancel the add or edit                   |
+| Ctrl-C                  | Quit                                     |
 
 On macOS, terminals report Option as Alt when Option is configured as an
 Escape/Meta key. The common Meta-b and Meta-f encodings are supported by the
@@ -110,10 +110,10 @@ Alt-b and Alt-f aliases above.
 
 ### Help mode
 
-| Key | Action |
-| --- | --- |
+| Key        | Action              |
+| ---------- | ------------------- |
 | `?` or Esc | Close keyboard help |
-| Ctrl-C | Quit |
+| Ctrl-C     | Quit                |
 
 ## Configuring keybindings
 
@@ -157,42 +157,42 @@ same parser and validator without opening task storage or the TUI.
 
 #### Normal
 
-| Action | Default keys |
-| --- | --- |
-| `move_down` | `j`, `down` |
-| `move_up` | `k`, `up` |
-| `move_task_down` | `J` |
-| `move_task_up` | `K` |
-| `add_task` | `i` |
-| `edit_task` | `e` |
-| `toggle_complete` | `space` |
-| `delete_task` | `d` |
-| `restore_latest` | `u` |
-| `open_help` | `?` |
-| `quit` | `q` |
+| Action            | Default keys |
+| ----------------- | ------------ |
+| `move_down`       | `j`, `down`  |
+| `move_up`         | `k`, `up`    |
+| `move_task_down`  | `J`          |
+| `move_task_up`    | `K`          |
+| `add_task`        | `i`          |
+| `edit_task`       | `e`          |
+| `toggle_complete` | `space`      |
+| `delete_task`     | `d`          |
+| `restore_latest`  | `u`          |
+| `open_help`       | `?`          |
+| `quit`            | `q`          |
 
 #### Insert
 
-| Action | Default keys |
-| --- | --- |
-| `move_cursor_left` | `left` |
-| `move_cursor_right` | `right` |
-| `move_cursor_start` | `home` |
-| `move_cursor_end` | `end` |
-| `move_word_left` | `alt-left`, `alt-b` |
-| `move_word_right` | `alt-right`, `alt-f` |
-| `delete_before_cursor` | `backspace` |
-| `delete_at_cursor` | `delete` |
+| Action                      | Default keys              |
+| --------------------------- | ------------------------- |
+| `move_cursor_left`          | `left`                    |
+| `move_cursor_right`         | `right`                   |
+| `move_cursor_start`         | `home`                    |
+| `move_cursor_end`           | `end`                     |
+| `move_word_left`            | `alt-left`, `alt-b`       |
+| `move_word_right`           | `alt-right`, `alt-f`      |
+| `delete_before_cursor`      | `backspace`               |
+| `delete_at_cursor`          | `delete`                  |
 | `delete_word_before_cursor` | `alt-backspace`, `ctrl-w` |
-| `delete_word_at_cursor` | `alt-delete` |
-| `commit_edit` | `enter` |
-| `cancel_edit` | `esc` |
+| `delete_word_at_cursor`     | `alt-delete`              |
+| `commit_edit`               | `enter`                   |
+| `cancel_edit`               | `esc`                     |
 
 #### Help
 
-| Action | Default keys |
-| --- | --- |
-| `close_help` | `?`, `esc` |
+| Action       | Default keys |
+| ------------ | ------------ |
+| `close_help` | `?`, `esc`   |
 
 `Ctrl-C` is a fixed emergency quit key in all three modes.
 
