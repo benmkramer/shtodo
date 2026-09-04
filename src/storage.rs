@@ -246,6 +246,11 @@ pub(crate) fn paths_for_home(home: &Path, scope: &ListScope) -> Result<StoragePa
     })
 }
 
+pub(crate) fn load_read_only(home: &Path, scope: &ListScope) -> Result<TaskList> {
+    let paths = paths_for_home(home, scope)?;
+    load_snapshot(&paths.data_file, scope)
+}
+
 pub(crate) fn load_snapshot(path: &Path, expected_scope: &ListScope) -> Result<TaskList> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -300,7 +305,8 @@ mod tests {
     #[cfg(unix)]
     use super::canonical_path_string;
     use super::{
-        Store, load_snapshot, paths_for_home, project_folder_name, resolve_home, resolve_scope,
+        Store, load_read_only, load_snapshot, paths_for_home, project_folder_name, resolve_home,
+        resolve_scope,
     };
     use crate::{
         cli::ScopeChoice,
@@ -448,6 +454,76 @@ mod tests {
 
         assert_eq!(list.scope(), &scope);
         assert_eq!(list.visible_tasks().count(), 0);
+    }
+
+    #[test]
+    fn read_only_missing_snapshot_should_not_create_storage() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let list = load_read_only(temp.path(), &ListScope::Global).unwrap();
+
+        assert_eq!(list.scope(), &ListScope::Global);
+        assert_eq!(list.visible_tasks().count(), 0);
+        assert!(!temp.path().join(".shtodo").exists());
+    }
+
+    #[test]
+    fn read_only_should_load_saved_snapshot_while_writer_lock_is_held() {
+        let temp = tempfile::tempdir().unwrap();
+        let scope = ListScope::Global;
+        let store = Store::open(temp.path(), scope.clone()).unwrap();
+        let mut list = TaskList::new(scope.clone());
+        list.add("persist me").unwrap();
+        store.save(&list).unwrap();
+
+        let loaded = load_read_only(temp.path(), &scope).unwrap();
+
+        assert_eq!(loaded, list);
+    }
+
+    #[test]
+    fn read_only_should_resolve_global_and_exact_local_snapshot_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let local_scope = ListScope::Project {
+            path: std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let global_store = Store::open(temp.path(), ListScope::Global).unwrap();
+        let local_store = Store::open(temp.path(), local_scope.clone()).unwrap();
+        let mut global = TaskList::new(ListScope::Global);
+        global.add("global").unwrap();
+        global_store.save(&global).unwrap();
+        let mut local = TaskList::new(local_scope.clone());
+        local.add("local").unwrap();
+        local_store.save(&local).unwrap();
+
+        assert_eq!(
+            load_read_only(temp.path(), &ListScope::Global).unwrap(),
+            global
+        );
+        assert_eq!(load_read_only(temp.path(), &local_scope).unwrap(), local);
+    }
+
+    #[test]
+    fn read_only_should_preserve_snapshot_validation_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_for_home(temp.path(), &ListScope::Global).unwrap();
+        std::fs::create_dir_all(&paths.directory).unwrap();
+        let documents = [
+            "{",
+            r#"{"schema_version":2}"#,
+            r#"{"schema_version":1,"scope":{"kind":"global"},"next_task_id":1,"next_deletion_sequence":1,"tasks":[{"id":0,"text":"bad","completed":false,"deletion_sequence":null}]}"#,
+            r#"{"schema_version":1,"scope":{"kind":"project","path":"/tmp/other"},"next_task_id":1,"next_deletion_sequence":1,"tasks":[]}"#,
+        ];
+
+        for document in documents {
+            std::fs::write(&paths.data_file, document).unwrap();
+            let before = std::fs::read(&paths.data_file).unwrap();
+            assert!(load_read_only(temp.path(), &ListScope::Global).is_err());
+            assert_eq!(std::fs::read(&paths.data_file).unwrap(), before);
+        }
     }
 
     #[test]

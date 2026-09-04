@@ -38,6 +38,12 @@ pub fn run() -> Result<()> {
         cli::Command::Add(choice, argument) => {
             add_task(choice, argument)?;
         }
+        cli::Command::List(choice) => {
+            list_tasks(choice)?;
+        }
+        cli::Command::Delete(_, _) => {
+            return Err(eyre!("command is not implemented"));
+        }
         cli::Command::Doctor => {
             let home = storage::home_from_environment()?;
             match config::load(&home) {
@@ -80,6 +86,18 @@ fn add_task(choice: cli::ScopeChoice, argument: Option<OsString>) -> Result<()> 
     store.save(&tasks)?;
 
     writeln!(std::io::stdout().lock(), "Added: {}", text.trim())?;
+    Ok(())
+}
+
+fn list_tasks(choice: cli::ScopeChoice) -> Result<()> {
+    let home = storage::home_from_environment()?;
+    let scope = storage::scope_from_environment(choice)?;
+    let tasks = storage::load_read_only(&home, &scope)?;
+    let mut stdout = std::io::stdout().lock();
+    for task in tasks.visible_tasks() {
+        let state = if task.completed() { "done" } else { "open" };
+        writeln!(stdout, "{}  {}  {}", task.id().get(), state, task.text())?;
+    }
     Ok(())
 }
 

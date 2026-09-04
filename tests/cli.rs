@@ -221,6 +221,142 @@ fn add_should_remain_available_while_interactive_config_is_invalid() {
     );
 }
 
+#[test]
+fn list_missing_global_scope_should_be_empty_and_side_effect_free() {
+    let home = tempfile::tempdir().unwrap();
+
+    let output = run_with_home(home.path(), &["list"]);
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(!home.path().join(".shtodo").exists());
+}
+
+#[test]
+fn list_should_print_exact_ids_states_and_text_in_canonical_order() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        run_with_home(home.path(), &["add", "Fix the bug"])
+            .status
+            .success()
+    );
+    assert!(
+        run_with_home(home.path(), &["add", "Run the tests"])
+            .status
+            .success()
+    );
+    let path = snapshot_path(home.path(), "global");
+    let mut snapshot = read_snapshot(&path);
+    snapshot["tasks"][1]["completed"] = Value::Bool(true);
+    write_snapshot(&path, &snapshot);
+
+    let output = run_with_home(home.path(), &["list"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "1  open  Fix the bug\n2  done  Run the tests\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn list_should_omit_tombstones_without_renumbering_ids() {
+    let home = tempfile::tempdir().unwrap();
+    for task in ["first", "deleted", "third"] {
+        assert!(run_with_home(home.path(), &["add", task]).status.success());
+    }
+    let path = snapshot_path(home.path(), "global");
+    let mut snapshot = read_snapshot(&path);
+    snapshot["tasks"][1]["deletion_sequence"] = Value::from(1);
+    snapshot["next_deletion_sequence"] = Value::from(2);
+    write_snapshot(&path, &snapshot);
+
+    let output = run_with_home(home.path(), &["list"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "1  open  first\n3  open  third\n"
+    );
+}
+
+#[test]
+fn list_should_keep_global_and_exact_local_scopes_isolated() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    assert!(
+        run_with_home(home.path(), &["add", "global task"])
+            .status
+            .success()
+    );
+    assert!(
+        run_with_home_at(
+            home.path(),
+            project.path(),
+            &["--local", "add", "local task"]
+        )
+        .status
+        .success()
+    );
+
+    let global = run_with_home_at(home.path(), project.path(), &["list"]);
+    let local = run_with_home_at(home.path(), project.path(), &["--local", "list"]);
+
+    assert!(global.status.success());
+    assert!(local.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&global.stdout),
+        "1  open  global task\n"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&local.stdout),
+        "1  open  local task\n"
+    );
+}
+
+#[test]
+fn list_should_reject_invalid_snapshots_without_modifying_them() {
+    let documents = [
+        b"{".as_slice(),
+        br#"{"schema_version":1,"scope":{"kind":"project","path":"/tmp/wrong"},"next_task_id":1,"next_deletion_sequence":1,"tasks":[]}"#.as_slice(),
+    ];
+
+    for document in documents {
+        let home = tempfile::tempdir().unwrap();
+        let path = snapshot_path(home.path(), "global");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, document).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let output = run_with_home(home.path(), &["list"]);
+
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn list_should_ignore_invalid_interactive_config() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(
+        run_with_home(home.path(), &["add", "repair config later"])
+            .status
+            .success()
+    );
+    write_config(home.path(), "[keybindings.normal]\nmove_down = [\"dn\"]\n");
+
+    let output = run_with_home(home.path(), &["list"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "1  open  repair config later\n"
+    );
+}
+
 fn write_config(home: &std::path::Path, source: &str) {
     let directory = home.join(".shtodo");
     std::fs::create_dir_all(&directory).unwrap();
@@ -234,6 +370,34 @@ fn run_with_home(home: &std::path::Path, arguments: &[&str]) -> std::process::Ou
         .stdin(Stdio::null())
         .output()
         .unwrap()
+}
+
+fn run_with_home_at(
+    home: &std::path::Path,
+    current_dir: &std::path::Path,
+    arguments: &[&str],
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_shtodo"))
+        .args(arguments)
+        .env("HOME", home)
+        .current_dir(current_dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+fn snapshot_path(home: &std::path::Path, scope: &str) -> std::path::PathBuf {
+    home.join(".shtodo").join(scope).join("tasks.json")
+}
+
+fn read_snapshot(path: &std::path::Path) -> Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+fn write_snapshot(path: &std::path::Path, snapshot: &Value) {
+    let mut bytes = serde_json::to_vec_pretty(snapshot).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(path, bytes).unwrap();
 }
 
 fn stored_task_text(home: &std::path::Path, scope: &str) -> String {
