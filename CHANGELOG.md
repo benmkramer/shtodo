@@ -4,6 +4,8 @@ All notable changes to shtodo are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] - 2026-09-05
+
 ### Added
 
 - Plain-text `list` commands with scope-local task IDs and open/done states.
@@ -21,5 +23,6 @@ All notable changes to shtodo are documented in this file.
 - User-configured keybindings from `~/.shtodo/config.toml`, reflected in input, footer hints, empty-state guidance, and keyboard help.
 - `shtodo doctor` for validating keybinding syntax, reserved keys, and conflicts without opening task storage or the terminal UI.
 
-[Unreleased]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.1...HEAD
+[Unreleased]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.2...HEAD
+[0.1.0-beta.2]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/benmkramer/shtodo/releases/tag/v0.1.0-beta.1
