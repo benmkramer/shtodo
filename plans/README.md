@@ -17,6 +17,11 @@ with a short rationale.
 
 - Plan 001 has no dependencies.
 
+## Completed historical plans
+
+- [Shtodo version-one implementation](./2026-09-01-shtodo-v1.md)
+- [User-configured keybindings](./2026-09-01-user-configured-keybindings.md)
+
 ## Findings considered and rejected
 
 - JSON output is deferred because the agent-facing contract needs real usage
