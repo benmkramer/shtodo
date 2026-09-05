@@ -10,24 +10,35 @@ pub(crate) enum ScopeChoice {
 pub(crate) enum Command {
     Run(ScopeChoice),
     Add(ScopeChoice, Option<OsString>),
+    List(ScopeChoice),
+    Delete(ScopeChoice, u64),
     Doctor,
     Help,
     Version,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct CliError {
-    argument: OsString,
+pub(crate) enum CliError {
+    UnsupportedArguments { argument: OsString },
+    MissingTaskId,
+    InvalidTaskId { value: OsString },
 }
 
 impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "unsupported shtodo arguments: {:?}\n\n{}",
-            self.argument,
-            usage()
-        )
+        match self {
+            Self::UnsupportedArguments { argument } => {
+                write!(formatter, "unsupported shtodo arguments: {argument:?}")?;
+            }
+            Self::MissingTaskId => formatter.write_str("task ID is required")?,
+            Self::InvalidTaskId { value } => {
+                write!(
+                    formatter,
+                    "invalid task ID {value:?}; expected a positive integer"
+                )?;
+            }
+        }
+        write!(formatter, "\n\n{}", usage())
     }
 }
 
@@ -51,13 +62,39 @@ where
         [local, command, text] if local == "--local" && command == "add" => {
             Ok(Command::Add(ScopeChoice::Local, Some(text.clone())))
         }
+        [command] if command == "list" => Ok(Command::List(ScopeChoice::Global)),
+        [local, command] if local == "--local" && command == "list" => {
+            Ok(Command::List(ScopeChoice::Local))
+        }
+        [command] if command == "delete" => Err(CliError::MissingTaskId),
+        [local, command] if local == "--local" && command == "delete" => {
+            Err(CliError::MissingTaskId)
+        }
+        [command, id] if command == "delete" => {
+            Ok(Command::Delete(ScopeChoice::Global, parse_task_id(id)?))
+        }
+        [local, command, id] if local == "--local" && command == "delete" => {
+            Ok(Command::Delete(ScopeChoice::Local, parse_task_id(id)?))
+        }
         [command] if command == "doctor" => Ok(Command::Doctor),
         [value] if value == "--help" || value == "-h" => Ok(Command::Help),
         [value] if value == "--version" || value == "-V" => Ok(Command::Version),
-        [value, ..] => Err(CliError {
+        [value, ..] => Err(CliError::UnsupportedArguments {
             argument: value.clone(),
         }),
     }
+}
+
+fn parse_task_id(value: &OsString) -> Result<u64, CliError> {
+    let id = value
+        .to_str()
+        .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|id| *id > 0)
+        .ok_or_else(|| CliError::InvalidTaskId {
+            value: value.clone(),
+        })?;
+    Ok(id)
 }
 
 pub(crate) fn usage() -> &'static str {
@@ -71,6 +108,10 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo --local add <TASK>\n",
         "  shtodo add\n",
         "  shtodo --local add\n",
+        "  shtodo list\n",
+        "  shtodo --local list\n",
+        "  shtodo delete <ID>\n",
+        "  shtodo --local delete <ID>\n",
         "  shtodo doctor\n",
         "  shtodo --help\n",
         "  shtodo --version\n",
@@ -78,6 +119,8 @@ pub(crate) fn usage() -> &'static str {
         "Commands:\n",
         "  add <TASK>  Add one task without opening the terminal UI.\n",
         "              When TASK is omitted, read it from standard input.\n",
+        "  list        List non-deleted tasks with their IDs and states.\n",
+        "  delete <ID> Soft-delete one task by its scope-local ID.\n",
         "  doctor      Validate ~/.shtodo/config.toml without opening the terminal UI.\n",
         "\n",
         "Options:\n",
@@ -92,12 +135,19 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo add \"Fix the bug\"\n",
         "  shtodo --local add \"Run the tests\"\n",
         "  printf 'Fix the bug\\n' | shtodo --local add\n",
+        "  shtodo list\n",
+        "  shtodo --local list\n",
+        "  shtodo delete 3\n",
+        "  shtodo --local delete 3\n",
     )
 }
 
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
 
     use super::{Command, ScopeChoice, parse_args};
 
@@ -159,6 +209,73 @@ mod tests {
             parse_args(args(&["--local", "add"])),
             Ok(Command::Add(ScopeChoice::Local, None))
         );
+    }
+
+    #[test]
+    fn parse_args_should_accept_list_for_global_and_local_scopes() {
+        assert_eq!(
+            parse_args(args(&["list"])),
+            Ok(Command::List(ScopeChoice::Global))
+        );
+        assert_eq!(
+            parse_args(args(&["--local", "list"])),
+            Ok(Command::List(ScopeChoice::Local))
+        );
+    }
+
+    #[test]
+    fn parse_args_should_accept_one_positive_delete_id() {
+        assert_eq!(
+            parse_args(args(&["delete", "3"])),
+            Ok(Command::Delete(ScopeChoice::Global, 3))
+        );
+        assert_eq!(
+            parse_args(args(&["--local", "delete", "42"])),
+            Ok(Command::Delete(ScopeChoice::Local, 42))
+        );
+    }
+
+    #[test]
+    fn parse_args_should_report_a_missing_delete_id_with_usage() {
+        let error = parse_args(args(&["delete"])).unwrap_err().to_string();
+
+        assert!(error.contains("task ID is required"));
+        assert!(error.contains("Usage:"));
+    }
+
+    #[test]
+    fn parse_args_should_reject_invalid_delete_ids_with_usage() {
+        for value in ["0", "-1", "+1", "three", " 3", "3 "] {
+            let error = parse_args(args(&["delete", value]))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(value));
+            assert!(error.contains("expected a positive integer"));
+            assert!(error.contains("Usage:"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_args_should_reject_non_utf8_delete_ids_with_usage() {
+        let error = parse_args(vec![
+            OsString::from("delete"),
+            OsString::from_vec(vec![0xff]),
+        ])
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("expected a positive integer"));
+        assert!(error.contains("Usage:"));
+    }
+
+    #[test]
+    fn parse_args_should_reject_extra_or_misplaced_list_and_delete_arguments() {
+        assert!(parse_args(args(&["list", "extra"])).is_err());
+        assert!(parse_args(args(&["delete", "3", "extra"])).is_err());
+        assert!(parse_args(args(&["list", "--local"])).is_err());
+        assert!(parse_args(args(&["delete", "3", "--local"])).is_err());
+        assert!(parse_args(args(&["delete", "--local", "3"])).is_err());
     }
 
     #[test]

@@ -38,6 +38,12 @@ pub fn run() -> Result<()> {
         cli::Command::Add(choice, argument) => {
             add_task(choice, argument)?;
         }
+        cli::Command::List(choice) => {
+            list_tasks(choice)?;
+        }
+        cli::Command::Delete(choice, id) => {
+            delete_task(choice, id)?;
+        }
         cli::Command::Doctor => {
             let home = storage::home_from_environment()?;
             match config::load(&home) {
@@ -83,6 +89,54 @@ fn add_task(choice: cli::ScopeChoice, argument: Option<OsString>) -> Result<()> 
     Ok(())
 }
 
+fn list_tasks(choice: cli::ScopeChoice) -> Result<()> {
+    let home = storage::home_from_environment()?;
+    let scope = storage::scope_from_environment(choice)?;
+    let tasks = storage::load_read_only(&home, &scope)?;
+    let mut stdout = std::io::stdout().lock();
+    for task in tasks.visible_tasks() {
+        let state = if task.completed() { "done" } else { "open" };
+        writeln!(stdout, "{}  {}  {}", task.id().get(), state, task.text())?;
+    }
+    Ok(())
+}
+
+fn delete_task(choice: cli::ScopeChoice, raw_id: u64) -> Result<()> {
+    let home = storage::home_from_environment()?;
+    let scope = storage::scope_from_environment(choice)?;
+    let store = storage::Store::open(&home, scope)?;
+    let (id, text, already_deleted) = delete_task_in_store(&store, raw_id)?;
+
+    let prefix = if already_deleted {
+        "Already deleted"
+    } else {
+        "Deleted"
+    };
+    writeln!(std::io::stdout().lock(), "{prefix} {}: {}", id.get(), text)?;
+    Ok(())
+}
+
+fn delete_task_in_store(
+    store: &storage::Store,
+    raw_id: u64,
+) -> Result<(task::TaskId, String, bool)> {
+    let mut tasks = store.load()?;
+    let id = task::TaskId::from_shell_integer(raw_id)
+        .ok_or_else(|| eyre!("task ID must be a positive integer"))?;
+    let (text, already_deleted) = {
+        let selected = tasks.task(id).ok_or(task::ListError::TaskNotFound(id))?;
+        (selected.text().to_owned(), selected.is_deleted())
+    };
+
+    if already_deleted {
+        return Ok((id, text, true));
+    }
+
+    tasks.delete(id)?;
+    store.save(&tasks)?;
+    Ok((id, text, false))
+}
+
 fn read_task_from_stdin() -> Result<String> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
@@ -99,4 +153,23 @@ fn read_task_from_stdin() -> Result<String> {
 
 fn missing_task_text() -> color_eyre::Report {
     eyre!("task text is required\n\n{}", cli::usage())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_task_in_store, storage, task};
+
+    #[test]
+    fn cli_delete_should_remain_restorable_after_storage_round_trip() {
+        let home = tempfile::tempdir().unwrap();
+        let store = storage::Store::open(home.path(), task::ListScope::Global).unwrap();
+        let mut tasks = task::TaskList::new(task::ListScope::Global);
+        let id = tasks.add("restore me").unwrap();
+        store.save(&tasks).unwrap();
+
+        delete_task_in_store(&store, id.get()).unwrap();
+        let mut loaded = store.load().unwrap();
+
+        assert_eq!(loaded.restore_latest().unwrap(), Some(id));
+    }
 }

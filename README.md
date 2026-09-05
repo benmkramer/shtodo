@@ -52,11 +52,19 @@ shtodo
 shtodo --local
 shtodo add "Fix the bug"
 shtodo --local add "Run the tests"
+shtodo list
+shtodo --local list
+shtodo delete 3
+shtodo --local delete 3
 shtodo doctor
 ```
 
 Running `shtodo` opens the default global list. Running `shtodo --local` opens
 a list for the exact directory from which it is run.
+
+`shtodo list` prints each non-deleted task's scope-local ID, state, and text.
+`shtodo delete <ID>` recoverably deletes one task from the selected scope, so
+the TUI's `u` action can restore it.
 
 The essentials are:
 

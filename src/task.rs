@@ -9,6 +9,10 @@ pub(crate) const SCHEMA_VERSION: u64 = 1;
 pub(crate) struct TaskId(u64);
 
 impl TaskId {
+    pub(crate) fn from_shell_integer(value: u64) -> Option<Self> {
+        (value > 0).then_some(Self(value))
+    }
+
     pub(crate) fn get(self) -> u64 {
         self.0
     }
@@ -314,6 +318,13 @@ fn project_path_is_absolute(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ListScope, MoveDirection, TaskId, TaskList, project_path_is_absolute};
+
+    #[test]
+    fn task_id_should_accept_only_positive_shell_integers() {
+        assert_eq!(TaskId::from_shell_integer(1), Some(TaskId(1)));
+        assert_eq!(TaskId::from_shell_integer(u64::MAX), Some(TaskId(u64::MAX)));
+        assert_eq!(TaskId::from_shell_integer(0), None);
+    }
 
     #[test]
     fn validate_should_use_current_platform_absolute_path_semantics() {
