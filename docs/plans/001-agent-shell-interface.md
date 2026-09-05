@@ -4,7 +4,7 @@
 > for every behavior change. Run every verification command and confirm the
 > expected result before moving to the next step. If a STOP condition occurs,
 > stop and report it instead of improvising. When finished, update the status
-> row in `plans/README.md` unless a reviewer says they maintain the index.
+> row in `docs/plans/README.md` unless a reviewer says they maintain the index.
 >
 > **Drift check (run first)**:
 > `git diff --stat 492e13d..HEAD -- src/cli.rs src/lib.rs src/storage.rs src/task.rs tests/cli.rs README.md docs/usage.md CHANGELOG.md`
@@ -253,7 +253,7 @@ The baseline at commit `492e13d` passes all commands above. `cargo test
 - `README.md`
 - `docs/usage.md`
 - `CHANGELOG.md`
-- `plans/README.md`, status update only after implementation
+- `docs/plans/README.md`, status update only after implementation
 
 **Out of scope**:
 
@@ -545,7 +545,7 @@ All of the following must hold:
 - [ ] `cargo build --release --locked` passes.
 - [ ] `git diff --check` passes.
 - [ ] Only in-scope files are modified.
-- [ ] `plans/README.md` marks Plan 001 DONE only after every criterion passes.
+- [ ] `docs/plans/README.md` marks Plan 001 DONE only after every criterion passes.
 
 ## STOP conditions
 

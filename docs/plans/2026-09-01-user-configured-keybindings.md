@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024 with Rust 1.89 minimum, Crossterm 0.29.0, Ratatui 0.30.2, color-eyre 0.6.5, Serde 1.0, toml 1.1.4 with `preserve_order`, tempfile, and Ratatui `TestBackend`.
 
-**Spec:** `docs/superpowers/specs/2026-09-01-user-configured-keybindings-design.md`
+**Spec:** `docs/specs/2026-09-01-user-configured-keybindings-design.md`
 
 ## Global Constraints
 
