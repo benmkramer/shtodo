@@ -1,0 +1,100 @@
+{
+  "taskbook": {
+    "version": "0.3.0",
+    "source": "https://registry.npmjs.org/taskbook/0.3.0",
+    "dependency_lock": "../../scripts/benchmark-deps/taskbook/package-lock.json",
+    "runtime": "Node 24.15.0"
+  },
+  "topydo": {
+    "version": "0.16",
+    "dependency_pins": "../../scripts/benchmark-deps/topydo.txt",
+    "runtime": "Python 3.14.6",
+    "packages": [
+      {
+        "name": "topydo",
+        "version": "0.16",
+        "source": "https://pypi.org/pypi/topydo/0.16/json",
+        "artifacts": [
+          {
+            "filename": "topydo-0.16-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/fb/55/79c3aefc368dcf31a14964de2ebedd3af04cbf9584e6ac017a6cbc4a6a8f/topydo-0.16-py3-none-any.whl",
+            "sha256": "8d70eec6210f41a857d387d79cf9a8f157b9628ffc145ac6239e3ab0ced5a0bc"
+          },
+          {
+            "filename": "topydo-0.16.tar.gz",
+            "url": "https://files.pythonhosted.org/packages/11/6a/8278ac5a59ec633322dcdff278bf74ce8c9d513370cf41d1ecfa5e0376d0/topydo-0.16.tar.gz",
+            "sha256": "64a12a990ee39950f0a6e14a5c18e6b35c9e4e4f11cfa40c613d5feb4f086b75"
+          }
+        ]
+      },
+      {
+        "name": "arrow",
+        "version": "1.4.0",
+        "source": "https://pypi.org/pypi/arrow/1.4.0/json",
+        "artifacts": [
+          {
+            "filename": "arrow-1.4.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/ed/c9/d7977eaacb9df673210491da99e6a247e93df98c715fc43fd136ce1d3d33/arrow-1.4.0-py3-none-any.whl",
+            "sha256": "749f0769958ebdc79c173ff0b0670d59051a535fa26e8eba02953dc19eb43205"
+          },
+          {
+            "filename": "arrow-1.4.0.tar.gz",
+            "url": "https://files.pythonhosted.org/packages/b9/33/032cdc44182491aa708d06a68b62434140d8c50820a087fac7af37703357/arrow-1.4.0.tar.gz",
+            "sha256": "ed0cc050e98001b8779e84d461b0098c4ac597e88704a655582b21d116e526d7"
+          }
+        ]
+      },
+      {
+        "name": "python-dateutil",
+        "version": "2.9.0.post0",
+        "source": "https://pypi.org/pypi/python-dateutil/2.9.0.post0/json",
+        "artifacts": [
+          {
+            "filename": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+            "sha256": "a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427"
+          },
+          {
+            "filename": "python-dateutil-2.9.0.post0.tar.gz",
+            "url": "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz",
+            "sha256": "37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3"
+          }
+        ]
+      },
+      {
+        "name": "six",
+        "version": "1.17.0",
+        "source": "https://pypi.org/pypi/six/1.17.0/json",
+        "artifacts": [
+          {
+            "filename": "six-1.17.0-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl",
+            "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274"
+          },
+          {
+            "filename": "six-1.17.0.tar.gz",
+            "url": "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz",
+            "sha256": "ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81"
+          }
+        ]
+      },
+      {
+        "name": "tzdata",
+        "version": "2026.5",
+        "source": "https://pypi.org/pypi/tzdata/2026.5/json",
+        "artifacts": [
+          {
+            "filename": "tzdata-2026.5-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/94/21/1e5995a1c920cce14e4bffae20c665ec10e7ed03ab25e006cd741092b718/tzdata-2026.5-py2.py3-none-any.whl",
+            "sha256": "b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac"
+          },
+          {
+            "filename": "tzdata-2026.5.tar.gz",
+            "url": "https://files.pythonhosted.org/packages/d9/68/f1b440335057bfce71b6e50a9d09445aa2ecbd08359a337976627b8409e7/tzdata-2026.5.tar.gz",
+            "sha256": "8cc73c0a0bfca7dbfa59235d60b2eff82231dee33f53d206db1acd9173cfc0a7"
+          }
+        ]
+      }
+    ]
+  }
+}

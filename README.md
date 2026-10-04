@@ -68,6 +68,8 @@ See [Usage and keyboard controls] for the full interaction guide.
 - [Usage and keyboard controls]
 - [Configuring keybindings]
 - [Release process]
+- [Benchmarks and CLI comparison]: results, methodology, feature differences,
+  and rerun instructions. Also see the [benchmark harness] and [recorded samples].
 
 ## Scope
 
@@ -75,6 +77,10 @@ Version one is intentionally local and narrow. It does not include accounts,
 synchronization, sharing, recurring tasks, reminders, dates, priorities, tags,
 search, or multiple named lists. See [Version-one limits] for the complete
 scope and deferred features.
+
+See [Benchmarks and CLI comparison] for selected command latencies and feature
+differences. `shtodo`'s narrow scope matters when interpreting those
+results; the tools provide different capabilities and storage guarantees.
 
 ## License
 
@@ -88,4 +94,7 @@ This project is licensed under the MIT license ([LICENSE] or
 [Usage and keyboard controls]: ./docs/usage.md
 [Configuring keybindings]: ./docs/configuration.md
 [Release process]: ./docs/releasing.md
+[Benchmarks and CLI comparison]: ./docs/benchmarks.md
+[benchmark harness]: ./scripts/benchmark.py
+[recorded samples]: ./docs/benchmarks/
 [Version-one limits]: ./docs/usage.md#version-one-limits
