@@ -4,6 +4,11 @@ All notable changes to shtodo are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Homebrew installation through `benmkramer/tap/shtodo`, with automatic formula
+  updates from the release workflow.
+
 ## [0.1.0-beta.2] - 2026-09-05
 
 ### Added

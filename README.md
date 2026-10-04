@@ -7,6 +7,16 @@ project directory.
 
 ## Installation
 
+### Homebrew
+
+```sh
+brew install benmkramer/tap/shtodo
+```
+
+The tap distributes the current beta release for Apple Silicon macOS,
+Intel macOS, and x86-64 Linux. Update an existing installation with
+`brew update` followed by `brew upgrade shtodo`.
+
 ### Prebuilt binaries
 
 Prebuilt archives for Apple Silicon macOS, Intel macOS, and x86-64 Linux are
