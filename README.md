@@ -68,7 +68,8 @@ See [Usage and keyboard controls] for the full interaction guide.
 - [Usage and keyboard controls]
 - [Configuring keybindings]
 - [Release process]
-- [Benchmarks and CLI comparison]
+- [Benchmarks and CLI comparison]: results, methodology, feature differences,
+  and rerun instructions. Also see the [benchmark harness] and [recorded samples].
 
 ## Scope
 
@@ -94,4 +95,6 @@ This project is licensed under the MIT license ([LICENSE] or
 [Configuring keybindings]: ./docs/configuration.md
 [Release process]: ./docs/releasing.md
 [Benchmarks and CLI comparison]: ./docs/benchmarks.md
+[benchmark harness]: ./scripts/benchmark.py
+[recorded samples]: ./docs/benchmarks/
 [Version-one limits]: ./docs/usage.md#version-one-limits
