@@ -1,3 +1,4 @@
 /target
 .superpowers/
 .worktrees/
+__pycache__/

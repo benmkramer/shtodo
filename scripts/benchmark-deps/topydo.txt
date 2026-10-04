@@ -1,0 +1,5 @@
+arrow==1.4.0
+python-dateutil==2.9.0.post0
+six==1.17.0
+topydo==0.16
+tzdata==2026.5

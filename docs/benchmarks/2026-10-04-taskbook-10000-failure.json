@@ -1,0 +1,31 @@
+{
+  "app": "taskbook",
+  "version": "0.3.0",
+  "node_version": "v24.15.0",
+  "initial_tasks": 10000,
+  "fixture_records": 10000,
+  "operation": "list",
+  "command": [
+    "/Users/benmkramer/.vite-plus/js_runtime/node/24.15.0/bin/node",
+    "/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/cli.js"
+  ],
+  "exit_code": 1,
+  "stdout_task_count": 9999,
+  "last_printed_task": "Benchmark task 00009999",
+  "missing_task": "Benchmark task 00010000",
+  "stderr": "/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:69\n    prefix.push(' '.repeat(4 - String(_id).length));\n                    ^\n\nRangeError: Invalid count value: -1\n    at String.repeat (<anonymous>)\n    at Render._buildPrefix (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:69:21)\n    at Render._displayItemByBoard (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:106:25)\n    at /Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:149:14\n    at Array.forEach (<anonymous>)\n    at /Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:144:19\n    at Array.forEach (<anonymous>)\n    at Render.displayByBoard (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:138:23)\n    at Taskbook.displayByBoard (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/taskbook.js:398:12)\n    at taskbookCLI (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/index.js:72:12)\n\nNode.js v24.15.0\n",
+  "harness_sha256": "92883ccb103f81aa44a015be28b6236e7e2dc3f88392d117d4353b6613f51c54",
+  "cli_sha256": "0311f671962c499370eeeaa98e34726fd840b1803ee80946c81368ab8b3d4f89",
+  "renderer_sha256": "01be71c777ab100ee24e2a28867a59c57f5d73b23da05c43a2181edfb770d8e6",
+  "reproductions": 2,
+  "latency_reported": false,
+  "native_add_reproduction": {
+    "initial_tasks": 9999,
+    "add_exit_code": 0,
+    "stored_task_count": 10000,
+    "new_task_id": 10000,
+    "new_task_description": "Benchmark task 99999999",
+    "subsequent_list_exit_code": 1,
+    "stderr": "/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:69\n    prefix.push(' '.repeat(4 - String(_id).length));\n                    ^\n\nRangeError: Invalid count value: -1\n    at String.repeat (<anonymous>)\n    at Render._buildPrefix (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:69:21)\n    at Render._displayItemByBoard (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:106:25)\n    at /Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:149:14\n    at Array.forEach (<anonymous>)\n    at /Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:144:19\n    at Array.forEach (<anonymous>)\n    at Render.displayByBoard (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/render.js:138:23)\n    at Taskbook.displayByBoard (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/src/taskbook.js:398:12)\n    at taskbookCLI (/Users/benmkramer/code/shtodo/target/benchmark-tools/taskbook/node_modules/taskbook/index.js:72:12)\n\nNode.js v24.15.0\n"
+  }
+}
