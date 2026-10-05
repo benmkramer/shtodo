@@ -1,0 +1,107 @@
+{
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "0210c031885d6990e1df4a119cd14f2b0851e9e37a4b161eca1bc2e492a47281",
+  "sample_seconds": 60.0,
+  "samples": 3,
+  "warmup_seconds": 5.0,
+  "client_counts": [
+    2
+  ],
+  "method": "Three independent fixture sizes run concurrently within each requested client-count phase. CPU uses per-process wait4 usage including startup and warmup; idle output bytes exclude warmup. This is not isolated throughput or a power-loss test.",
+  "groups": [
+    {
+      "records": 0,
+      "clients": 2,
+      "snapshot_bytes": 132,
+      "idle_output_bytes": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "process_usage": [
+        {
+          "cpu_seconds": 0.041353,
+          "elapsed_seconds": 185.4248620409926,
+          "percent_of_one_core": 0.022301755840518266
+        },
+        {
+          "cpu_seconds": 0.037413,
+          "elapsed_seconds": 185.36418158399465,
+          "percent_of_one_core": 0.020183511010754218
+        }
+      ]
+    },
+    {
+      "records": 1000,
+      "clients": 2,
+      "snapshot_bytes": 166983,
+      "idle_output_bytes": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "process_usage": [
+        {
+          "cpu_seconds": 0.061388,
+          "elapsed_seconds": 185.30107933400723,
+          "percent_of_one_core": 0.03312878706407719
+        },
+        {
+          "cpu_seconds": 0.059649999999999995,
+          "elapsed_seconds": 185.23913791599625,
+          "percent_of_one_core": 0.03220161822770443
+        }
+      ]
+    },
+    {
+      "records": 10000,
+      "clients": 2,
+      "snapshot_bytes": 1691822,
+      "idle_output_bytes": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "process_usage": [
+        {
+          "cpu_seconds": 0.242578,
+          "elapsed_seconds": 185.16086283299956,
+          "percent_of_one_core": 0.13100932685693203
+        },
+        {
+          "cpu_seconds": 0.23110799999999998,
+          "elapsed_seconds": 185.09932416700758,
+          "percent_of_one_core": 0.12485620951888546
+        }
+      ]
+    }
+  ]
+}

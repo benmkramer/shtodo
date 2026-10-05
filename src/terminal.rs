@@ -5,9 +5,10 @@ use crossterm::event::{self, Event, KeyEventKind};
 
 use crate::{
     action::Action,
-    app::{App, Mode, Transition},
+    app::{App, Mode},
     input::Keymap,
-    storage::Store,
+    session::Session,
+    storage::{Snapshot, Store},
     ui,
 };
 
@@ -88,41 +89,58 @@ fn handle_celebration_event(app: &mut App, keymap: &Keymap, event: Event) -> boo
     }
 }
 
-pub(crate) fn run(mut app: App, store: &Store, keymap: &Keymap) -> Result<()> {
+pub(crate) fn run(snapshot: Snapshot, store: &Store, keymap: &Keymap) -> Result<()> {
+    let mut session = Session::new(snapshot, std::time::Instant::now());
     let mut terminal = TerminalGuard::init().wrap_err("could not initialize terminal")?;
-
+    let mut dirty = true;
+    let mut animation_deadline = std::time::Instant::now() + CELEBRATION_FRAME_INTERVAL;
     loop {
-        terminal
-            .terminal
-            .draw(|frame| ui::render(frame, &app, keymap))
-            .wrap_err("could not draw terminal")?;
-
-        if app.celebration().is_some() {
-            if event::poll(CELEBRATION_FRAME_INTERVAL).wrap_err("could not poll terminal event")? {
-                let event = event::read().wrap_err("could not read terminal event")?;
-                if handle_celebration_event(&mut app, keymap, event) {
+        if dirty {
+            terminal
+                .terminal
+                .draw(|frame| ui::render(frame, &session.app, keymap))
+                .wrap_err("could not draw terminal")?;
+            dirty = false;
+        }
+        let mut deadline = session.next_deadline();
+        if session.app.celebration().is_some() {
+            deadline = deadline.min(animation_deadline);
+        }
+        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+        if event::poll(timeout).wrap_err("could not poll terminal event")? {
+            let event = event::read().wrap_err("could not read terminal event")?;
+            if matches!(event, Event::Resize(..)) {
+                dirty = true;
+            } else if session.app.celebration().is_some() {
+                if celebration_event(keymap, event.clone()) != CelebrationEvent::Wait {
+                    if handle_celebration_event(&mut session.app, keymap, event) {
+                        break;
+                    }
+                    dirty = true;
+                }
+            } else if let Some(action) = action_for_event(keymap, session.app.mode(), event) {
+                let (quit, changed) = session.action(store, action)?;
+                if session.app.celebration().is_some() {
+                    animation_deadline = std::time::Instant::now() + CELEBRATION_FRAME_INTERVAL;
+                }
+                if quit {
                     break;
                 }
-            } else {
-                app.advance_celebration();
+                dirty |= changed;
             }
-            continue;
         }
-
-        let event = event::read().wrap_err("could not read terminal event")?;
-        let Some(action) = action_for_event(keymap, app.mode(), event) else {
-            continue;
-        };
-
-        match app.apply(action)? {
-            Transition::Persisted => store
-                .save(app.tasks())
-                .wrap_err("could not save task list")?,
-            Transition::Quit => break,
-            Transition::Unchanged | Transition::Transient => {}
+        let now = std::time::Instant::now();
+        dirty |= session.tick(store, now);
+        if session.app.celebration().is_some() {
+            if now >= animation_deadline {
+                session.app.advance_celebration();
+                animation_deadline = now + CELEBRATION_FRAME_INTERVAL;
+                dirty = true;
+            }
+        } else {
+            animation_deadline = now + CELEBRATION_FRAME_INTERVAL;
         }
     }
-
     terminal.restore().wrap_err("could not restore terminal")?;
     Ok(())
 }
@@ -138,8 +156,10 @@ mod tests {
 
     #[test]
     fn trash_restore_should_persist_and_leave_latest_restore_available_after_restarting() {
-        use crate::task::{ListScope, TaskList};
-
+        use crate::{
+            storage::ScopePresence,
+            task::{ListScope, TaskList},
+        };
         let home = tempfile::tempdir().unwrap();
         let mut tasks = TaskList::new(ListScope::Global);
         let older = tasks.add("completed older").unwrap();
@@ -149,48 +169,41 @@ mod tests {
         tasks.delete(newest).unwrap();
         let store = Store::open(home.path(), ListScope::Global).unwrap();
         store.save(&tasks).unwrap();
-        drop(store);
-
-        let store = Store::open(home.path(), ListScope::Global).unwrap();
         let keymap = Keymap::defaults();
-        let mut app = App::new(store.load().unwrap());
+        let mut session = Session::new(
+            store.read_snapshot(ScopePresence::RequireExisting).unwrap(),
+            std::time::Instant::now(),
+        );
         let before = std::fs::read(&store.paths().data_file).unwrap();
-        for (key, transition) in [
-            ('t', Transition::Transient),
-            ('j', Transition::Transient),
-            ('r', Transition::Persisted),
-        ] {
+        for key in ['t', 'j', 'r'] {
             let action = action_for_event(
                 &keymap,
-                app.mode(),
+                session.app.mode(),
                 Event::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)),
             )
             .unwrap();
-            assert_eq!(app.apply(action).unwrap(), transition);
-            if transition == Transition::Persisted {
-                store.save(app.tasks()).unwrap();
-            } else {
+            assert_eq!(session.action(&store, action).unwrap(), (false, true));
+            if key != 'r' {
                 assert_eq!(std::fs::read(&store.paths().data_file).unwrap(), before);
             }
         }
         assert!(!store.paths().temp_file.exists());
-        drop(store);
-
-        let store = Store::open(home.path(), ListScope::Global).unwrap();
-        let mut app = App::new(store.load().unwrap());
-        let restored = app.tasks().task(older).unwrap();
+        let mut session = Session::new(
+            store.read_snapshot(ScopePresence::RequireExisting).unwrap(),
+            std::time::Instant::now(),
+        );
+        let restored = session.app.tasks().task(older).unwrap();
         assert_eq!(restored.text(), "completed older");
         assert!(restored.completed());
         assert!(!restored.is_deleted());
         let action = action_for_event(
             &keymap,
-            app.mode(),
+            session.app.mode(),
             Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
         )
         .unwrap();
-        assert_eq!(app.apply(action).unwrap(), Transition::Persisted);
-        assert_eq!(app.selected(), Some(newest));
-        store.save(app.tasks()).unwrap();
+        session.action(&store, action).unwrap();
+        assert_eq!(session.app.selected(), Some(newest));
         let loaded = store.load().unwrap();
         assert_eq!(
             loaded

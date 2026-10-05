@@ -1,5 +1,7 @@
 use crate::{
     action::Action,
+    mutation::{ConflictKind, Mutation, Outcome, TaskObservation},
+    projection::{self, Projection},
     task::{ListError, MoveDirection, Task, TaskId, TaskList},
 };
 
@@ -14,46 +16,7 @@ pub(crate) enum Mode {
     Trash,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TaskView {
-    All,
-    Open,
-    Done,
-}
-
-impl TaskView {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Open => "Open",
-            Self::Done => "Done",
-        }
-    }
-
-    fn next(self) -> Self {
-        match self {
-            Self::All => Self::Open,
-            Self::Open => Self::Done,
-            Self::Done => Self::All,
-        }
-    }
-
-    fn previous(self) -> Self {
-        match self {
-            Self::All => Self::Done,
-            Self::Open => Self::All,
-            Self::Done => Self::Open,
-        }
-    }
-
-    fn matches(self, task: &Task) -> bool {
-        match self {
-            Self::All => true,
-            Self::Open => !task.completed(),
-            Self::Done => task.completed(),
-        }
-    }
-}
+pub(crate) use crate::projection::TaskView;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EditKind {
@@ -67,6 +30,9 @@ pub(crate) struct Editor {
     kind: EditKind,
     buffer: String,
     cursor: usize,
+    original: Option<String>,
+    conflicted: bool,
+    invalidated: bool,
 }
 
 impl Editor {
@@ -80,6 +46,10 @@ impl Editor {
 
     pub(crate) fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    pub(crate) fn conflicted(&self) -> bool {
+        self.conflicted
     }
 
     fn insert(&mut self, character: char) {
@@ -234,7 +204,9 @@ fn next_word_end(buffer: &str, cursor: usize) -> usize {
 pub(crate) enum Transition {
     Unchanged,
     Transient,
-    Persisted,
+    Submit,
+    Refresh,
+    RecoverSync,
     Quit,
 }
 
@@ -266,6 +238,9 @@ pub(crate) struct App {
     query: String,
     lowercase_query: String,
     search_session: Option<SearchSession>,
+    pending: Option<Mutation>,
+    storage_error: Option<String>,
+    durability_warning: Option<String>,
 }
 
 struct SearchSession {
@@ -288,10 +263,49 @@ impl App {
             query: String::new(),
             lowercase_query: String::new(),
             search_session: None,
+            pending: None,
+            storage_error: None,
+            durability_warning: None,
         }
     }
 
-    pub(crate) fn apply(&mut self, action: Action) -> Result<Transition, ListError> {
+    pub(crate) fn prepare(&mut self, action: Action) -> Result<Transition, ListError> {
+        self.pending = None;
+        if self.needs_sync() {
+            if action == Action::CommitEdit && self.mode == Mode::Insert {
+                return Ok(Transition::RecoverSync);
+            }
+            if self.mode == Mode::Insert && !matches!(action, Action::CancelEdit | Action::Quit) {
+                return Ok(Transition::Unchanged);
+            }
+            if matches!(
+                action,
+                Action::StartAdd
+                    | Action::StartEdit
+                    | Action::ToggleComplete
+                    | Action::Delete
+                    | Action::RestoreLatest
+                    | Action::RestoreSelected
+                    | Action::MoveTaskDown
+                    | Action::MoveTaskUp
+            ) {
+                return Ok(Transition::Unchanged);
+            }
+        }
+        if self.storage_error.is_some()
+            && ((action == Action::CommitEdit && self.mode == Mode::Insert)
+                || matches!(
+                    action,
+                    Action::ToggleComplete
+                        | Action::Delete
+                        | Action::RestoreLatest
+                        | Action::RestoreSelected
+                        | Action::MoveTaskDown
+                        | Action::MoveTaskUp
+                ))
+        {
+            return Ok(Transition::Unchanged);
+        }
         match self.mode {
             Mode::Normal => self.apply_normal(action),
             Mode::Insert => self.apply_insert(action),
@@ -341,10 +355,7 @@ impl App {
     }
 
     fn matches(&self, task: &Task) -> bool {
-        !task.is_deleted()
-            && self.view.matches(task)
-            && (self.lowercase_query.is_empty()
-                || task.text().to_lowercase().contains(&self.lowercase_query))
+        projection::matches(task, self.view, &self.lowercase_query)
     }
 
     pub(crate) fn tasks(&self) -> &TaskList {
@@ -356,7 +367,10 @@ impl App {
     }
 
     pub(crate) fn message(&self) -> Option<&str> {
-        self.message.as_deref()
+        self.durability_warning
+            .as_deref()
+            .or(self.storage_error.as_deref())
+            .or(self.message.as_deref())
     }
 
     pub(crate) fn celebration(&self) -> Option<Celebration> {
@@ -483,37 +497,15 @@ impl App {
     }
 
     fn restore_selected(&mut self) -> Result<Transition, ListError> {
-        let Some(selected) = self.selected() else {
+        let Some(task) = self.selected_task() else {
             self.message = Some("Nothing to restore".into());
             return Ok(Transition::Transient);
         };
-        let deleted = self.tasks.deleted_tasks();
-        let next = deleted
-            .iter()
-            .position(|task| task.id() == selected)
-            .and_then(|index| {
-                deleted
-                    .get(index + 1)
-                    .or_else(|| index.checked_sub(1).and_then(|index| deleted.get(index)))
-            })
-            .map(|task| task.id());
-        if !self.tasks.restore(selected)? {
-            return Ok(Transition::Unchanged);
-        }
-        if let Some(trash) = &mut self.trash {
-            trash.selected = next;
-        }
-        if self
-            .tasks
-            .task(selected)
-            .is_some_and(|task| self.matches(task))
-        {
-            self.selected = Some(selected);
-        } else {
-            self.reconcile_selection();
-            self.message = Some("Restored task is hidden by the current view/search".into());
-        }
-        Ok(Transition::Persisted)
+        let request = Mutation::Restore {
+            id: task.id(),
+            observed: Some(TaskObservation::new(task)),
+        };
+        Ok(self.submit(request))
     }
 
     fn apply_insert(&mut self, action: Action) -> Result<Transition, ListError> {
@@ -614,6 +606,9 @@ impl App {
             kind: EditKind::Search,
             buffer: self.query.clone(),
             cursor: self.query.len(),
+            original: None,
+            conflicted: false,
+            invalidated: false,
         });
         self.mode = Mode::Search;
         Transition::Transient
@@ -660,24 +655,13 @@ impl App {
     }
 
     fn adjacent_visible(&self, selected: TaskId, direction: MoveDirection) -> Option<TaskId> {
-        if self.view == TaskView::All && self.query.is_empty() {
-            return self.tasks.adjacent_visible(selected, direction);
-        }
-        let mut previous = None;
-        let mut found = false;
-        for task in self.visible_tasks() {
-            if found {
-                return Some(task.id());
-            }
-            if task.id() == selected {
-                match direction {
-                    MoveDirection::Up => return previous,
-                    MoveDirection::Down => found = true,
-                }
-            }
-            previous = Some(task.id());
-        }
-        None
+        projection::adjacent(
+            &self.tasks,
+            selected,
+            direction,
+            self.view,
+            &self.lowercase_query,
+        )
     }
 
     fn clear_message(&mut self) -> bool {
@@ -706,64 +690,255 @@ impl App {
         Transition::Transient
     }
 
+    fn submit(&mut self, mutation: Mutation) -> Transition {
+        self.pending = Some(mutation);
+        Transition::Submit
+    }
+
+    pub(crate) fn take_mutation(&mut self) -> Option<Mutation> {
+        self.pending.take()
+    }
+
     fn move_task(&mut self, direction: MoveDirection) -> Result<Transition, ListError> {
-        let Some(selected) = self.selected else {
+        let Some(id) = self.selected else {
             return Ok(Transition::Unchanged);
         };
-        let changed = if self.view == TaskView::All && self.query.is_empty() {
-            self.tasks.move_visible(selected, direction)?
-        } else if let Some(neighbor) = self.adjacent_visible(selected, direction) {
-            self.tasks.swap_visible(selected, neighbor)?
-        } else {
-            false
-        };
-        if changed {
-            Ok(Transition::Persisted)
-        } else {
-            Ok(Transition::Unchanged)
-        }
+        let neighbor = self.adjacent_visible(id, direction);
+        Ok(self.submit(Mutation::MoveAdjacent {
+            id,
+            direction,
+            neighbor,
+            projection: Projection {
+                view: self.view,
+                lowercase_query: self.lowercase_query.clone(),
+            },
+        }))
     }
 
     fn toggle_complete(&mut self) -> Result<Transition, ListError> {
-        let Some(selected) = self.selected else {
+        let Some(task) = self.selected_task() else {
             return Ok(Transition::Unchanged);
         };
-        let had_open_tasks = self.tasks.visible_tasks().any(|task| !task.completed());
-        self.tasks.toggle_complete(selected)?;
-        let has_open_tasks = self.tasks.visible_tasks().any(|task| !task.completed());
-        self.celebration = (had_open_tasks && !has_open_tasks).then_some(Celebration { frame: 0 });
-        self.reconcile_selection();
-        Ok(Transition::Persisted)
+        let mutation = Mutation::SetCompleted {
+            id: task.id(),
+            completed: !task.completed(),
+        };
+        Ok(self.submit(mutation))
     }
 
     fn delete_selected(&mut self) -> Result<Transition, ListError> {
-        let Some(selected) = self.selected else {
+        let Some(task) = self.selected_task() else {
             return Ok(Transition::Unchanged);
         };
-        let next_selected = self
-            .adjacent_visible(selected, MoveDirection::Down)
-            .or_else(|| self.adjacent_visible(selected, MoveDirection::Up));
-        self.tasks.delete(selected)?;
-        self.selected = next_selected;
-        Ok(Transition::Persisted)
+        let mutation = Mutation::Delete {
+            id: task.id(),
+            observed: Some(TaskObservation::new(task)),
+        };
+        Ok(self.submit(mutation))
     }
 
     fn restore_latest(&mut self) -> Result<Transition, ListError> {
-        let Some(restored) = self.tasks.restore_latest()? else {
-            self.message = Some("Nothing to restore".into());
-            return Ok(Transition::Transient);
-        };
-        if self
-            .tasks
-            .task(restored)
-            .is_some_and(|task| self.matches(task))
-        {
-            self.selected = Some(restored);
-        } else {
-            self.reconcile_selection();
-            self.message = Some("Restored task is hidden by the current view/search".into());
+        Ok(self.submit(Mutation::RestoreLatest))
+    }
+
+    /// Install fresh data without losing the editor or transient view state.
+    pub(crate) fn reconcile(&mut self, tasks: TaskList) -> bool {
+        if self.tasks == tasks {
+            return false;
         }
-        Ok(Transition::Persisted)
+        let ordinal = self
+            .visible_tasks()
+            .position(|task| Some(task.id()) == self.selected)
+            .unwrap_or(0);
+        let trash_ordinal = self
+            .tasks
+            .deleted_tasks()
+            .iter()
+            .position(|task| {
+                self.trash
+                    .as_ref()
+                    .is_some_and(|trash| Some(task.id()) == trash.selected)
+            })
+            .unwrap_or(0);
+        self.tasks = tasks;
+        if !self
+            .selected
+            .is_some_and(|id| self.tasks.task(id).is_some_and(|task| self.matches(task)))
+        {
+            let selected = self
+                .visible_tasks()
+                .nth(ordinal)
+                .or_else(|| self.visible_tasks().last())
+                .map(Task::id);
+            self.selected = selected;
+        }
+        if let Some(trash) = &mut self.trash {
+            let deleted = self.tasks.deleted_tasks();
+            if !deleted.iter().any(|task| Some(task.id()) == trash.selected) {
+                trash.selected = deleted
+                    .get(trash_ordinal)
+                    .or_else(|| deleted.last())
+                    .map(|task| task.id());
+            }
+        }
+        if let Some(editor) = &mut self.editor
+            && let EditKind::Edit(id) = editor.kind
+        {
+            match self.tasks.task(id).filter(|task| !task.is_deleted()) {
+                Some(task) => editor.conflicted |= editor.original.as_deref() != Some(task.text()),
+                None => {
+                    editor.invalidated = true;
+                    editor.conflicted = true;
+                }
+            }
+        }
+        if self.tasks.visible_tasks().any(|task| !task.completed()) {
+            self.celebration = None;
+        }
+        true
+    }
+
+    pub(crate) fn finish(&mut self, request: &Mutation, tasks: TaskList, outcome: Outcome) -> bool {
+        let mut dirty = self.reconcile(tasks);
+        let previous = self.message.clone();
+        match outcome {
+            Outcome::Changed { id, celebrate } => {
+                dirty |= self.finish_success(request, id, celebrate);
+            }
+            Outcome::AlreadyInState { id } => {
+                dirty |= self.finish_success(request, id, false);
+            }
+            Outcome::NothingToRestore => self.message = Some("Nothing to restore".into()),
+            Outcome::Conflict { id, kind } => {
+                self.message = Some(match kind {
+                    ConflictKind::TextChanged => {
+                        format!("Task {} text changed; draft retained", id.get())
+                    }
+                    ConflictKind::TaskChanged => {
+                        format!(
+                            "Task {} changed; review before {}",
+                            id.get(),
+                            if matches!(request, Mutation::Restore { .. }) {
+                                "restoring"
+                            } else {
+                                "deleting"
+                            }
+                        )
+                    }
+                    ConflictKind::OrderChanged => "Task order changed; review and retry".into(),
+                    ConflictKind::NoLongerActive => {
+                        format!("Task {} is no longer active", id.get())
+                    }
+                });
+                if let Some(editor) = &mut self.editor {
+                    editor.conflicted = true;
+                    editor.invalidated |= kind == ConflictKind::NoLongerActive;
+                }
+            }
+            Outcome::Rejected(error) => self.message = Some(error.to_string()),
+        }
+        dirty |= previous != self.message;
+        dirty
+    }
+
+    fn finish_success(&mut self, request: &Mutation, id: TaskId, celebrate: bool) -> bool {
+        let mut dirty = false;
+        self.message = None;
+        let visible = self.tasks.task(id).is_some_and(|task| self.matches(task));
+        if matches!(
+            request,
+            Mutation::Add(_) | Mutation::RestoreLatest | Mutation::Restore { .. }
+        ) {
+            if visible {
+                dirty |= self.selected != Some(id);
+                self.selected = Some(id);
+            } else {
+                self.reconcile_selection();
+                let action = if matches!(request, Mutation::Add(_)) {
+                    "Added"
+                } else {
+                    "Restored"
+                };
+                self.message = Some(format!(
+                    "{action} task is hidden by the current view/search"
+                ));
+            }
+        } else if matches!(request, Mutation::EditText { .. }) && !visible {
+            self.message = Some("Edited task is hidden by the current view/search".into());
+        }
+        if matches!(request, Mutation::Add(_) | Mutation::EditText { .. }) {
+            dirty |= self.editor.is_some();
+            self.editor = None;
+            self.mode = Mode::Normal;
+        }
+        if celebrate {
+            self.celebration = Some(Celebration { frame: 0 });
+            dirty = true;
+        }
+        dirty
+    }
+
+    pub(crate) fn set_message(&mut self, message: String) -> bool {
+        if self.message.as_ref() == Some(&message) {
+            return false;
+        }
+        self.message = Some(message);
+        true
+    }
+
+    pub(crate) fn set_storage_error(&mut self, error: Option<String>) -> bool {
+        let dirty = self.storage_error != error;
+        self.storage_error = error;
+        dirty
+    }
+
+    pub(crate) fn storage_unavailable(&self) -> bool {
+        self.storage_error.is_some()
+    }
+
+    pub(crate) fn needs_sync(&self) -> bool {
+        self.durability_warning.is_some()
+    }
+
+    pub(crate) fn await_sync(&mut self, message: String) {
+        self.durability_warning = Some(message);
+        self.celebration = None;
+    }
+
+    pub(crate) fn recovered(&mut self, tasks: TaskList) {
+        self.reconcile(tasks);
+        self.durability_warning = None;
+        self.storage_error = None;
+        if self.mode == Mode::Insert {
+            self.editor = None;
+            self.mode = Mode::Normal;
+        }
+    }
+
+    // Simulate a successful fresh-list transaction for action and rendering tests.
+    // Failure and stale-client tests exercise prepare/finish independently.
+    #[cfg(test)]
+    pub(crate) fn apply(&mut self, action: Action) -> Result<Transition, ListError> {
+        let previous_message = self.message.clone();
+        let previous_mode = self.mode;
+        let transition = self.prepare(action)?;
+        if transition == Transition::Refresh {
+            return Ok(Transition::Transient);
+        }
+        let Some(request) = self.take_mutation() else {
+            return Ok(transition);
+        };
+        let mut latest = self.tasks.clone();
+        let outcome = request.apply(&mut latest);
+        let changed = outcome.changed();
+        self.finish(&request, latest, outcome);
+        Ok(if changed {
+            Transition::Submit
+        } else if previous_message != self.message || previous_mode != self.mode {
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        })
     }
 
     fn start_add(&mut self) -> Transition {
@@ -775,6 +950,9 @@ impl App {
             kind: EditKind::Add,
             buffer: String::new(),
             cursor: 0,
+            original: None,
+            conflicted: false,
+            invalidated: false,
         });
         self.message = None;
         Transition::Transient
@@ -795,8 +973,11 @@ impl App {
         self.mode = Mode::Insert;
         self.editor = Some(Editor {
             kind: EditKind::Edit(selected),
+            original: Some(buffer.clone()),
             buffer,
             cursor,
+            conflicted: false,
+            invalidated: false,
         });
         self.message = None;
         Transition::Transient
@@ -973,36 +1154,28 @@ impl App {
             return Ok(Transition::Transient);
         }
 
-        let kind = editor.kind;
-        let text = editor.buffer.clone();
-        self.message = None;
-        match kind {
-            EditKind::Add => {
-                let id = self.tasks.add(&text)?;
-                if self.tasks.task(id).is_some_and(|task| self.matches(task)) {
-                    self.selected = Some(id);
-                } else {
-                    self.reconcile_selection();
-                    self.message = Some("Added task is hidden by the current view/search".into());
-                }
-            }
+        if editor.invalidated {
+            self.message = Some("Task was deleted; draft retained".into());
+            return Ok(Transition::Transient);
+        }
+        let text = crate::task::validated_text(&editor.buffer)?.to_owned();
+        let request = match editor.kind {
+            EditKind::Add => Mutation::Add(text),
             EditKind::Edit(id) => {
-                if self.tasks.task(id).map(Task::text) == Some(text.trim()) {
+                if editor.original.as_deref() == Some(&text) {
                     self.mode = Mode::Normal;
                     self.editor = None;
-                    return Ok(Transition::Transient);
+                    return Ok(Transition::Refresh);
                 }
-                self.tasks.edit(id, &text)?;
-                self.reconcile_selection();
-                if self.selected != Some(id) {
-                    self.message = Some("Edited task is hidden by the current view/search".into());
+                Mutation::EditText {
+                    id,
+                    text,
+                    original: editor.original.clone(),
                 }
             }
             EditKind::Search => return Ok(Transition::Unchanged),
-        }
-        self.mode = Mode::Normal;
-        self.editor = None;
-        Ok(Transition::Persisted)
+        };
+        Ok(self.submit(request))
     }
 
     fn cancel_edit(&mut self) -> Transition {
@@ -1018,6 +1191,15 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn submitted_delete_should_leave_displayed_tasks_unchanged_until_committed() {
+        let mut list = crate::task::TaskList::new(crate::task::ListScope::Global);
+        list.add("keep until saved").unwrap();
+        let before = list.clone();
+        let mut app = super::App::new(list);
+        app.prepare(crate::action::Action::Delete).unwrap();
+        assert_eq!(app.tasks(), &before);
+    }
     use crate::{
         action::Action,
         task::{ListScope, TaskList},
@@ -1077,18 +1259,18 @@ mod tests {
 
         assert_eq!(
             app.apply(Action::RestoreSelected).unwrap(),
-            Transition::Persisted
+            Transition::Submit
         );
         assert_eq!(app.selected(), Some(oldest));
         assert_eq!(app.mode(), Mode::Trash);
         assert_eq!(
             app.apply(Action::RestoreSelected).unwrap(),
-            Transition::Persisted
+            Transition::Submit
         );
         assert_eq!(app.selected(), Some(newest));
         assert_eq!(
             app.apply(Action::RestoreSelected).unwrap(),
-            Transition::Persisted
+            Transition::Submit
         );
         assert_eq!(app.selected(), None);
         assert_eq!(app.mode(), Mode::Trash);
@@ -1216,10 +1398,7 @@ mod tests {
             app.apply(Action::InsertChar(character)).unwrap();
         }
 
-        assert_eq!(
-            app.apply(Action::CommitEdit).unwrap(),
-            Transition::Persisted
-        );
+        assert_eq!(app.apply(Action::CommitEdit).unwrap(), Transition::Submit);
         assert_eq!(app.mode(), Mode::Normal);
         assert_eq!(app.selected_task().unwrap().text(), "ship it");
     }
@@ -1399,11 +1578,11 @@ mod tests {
         let second = list.add("second").unwrap();
         let mut app = App::new(list);
 
-        assert_eq!(app.apply(Action::Delete).unwrap(), Transition::Persisted);
+        assert_eq!(app.apply(Action::Delete).unwrap(), Transition::Submit);
         assert_eq!(app.selected(), Some(second));
         assert_eq!(
             app.apply(Action::RestoreLatest).unwrap(),
-            Transition::Persisted
+            Transition::Submit
         );
         assert_eq!(app.selected(), Some(first));
     }
@@ -1443,17 +1622,14 @@ mod tests {
 
         assert_eq!(
             app.apply(Action::ToggleComplete).unwrap(),
-            Transition::Persisted
+            Transition::Submit
         );
         assert!(app.tasks().task(first).unwrap().completed());
         assert_eq!(
             app.apply(Action::MoveTaskUp).unwrap(),
             Transition::Unchanged
         );
-        assert_eq!(
-            app.apply(Action::MoveTaskDown).unwrap(),
-            Transition::Persisted
-        );
+        assert_eq!(app.apply(Action::MoveTaskDown).unwrap(), Transition::Submit);
         assert_eq!(app.selected(), Some(first));
     }
 
@@ -1763,7 +1939,7 @@ mod view_tests {
             assert_eq!(app.selected_task().unwrap().id(), deleted);
             assert_eq!(
                 app.apply(Action::RestoreSelected).unwrap(),
-                Transition::Persisted
+                Transition::Submit
             );
             assert_eq!(app.selected(), None);
             assert!(app.message().unwrap().contains("hidden"));
@@ -2050,7 +2226,7 @@ mod view_tests {
         search(&mut app, "match");
         assert_eq!(
             app.apply(Action::RestoreLatest).unwrap(),
-            Transition::Persisted
+            Transition::Submit
         );
         assert_eq!(app.selected(), Some(selected));
         assert_eq!(visible_ids(&app), vec![selected]);
@@ -2088,10 +2264,7 @@ mod view_tests {
         app.apply(Action::StartEdit).unwrap();
         replace_buffer(&mut app, "different");
         assert_eq!(app.selected(), Some(first));
-        assert_eq!(
-            app.apply(Action::CommitEdit).unwrap(),
-            Transition::Persisted
-        );
+        assert_eq!(app.apply(Action::CommitEdit).unwrap(), Transition::Submit);
         assert_eq!(app.selected(), Some(second));
         assert_eq!(app.tasks().task(first).unwrap().text(), "different");
         assert_eq!(app.tasks().task(hidden).unwrap().text(), "hidden");
@@ -2159,10 +2332,7 @@ mod view_tests {
             app.apply(Action::MoveTaskUp).unwrap(),
             Transition::Unchanged
         );
-        assert_eq!(
-            app.apply(Action::MoveTaskDown).unwrap(),
-            Transition::Persisted
-        );
+        assert_eq!(app.apply(Action::MoveTaskDown).unwrap(), Transition::Submit);
         assert_eq!(
             app.tasks()
                 .tasks()

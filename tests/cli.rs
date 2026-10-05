@@ -1157,3 +1157,34 @@ fn doctor_should_accept_existing_bindings_on_new_search_default_keys() {
         assert!(!home.path().join(".shtodo/projects").exists());
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn concurrent_tuis_and_shell_commands_should_pass_real_pty_regressions() {
+    let mut child = Command::new("python3")
+        .arg("scripts/test_concurrency.py")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("SHTODO_BINARY", env!("CARGO_BIN_EXE_shtodo"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python3 is required for the Unix PTY regression suite");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "PTY suite failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("PTY suite timed out");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}

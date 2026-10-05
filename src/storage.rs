@@ -1,22 +1,94 @@
 use std::{
     env,
     ffi::OsString,
+    fmt,
     fs::{self, File, OpenOptions, TryLockError},
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
-use color_eyre::eyre::{Result, WrapErr, ensure, eyre};
+use color_eyre::eyre::{Report, Result, WrapErr, ensure, eyre};
 use serde::Deserialize;
 
 use crate::{
     cli::ScopeChoice,
+    mutation::{Mutation, Outcome},
     task::{ListScope, SCHEMA_VERSION, TaskList},
 };
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 const MAX_PROJECT_SLUG_BYTES: usize = 48;
+pub(crate) const SHELL_LOCK_BUDGET: Duration = Duration::from_secs(1);
+pub(crate) const INTERACTIVE_LOCK_BUDGET: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ScopePresence {
+    AllowMissing,
+    RequireExisting,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum SnapshotToken {
+    Missing,
+    Present(Vec<u8>),
+}
+
+#[derive(Debug)]
+pub(crate) struct Snapshot {
+    pub(crate) list: TaskList,
+    pub(crate) token: SnapshotToken,
+}
+
+#[derive(Debug)]
+pub(crate) struct MutationReply {
+    pub(crate) snapshot: Snapshot,
+    pub(crate) outcome: Outcome,
+}
+
+#[derive(Debug)]
+pub(crate) enum TransactionError {
+    Busy(PathBuf),
+    Failed(Report),
+    ReplacedButNotSynced {
+        reply: Box<MutationReply>,
+        source: Report,
+    },
+}
+
+impl fmt::Display for TransactionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy(path) => write!(
+                formatter,
+                "another shtodo process is already using this list ({}); lock wait timed out; retry, or close an older TUI",
+                path.display()
+            ),
+            Self::Failed(error) => write!(formatter, "{error:#}"),
+            Self::ReplacedButNotSynced { reply, source } => {
+                if let Outcome::Changed { id, .. } = reply.outcome {
+                    write!(formatter, "change to task {} is visible, but ", id.get())?;
+                } else {
+                    write!(formatter, "change is visible, but ")?;
+                }
+                write!(
+                    formatter,
+                    "durability is unconfirmed; inspect the list before retrying: {source:#}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for TransactionError {}
+
+impl From<Report> for TransactionError {
+    fn from(error: Report) -> Self {
+        Self::Failed(error)
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct StoragePaths {
@@ -30,118 +102,312 @@ pub(crate) struct StoragePaths {
 pub(crate) struct Store {
     paths: StoragePaths,
     scope: ListScope,
+    #[cfg(test)]
+    counts: std::cell::Cell<(u64, u64, u64)>,
+}
+
+// A guard is the only production capability that can replace snapshot bytes.
+struct LockedStore<'a> {
+    store: &'a Store,
     _lock: File,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SaveStep {
+    Write,
+    TempSync,
+    Replace,
+    DirectorySync,
 }
 
 impl Store {
     pub(crate) fn open(home: &Path, scope: ListScope) -> Result<Self> {
-        let paths = paths_for_home(home, &scope)?;
-        fs::create_dir_all(&paths.directory).wrap_err_with(|| {
-            format!(
-                "could not create storage directory {}",
-                paths.directory.display()
-            )
-        })?;
+        Ok(Self {
+            paths: paths_for_home(home, &scope)?,
+            scope,
+            #[cfg(test)]
+            counts: std::cell::Cell::new((0, 0, 0)),
+        })
+    }
+
+    pub(crate) fn read_snapshot(&self, presence: ScopePresence) -> Result<Snapshot> {
+        let token = self.read_token(presence)?;
+        self.decode(token)
+    }
+
+    pub(crate) fn refresh(
+        &self,
+        previous: &SnapshotToken,
+        presence: ScopePresence,
+    ) -> Result<Option<Snapshot>> {
+        let token = self.read_token(presence)?;
+        if &token == previous {
+            return Ok(None);
+        }
+        self.decode(token).map(Some)
+    }
+
+    fn read_token(&self, presence: ScopePresence) -> Result<SnapshotToken> {
+        let token = read_token(&self.paths.data_file, presence)?;
+        #[cfg(test)]
+        {
+            let (reads, parses, bytes) = self.counts.get();
+            let size = match &token {
+                SnapshotToken::Missing => 0,
+                SnapshotToken::Present(bytes) => bytes.len() as u64,
+            };
+            self.counts.set((reads + 1, parses, bytes + size));
+        }
+        Ok(token)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn counts(&self) -> (u64, u64, u64) {
+        self.counts.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mutate_unsynced(
+        &self,
+        request: &Mutation,
+    ) -> std::result::Result<MutationReply, TransactionError> {
+        self.mutate_with_hook(
+            request,
+            ScopePresence::AllowMissing,
+            SHELL_LOCK_BUDGET,
+            |step| {
+                if step == SaveStep::DirectorySync {
+                    Err(eyre!("injected directory sync failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+    }
+
+    fn decode(&self, token: SnapshotToken) -> Result<Snapshot> {
+        let list = match &token {
+            SnapshotToken::Missing => TaskList::new(self.scope.clone()),
+            SnapshotToken::Present(bytes) => {
+                #[cfg(test)]
+                {
+                    let (reads, parses, bytes) = self.counts.get();
+                    self.counts.set((reads, parses + 1, bytes));
+                }
+                parse_snapshot(bytes, &self.paths.data_file, &self.scope)?
+            }
+        };
+        Ok(Snapshot { list, token })
+    }
+
+    pub(crate) fn mutate(
+        &self,
+        mutation: &Mutation,
+        presence: ScopePresence,
+        budget: Duration,
+    ) -> std::result::Result<MutationReply, TransactionError> {
+        self.mutate_with_hook(mutation, presence, budget, |_| Ok(()))
+    }
+
+    fn mutate_with_hook(
+        &self,
+        mutation: &Mutation,
+        presence: ScopePresence,
+        budget: Duration,
+        mut hook: impl FnMut(SaveStep) -> Result<()>,
+    ) -> std::result::Result<MutationReply, TransactionError> {
+        mutation
+            .validate()
+            .map_err(|error| TransactionError::Failed(error.into()))?;
+        let guard = self.acquire(presence, budget)?;
+        let mut snapshot = self.read_snapshot(presence)?;
+        let outcome = mutation.apply(&mut snapshot.list);
+        if !outcome.changed() {
+            return Ok(MutationReply { snapshot, outcome });
+        }
+        snapshot
+            .list
+            .validate()
+            .map_err(|error| TransactionError::Failed(error.into()))?;
+        let bytes = serialized(&snapshot.list)?;
+        guard.replace(&bytes, &mut hook)?;
+        snapshot.token = SnapshotToken::Present(bytes);
+        let reply = MutationReply { snapshot, outcome };
+        if let Err(source) = hook(SaveStep::DirectorySync).and_then(|()| guard.sync_directory()) {
+            return Err(TransactionError::ReplacedButNotSynced {
+                reply: Box::new(reply),
+                source,
+            });
+        }
+        Ok(reply)
+    }
+
+    pub(crate) fn recover_sync(
+        &self,
+        budget: Duration,
+    ) -> std::result::Result<Snapshot, TransactionError> {
+        let guard = self.acquire(ScopePresence::RequireExisting, budget)?;
+        let snapshot = self.read_snapshot(ScopePresence::RequireExisting)?;
+        OpenOptions::new()
+            .read(true)
+            .write(cfg!(windows))
+            .open(&self.paths.data_file)
+            .and_then(|file| file.sync_all())
+            .wrap_err_with(|| format!("could not sync {}", self.paths.data_file.display()))?;
+        guard.sync_directory()?;
+        Ok(snapshot)
+    }
+
+    fn acquire(
+        &self,
+        presence: ScopePresence,
+        budget: Duration,
+    ) -> std::result::Result<LockedStore<'_>, TransactionError> {
+        if presence == ScopePresence::AllowMissing {
+            fs::create_dir_all(&self.paths.directory).wrap_err_with(|| {
+                format!(
+                    "could not create storage directory {}",
+                    self.paths.directory.display()
+                )
+            })?;
+        }
+        // Restored data may have no lock file; require canonical data in the read under the lock.
         let lock = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(&paths.lock_file)
-            .wrap_err_with(|| format!("could not open lock file {}", paths.lock_file.display()))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                return Err(eyre!(
-                    "another shtodo process is already using this list ({})",
-                    paths.lock_file.display()
-                ));
+            .open(&self.paths.lock_file)
+            .wrap_err_with(|| {
+                format!(
+                    "could not open lock file {}",
+                    self.paths.lock_file.display()
+                )
+            })?;
+        let start = Instant::now();
+        let mut delay = Duration::from_millis(10);
+        let mut first_attempt = true;
+        loop {
+            if !first_attempt && start.elapsed() >= budget {
+                return Err(TransactionError::Busy(self.paths.lock_file.clone()));
             }
-            Err(TryLockError::Error(error)) => {
-                return Err(error)
-                    .wrap_err_with(|| format!("could not lock {}", paths.lock_file.display()));
+            first_attempt = false;
+            match lock.try_lock() {
+                Ok(()) => {
+                    return Ok(LockedStore {
+                        store: self,
+                        _lock: lock,
+                    });
+                }
+                Err(TryLockError::WouldBlock) => {
+                    let remaining = budget.saturating_sub(start.elapsed());
+                    if remaining.is_zero() {
+                        return Err(TransactionError::Busy(self.paths.lock_file.clone()));
+                    }
+                    thread::sleep(delay.min(remaining));
+                    delay = (delay * 2).min(Duration::from_millis(50));
+                }
+                Err(TryLockError::Error(error)) => {
+                    return Err(TransactionError::Failed(Report::new(error).wrap_err(
+                        format!("could not lock {}", self.paths.lock_file.display()),
+                    )));
+                }
             }
         }
-
-        Ok(Self {
-            paths,
-            scope,
-            _lock: lock,
-        })
     }
 
     #[cfg(test)]
     pub(crate) fn paths(&self) -> &StoragePaths {
         &self.paths
     }
-
     pub(crate) fn scope(&self) -> &ListScope {
         &self.scope
     }
-
+    #[cfg(test)]
     pub(crate) fn load(&self) -> Result<TaskList> {
-        load_snapshot(&self.paths.data_file, self.scope())
+        Ok(self.read_snapshot(ScopePresence::AllowMissing)?.list)
     }
 
+    // Fixture construction only; no production caller can save a cached list.
+    #[cfg(test)]
     pub(crate) fn save(&self, list: &TaskList) -> Result<()> {
         list.validate()?;
         ensure_scope_matches(list.scope(), &self.scope)?;
+        let guard = self.acquire(ScopePresence::AllowMissing, SHELL_LOCK_BUDGET)?;
+        guard.replace(&serialized(list)?, &mut |_| Ok(()))?;
+        guard.sync_directory()
+    }
+}
 
-        let mut bytes = serde_json::to_vec_pretty(list).wrap_err_with(|| {
-            format!(
-                "could not serialize task list for {}",
-                self.paths.data_file.display()
-            )
-        })?;
-        bytes.push(b'\n');
+impl LockedStore<'_> {
+    fn replace(&self, bytes: &[u8], hook: &mut impl FnMut(SaveStep) -> Result<()>) -> Result<()> {
+        let paths = &self.store.paths;
+        hook(SaveStep::Write)?;
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(&self.paths.temp_file)
+            .open(&paths.temp_file)
             .wrap_err_with(|| {
                 format!(
                     "could not open temporary snapshot {}",
-                    self.paths.temp_file.display()
+                    paths.temp_file.display()
                 )
             })?;
-        file.write_all(&bytes).wrap_err_with(|| {
+        file.write_all(bytes).wrap_err_with(|| {
             format!(
                 "could not write temporary snapshot {}",
-                self.paths.temp_file.display()
+                paths.temp_file.display()
             )
         })?;
+        hook(SaveStep::TempSync)?;
         file.sync_all().wrap_err_with(|| {
             format!(
                 "could not sync temporary snapshot {}",
-                self.paths.temp_file.display()
+                paths.temp_file.display()
             )
         })?;
-        fs::rename(&self.paths.temp_file, &self.paths.data_file).wrap_err_with(|| {
-            format!(
-                "could not rename temporary snapshot {} to {}",
-                self.paths.temp_file.display(),
-                self.paths.data_file.display()
-            )
-        })?;
+        drop(file);
+        hook(SaveStep::Replace)?;
+        fs::rename(&paths.temp_file, &paths.data_file)
+            .wrap_err_with(|| format!("could not replace {}", paths.data_file.display()))?;
+        Ok(())
+    }
 
+    fn sync_directory(&self) -> Result<()> {
         #[cfg(unix)]
-        File::open(&self.paths.directory)
-            .wrap_err_with(|| {
-                format!(
-                    "could not open storage directory {} for syncing",
-                    self.paths.directory.display()
-                )
-            })?
-            .sync_all()
+        File::open(&self.store.paths.directory)
+            .and_then(|directory| directory.sync_all())
             .wrap_err_with(|| {
                 format!(
                     "could not sync storage directory {}",
-                    self.paths.directory.display()
+                    self.store.paths.directory.display()
                 )
             })?;
-
         Ok(())
+    }
+}
+
+fn serialized(list: &TaskList) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(list).wrap_err("could not serialize task list")?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn read_token(path: &Path, presence: ScopePresence) -> Result<SnapshotToken> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(SnapshotToken::Present(bytes)),
+        Err(error)
+            if error.kind() == ErrorKind::NotFound && presence == ScopePresence::AllowMissing =>
+        {
+            Ok(SnapshotToken::Missing)
+        }
+        Err(error) => Err(error).wrap_err_with(|| {
+            format!(
+                "could not read {}; previously initialized storage must remain available",
+                path.display()
+            )
+        }),
     }
 }
 
@@ -252,22 +518,18 @@ pub(crate) fn load_read_only(home: &Path, scope: &ListScope) -> Result<TaskList>
 }
 
 pub(crate) fn load_snapshot(path: &Path, expected_scope: &ListScope) -> Result<TaskList> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(TaskList::new(expected_scope.clone()));
-        }
-        Err(error) => {
-            return Err(error).wrap_err_with(|| format!("could not read {}", path.display()));
-        }
-    };
+    match read_token(path, ScopePresence::AllowMissing)? {
+        SnapshotToken::Missing => Ok(TaskList::new(expected_scope.clone())),
+        SnapshotToken::Present(bytes) => parse_snapshot(&bytes, path, expected_scope),
+    }
+}
 
+fn parse_snapshot(bytes: &[u8], path: &Path, expected_scope: &ListScope) -> Result<TaskList> {
     #[derive(Deserialize)]
     struct VersionProbe {
         schema_version: u64,
     }
-
-    let probe: VersionProbe = serde_json::from_slice(&bytes)
+    let probe: VersionProbe = serde_json::from_slice(bytes)
         .wrap_err_with(|| format!("could not read schema version from {}", path.display()))?;
     if probe.schema_version != SCHEMA_VERSION {
         return Err(eyre!(
@@ -276,8 +538,7 @@ pub(crate) fn load_snapshot(path: &Path, expected_scope: &ListScope) -> Result<T
             path.display()
         ));
     }
-
-    let list: TaskList = serde_json::from_slice(&bytes)
+    let list: TaskList = serde_json::from_slice(bytes)
         .wrap_err_with(|| format!("could not parse {}", path.display()))?;
     list.validate()?;
     ensure_scope_matches(list.scope(), expected_scope)?;
@@ -312,6 +573,14 @@ mod tests {
         cli::ScopeChoice,
         task::{ListScope, TaskList},
     };
+
+    #[test]
+    fn idle_handles_should_not_create_storage_or_exclude_another_client() {
+        let home = tempfile::tempdir().unwrap();
+        let _first = Store::open(home.path(), ListScope::Global).unwrap();
+        let _second = Store::open(home.path(), ListScope::Global).unwrap();
+        assert!(!home.path().join(".shtodo").exists());
+    }
 
     #[test]
     fn home_should_prefer_nonempty_home() {
@@ -622,11 +891,23 @@ mod tests {
     }
 
     #[test]
-    fn second_store_should_not_lock_same_scope() {
+    fn held_transaction_should_exclude_a_second_transaction() {
         let temp = tempfile::tempdir().unwrap();
-        let first = Store::open(temp.path(), ListScope::Global).unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        let first = store
+            .acquire(
+                super::ScopePresence::AllowMissing,
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
 
-        let error = Store::open(temp.path(), ListScope::Global).unwrap_err();
+        let error = store
+            .acquire(
+                super::ScopePresence::AllowMissing,
+                std::time::Duration::ZERO,
+            )
+            .err()
+            .unwrap();
 
         assert!(error.to_string().contains("already using"));
         drop(first);
@@ -711,6 +992,7 @@ mod tests {
     fn save_should_reject_wrong_scope_before_touching_temp_file() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        std::fs::create_dir_all(&store.paths().directory).unwrap();
         std::fs::write(&store.paths().temp_file, b"stale temp data").unwrap();
         let project_scope = ListScope::Project {
             path: std::env::current_dir()
@@ -731,6 +1013,7 @@ mod tests {
     fn stale_temp_file_should_never_load_as_canonical() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        std::fs::create_dir_all(&store.paths().directory).unwrap();
         let mut stale = TaskList::new(ListScope::Global);
         stale.add("stale").unwrap();
         std::fs::write(
@@ -744,3 +1027,7 @@ mod tests {
         assert_eq!(loaded.visible_tasks().count(), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "storage_concurrency_tests.rs"]
+mod concurrency_tests;

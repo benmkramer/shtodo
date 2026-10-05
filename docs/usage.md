@@ -89,7 +89,8 @@ shell, with `u` in the TUI, or individually in the trash view opened with `t`.
 An unknown ID fails with `task 3 was not found`. Missing, zero, signed,
 nonnumeric, and extra IDs are usage errors. Deletion uses the selected scope's
 writer lock and atomic save path, so it fails if another writer holds that
-lock.
+lock beyond the one-second acquisition budget. Invalid keybinding configuration
+does not block any shell task command.
 
 The rest of the shell lifecycle accepts the same positive scope-local IDs:
 
@@ -283,12 +284,65 @@ task and `t` lists deletions for selective restoration, even after quitting
 and relaunching. If no tombstone is available, `u` shows `Nothing to restore`
 and leaves the snapshot unchanged.
 
-Each list scope has its own process lock. A second `shtodo` process for the
-same global or local list is rejected while the first holds the lock; a global
-and a different local list can be open independently. Local-list identity is
-the canonical absolute directory path. Moving a directory therefore creates a
-different local-list identity, even if its name is unchanged. The read-only
-`list` command does not acquire this writer lock.
+Each list scope has its own writer lock, held only while applying and saving a
+change. Local-list identity is the canonical absolute directory path. Moving a
+directory therefore creates a different local-list identity, even if its name
+is unchanged. The read-only `list` command does not acquire this writer lock.
+
+## Concurrent processes
+
+Several TUIs and shell commands can share the same global or exact-directory
+list. Every change reloads the latest snapshot under its scope's writer lock,
+so unrelated additions, edits, and other updates survive. An idle TUI checks
+for changes once per second. Selection stays on the same task when possible;
+draft text, cursor position, search/filter state, Trash, and Help remain open
+during refresh. Opening or
+refreshing a never-created list creates no task storage.
+
+Shell mutations wait up to one second to acquire the lock; interactive
+mutations wait up to 100 milliseconds. When that budget expires, the command
+reports a lock timeout or the TUI shows the error and keeps its draft. Retry
+after the other writer finishes. These budgets limit lock acquisition, not the
+disk work after acquisition. Different scopes use independent locks. Older
+versions hold the lock for their entire TUI session: close that older session
+to let new mutations proceed. New TUIs and `list` can still read its last
+complete snapshot.
+
+Interactive actions use the task and values displayed when you press the key.
+Completion sets the intended state, so two stale completion actions cannot
+toggle each other back. Reordering checks the observed adjacent task in the
+active view/search before swapping, retaining hidden canonical slots. Selective
+trash restoration checks the observed deletion sequence, so an unseen
+restore/delete cycle needs review before another restoration. Deletion checks
+that the displayed task has not changed. An edit
+checks its original text, allowing unrelated completion or order changes to
+coexist. If another writer changes the text, a conflicting draft stays visible
+with a conflict hint. A draft that already matches the current text can close
+without writing. Use the configured cancel key, Escape by default, then reopen
+the edit to review the current text. A deleted edit target keeps a detached
+draft and cannot be resurrected by saving it. Once refresh observes that
+deletion, restoring the task does not make the old draft eligible again.
+
+If refresh cannot validate or read storage, the TUI keeps its last good list
+and draft, blocks mutations, and retries with a delay capped at five seconds.
+A snapshot that disappears after the TUI has opened it is an error; the TUI
+does not recreate it with reset IDs. Restore the valid file to resume.
+An absent `tasks.lock`, such as after restoring only `tasks.json` from a backup,
+is recreated by the next write or sync recovery. Opening and refreshing the
+list remain read-only.
+
+An error after atomic replacement can mean the change is already visible but
+its durability is unconfirmed. The TUI retains a warning, freezes the committed
+draft, and retries synchronization of the latest snapshot without repeating
+the action. Enter also retries synchronization; Escape can close the draft
+but leaves the warning and new writes blocked until synchronization succeeds.
+A successful refresh alone cannot clear that warning. Shell commands report
+the visible task ID in this case; inspect `shtodo list` before repeating an add.
+Losing a process response does not provide exactly-once execution.
+
+Conflict checks compare current values in schema 1. An unseen text change that
+returns to the original value, or an unseen deletion followed by restoration,
+may allow an edit. This is not a record of every intervening task event.
 
 ## Version-one limits
 

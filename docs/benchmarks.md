@@ -14,9 +14,11 @@ Today it offers a keyboard TUI for a checklist, global and per-directory lists,
 manual ordering, configurable keys, browsable trash, and transient TUI
 text search with All/Open/Done tabs. Its shell task commands now include add,
 list, delete, done, reopen, edit, and restore, with optional `add --print-id`
-output for scripts. Shell listing remains unfiltered. The measured beta.2
-binary only offered add, list, and delete; the added lifecycle commands have
-not been timed. It has no priorities, tags, scheduling, recurrence,
+output for scripts. Shell listing remains unfiltered. The current measurements
+use a local beta.3 release build with the unreleased concurrency implementation.
+The fuller lifecycle commands and TUI behavior are measured in a separate
+[paired beta.3 comparison](./benchmarks/concurrent-usage-comparison.md).
+It has no priorities, tags, scheduling, recurrence,
 sync, supported import/export, or structured JSON output. See the
 [current scope](./usage.md#version-one-limits) and
 [feature comparison](#feature-comparison).
@@ -46,124 +48,128 @@ everyday use for every tool. Differences in output, recovery, and durability
 are documented under [method](#workloads-and-method) and
 [interpretation](#interpreting-the-numbers).
 
-## Expanded five-app comparison: October 4, 2026
+## Expanded five-app comparison: October 5, 2026
 
-The expanded batch reran all five apps together at 0, 10, 100, and 1,000 tasks.
-It contains **3,050 measured invocations**: 50 samples for each of 60 app/workload
-combinations and the process baseline, after five warmup rounds. Every correctness
-check passed. Hardware and the `shtodo` release binary match the original run.
-The additions are Taskbook 0.3.0 on Node 24.15.0 and topydo 0.16 on Python 3.14.6.
+This refresh measures the repaired concurrency implementation alongside all four
+comparison tools at 0, 10, 100, and 1,000 tasks. It includes the missing-lock
+repair for TUI writes and sync recovery. The earlier October 5 and October 4
+samples remain archived below.
+
+The measured local `shtodo 0.1.0-beta.3` release build was built from `707b0ec`
+plus the worktree's concurrency changes and missing-lock repair, with Rust 1.98.0 and
+the checked-in release profile. Its SHA-256 is
+`0210c031885d6990e1df4a119cd14f2b0851e9e37a4b161eca1bc2e492a47281`.
+Hardware is the same Apple M4 Max, 48 GB RAM, macOS 27.0.1, on AC power.
+Taskwarrior 3.5.0, todo.txt CLI 2.14.0, Taskbook 0.3.0 on Node 24.15.0, and
+topydo 0.16 on Python 3.14.6 retain their previous executable hashes.
+All five apps were rerun together; benchmark batches ran sequentially.
+
+This batch contains **3,050 measured invocations**: 50 samples
+for each of 60 app/workload combinations and the process baseline, after five
+warmup rounds. Every correctness check passed.
 
 Median wall time at **1,000 initial tasks**, in milliseconds; lower is faster:
 
 | App | List all | Add one | Delete one |
 | --- | ---: | ---: | ---: |
-| shtodo | 3.97 | 13.50 | 13.58 |
-| Taskwarrior | 20.43 | 25.33 | 28.56 |
-| todo.txt CLI | 47.92 | 25.45 | 19.69 |
-| Taskbook | 65.29 | 60.10 | 60.61 |
-| topydo | 89.88 | 47.26 | 51.50 |
+| shtodo | 3.73 | 13.04 | 13.13 |
+| Taskwarrior | 20.37 | 24.96 | 28.19 |
+| todo.txt CLI | 46.15 | 24.34 | 19.33 |
+| Taskbook | 63.86 | 59.81 | 59.35 |
+| topydo | 88.26 | 46.78 | 50.83 |
 
-![Five-app median latency through 1,000 tasks, with shading from median to p95](./benchmarks/2026-10-04-expanded.png)
+![Repaired-build five-app median latency through 1,000 tasks, with shading from median to p95](./benchmarks/2026-10-05-repaired-expanded.png)
 
-`shtodo` had the lowest list median at every size in this batch, and the lowest
-add/delete medians at 1,000 tasks. Taskwarrior had lower mutation medians at the
-smaller sizes. Taskbook's 56.85 ms version median was close to its mutation times;
-this suggests startup/module loading is a useful profiling target, but does not
-isolate that cost. topydo's list median rose from 37.41 ms at 10 tasks to 89.88 ms
-at 1,000 tasks. Richer output and different write/recovery work remain part of
-these end-to-end user operations.
+These are fresh measurements of the shared CLI workload, including the
+short-transaction storage path. The feature sets and recovery/durability work
+still differ. Changes between separate batches do not isolate the missing-lock
+repair's performance effect; the paired comparison below measures the combined
+concurrency change against unchanged beta.3.
 
-Artifacts: [all medians and p95s](./benchmarks/2026-10-04-expanded.md),
-[raw samples and runtime metadata](./benchmarks/2026-10-04-expanded.json),
-[SVG chart](./benchmarks/2026-10-04-expanded.svg), and
-[added-tool provenance](./benchmarks/2026-10-04-expanded-tools.json).
+Artifacts: [all medians and p95s](./benchmarks/2026-10-05-repaired-expanded.md),
+[raw samples and runtime metadata](./benchmarks/2026-10-05-repaired-expanded.json),
+[SVG chart](./benchmarks/2026-10-05-repaired-expanded.svg), and
+[comparison-tool provenance](./benchmarks/2026-10-04-expanded-tools.json).
 
-### 10,000-task extension
+### 10,000-task extension: October 5, 2026
 
-Taskbook 0.3.0 did not complete the full-list correctness preflight at 10,000
-tasks. Its renderer pads IDs to four characters using `String.repeat`; ID 10000 produces
-`RangeError: Invalid count value: -1`. It prints only 9,999 tasks and exits 1.
-This was also reproduced by starting at 9,999 tasks and using Taskbook's real
-add command: the add succeeds and stores ID 10000, but the next list crashes.
-[Failure evidence](./benchmarks/2026-10-04-taskbook-10000-failure.json) records
-the exit codes, stderr, record counts, runtime, and source hashes. This is an
-observation about the tested version and workload, not a claim about other
-versions or its suitability for smaller personal lists.
+Taskbook 0.3.0 still fails the full-list correctness preflight at 10,000 tasks.
+Its renderer pads IDs to four characters using `String.repeat`; ID 10000
+produces `RangeError: Invalid count value: -1`. The fresh reproduction prints
+only 9,999 tasks and exits 1. The
+[failure evidence](./benchmarks/2026-10-05-repaired-taskbook-10000-failure.json)
+retains record counts, stderr, runtime, and source hashes. No Taskbook latency
+is reported at this size.
 
-No Taskbook timing is reported at this size. The harness aborts on that failure;
-the completed large-list batch therefore compares topydo with a fresh `shtodo`
-control. Taskwarrior and todo.txt's earlier 10,000-task results remain in the
-original batch below. Different batches are not pooled into one ranking.
+The fresh large-list batch compares topydo with the same repaired `shtodo`
+binary. It contains **450 measured invocations**, with 50
+samples per case and five warmup rounds. Every correctness check passed.
+Taskwarrior and todo.txt's older 10,000-task results remain in the archived
+three-app baseline; different batches are not pooled into one ranking.
 
-This batch contains **450 measured invocations**, again using 50 samples per
-case and five warmup rounds. Median wall time at **10,000 initial tasks**, in
-milliseconds:
+Median wall time at **10,000 initial tasks**, in milliseconds:
 
 | App | List all | Add one | Delete one |
 | --- | ---: | ---: | ---: |
-| shtodo | 13.27 | 19.32 | 18.71 |
-| topydo | 1,009.13 | 155.71 | 403.55 |
+| shtodo | 12.77 | 17.47 | 17.43 |
+| topydo | 991.25 | 154.07 | 400.17 |
 
-At this size, list medians were 13.27 ms for `shtodo` and 1,009.13 ms for topydo.
-`shtodo`'s p95 values were 14.32 ms for list, 22.30 ms for add, and 23.33 ms for
-delete. These figures include each tool's normal persistence and recovery work,
-which differs as described below.
+`shtodo`'s p95 is 13.35 ms for list,
+20.03 ms for add, and
+20.38 ms for delete.
+These figures include each tool's normal persistence and recovery work, which
+differs as described below.
 
-Artifacts: [large-list medians and p95s](./benchmarks/2026-10-04-expanded-10000.md)
-and [raw samples and metadata](./benchmarks/2026-10-04-expanded-10000.json).
+Artifacts: [large-list medians and p95s](./benchmarks/2026-10-05-repaired-expanded-10000.md)
+and [raw samples and metadata](./benchmarks/2026-10-05-repaired-expanded-10000.json).
 
-## Original three-app baseline: October 4, 2026
+## Concurrency change: October 5, 2026
 
-Measured on an Apple M4 Max, 48 GB RAM, macOS 27.0.1, connected to AC power.
-`shtodo` was built from commit `20916640b372fbd927319ca1e260ae51c233a5e6`
-with Rust 1.98.0 and the checked-in release profile. Competitors were Taskwarrior
-3.5.0's macOS ARM64 Homebrew bottle and the todo.txt CLI 2.14.0 release script,
-using the system Bash. The app source was unchanged during this work.
+The [paired beta.3 comparison](./benchmarks/concurrent-usage-comparison.md)
+measures unchanged beta.3 at `707b0ec` against the repaired concurrency
+implementation on this host. It retains 4,100 shell-command samples,
+600 TUI actions, fresh one/two-TUI idle runs, and three concurrent-writer
+load runs. Those batches are separate from the cross-tool results above.
 
-The run contains 50 samples for each of 45 app/workload combinations, plus 50
-process-baseline samples: **2,300 measured invocations**. Five warmup rounds were
-excluded. Every command and mutation correctness check passed.
+At 10,000 records, paired plain-fixture add medians are
+17.66 to 17.58 ms and list medians are
+13.28 to 13.53 ms. TUI completion on the larger
+Unicode/tombstone fixture goes from 12.69 to 16.13 ms (+27.1%).
+Idle CPU goes from 0.0062% to 0.1246% of one core, with about
+1.7 MB of logical snapshot reads per second per TUI. The report distinguishes
+these costs, records p95s and exact binary hashes, and explains the successful
+live-TUI writer workload.
 
-Median wall time in milliseconds; lower is faster:
+## Earlier October 5 measurements before the missing-lock repair
 
-| Initial tasks | App | List all | Add one | Delete one |
-| ---: | --- | ---: | ---: | ---: |
-| 100 | shtodo | 2.96 | 12.34 | 12.52 |
-| 100 | Taskwarrior | 9.79 | 10.69 | 11.15 |
-| 100 | todo.txt CLI | 35.87 | 24.32 | 18.84 |
-| 1,000 | shtodo | 3.83 | 13.30 | 13.05 |
-| 1,000 | Taskwarrior | 20.13 | 24.71 | 28.13 |
-| 1,000 | todo.txt CLI | 46.50 | 24.39 | 19.29 |
-| 10,000 | shtodo | 12.80 | 17.88 | 17.91 |
-| 10,000 | Taskwarrior | 119.52 | 159.99 | 194.07 |
-| 10,000 | todo.txt CLI | 158.14 | 25.54 | 20.92 |
+The previous measurements used binary SHA-256
+`f43b695f1670322e7a17bb6bc10ab1ae56059740eaff26f39230ba9ffe72f131`.
+They remain intact, with their original samples and metadata:
 
-![Median command latency by initial task count, with shading from median to p95](./benchmarks/2026-10-04-macos-arm64.png)
+- Five-app comparison: [tables](./benchmarks/2026-10-05-expanded.md),
+  [raw samples](./benchmarks/2026-10-05-expanded.json), and
+  [chart](./benchmarks/2026-10-05-expanded.svg).
+- Large-list extension: [tables](./benchmarks/2026-10-05-expanded-10000.md)
+  and [raw samples](./benchmarks/2026-10-05-expanded-10000.json).
+- Paired concurrency measurements: [report](./benchmarks/2026-10-05-pre-repair-concurrency-comparison.md).
+- [Taskbook preflight failure](./benchmarks/2026-10-05-taskbook-10000-failure.json).
 
-In this first batch, `shtodo` had the lowest list median at every tested size.
-Taskwarrior had lower add/delete medians at 10 and 100 tasks, and a lower add
-median for the empty store. At 1,000 and 10,000 tasks, `shtodo` had the lowest
-medians for all three operations. todo.txt's add and delete medians changed relatively little as its
-list grew, while its list command became substantially slower.
+## Historical runs: October 4, 2026
 
-At 10,000 tasks, `shtodo` p95 was 13.34 ms for list, 19.67 ms for add, and
-19.44 ms for delete. The startup-proxy medians were 2.74 ms for `shtodo`, 6.37 ms
-for Taskwarrior, and 9.11 ms for todo.txt; the external `true` baseline was
-2.07 ms. These are whole-process timings with a measurable process-launch floor.
+The earlier beta.2 measurements and charts are retained as dated evidence.
+Their numbers have been superseded in the primary tables above:
 
-The measured write floor in `shtodo` is consistent with doing synchronous
-persistence, but this run does not isolate filesystem sync from other costs.
-Code inspection identifies full-snapshot parsing, validation, and serialization
-as candidates for profiling; it does not establish their individual contribution.
-The next useful measurements are TUI first-frame/input latency, stores with
-accumulated completed/deleted tasks, and a second operating system. This baseline
-does not establish which app is more productive or universally fastest.
-
-Artifacts: [all medians and p95s](./benchmarks/2026-10-04-macos-arm64.md),
-[raw samples and metadata](./benchmarks/2026-10-04-macos-arm64.json),
-[SVG chart](./benchmarks/2026-10-04-macos-arm64.svg), and
-[competitor download manifest](./benchmarks/2026-10-04-tools.json).
+- Original three-app baseline: [tables](./benchmarks/2026-10-04-macos-arm64.md),
+  [raw samples](./benchmarks/2026-10-04-macos-arm64.json), and
+  [chart](./benchmarks/2026-10-04-macos-arm64.svg).
+- Expanded five-app comparison: [tables](./benchmarks/2026-10-04-expanded.md),
+  [raw samples](./benchmarks/2026-10-04-expanded.json), and
+  [chart](./benchmarks/2026-10-04-expanded.svg).
+- Large-list extension: [tables](./benchmarks/2026-10-04-expanded-10000.md)
+  and [raw samples](./benchmarks/2026-10-04-expanded-10000.json).
+- Original [Taskbook failure and native-add reproduction](./benchmarks/2026-10-04-taskbook-10000-failure.json),
+  [three-app tool manifest](./benchmarks/2026-10-04-tools.json), and
+  [added-tool manifest](./benchmarks/2026-10-04-expanded-tools.json).
 
 ## Run it
 
@@ -390,8 +396,11 @@ code 1 only for empty lists, with a separate content check.
   the text file; backup recovery is different from crash durability. See
   [Taskbook storage](https://github.com/klaudiosinani/taskbook/blob/master/src/storage.js)
   and [topydo changesets](https://github.com/topydo/topydo/blob/0.16/topydo/lib/ChangeSet.py).
-- Completed tasks, accumulated deletion history, long or Unicode descriptions,
-  filtering, recurrence, sync, memory usage, and disk usage are not benchmarked.
+- These cross-tool fixtures do not benchmark completed tasks, accumulated
+  deletion history, long or Unicode descriptions, filtering, recurrence, sync,
+  memory usage, or disk usage. The separate
+  [concurrency comparison](./benchmarks/concurrent-usage-comparison.md) includes
+  Unicode/tombstones and TUI/idle workloads.
   `fixture_bytes` in JSON is setup diagnostics, not a storage-efficiency ranking.
 - p95 with 50 samples is a descriptive tail estimate. Small differences near
   the process baseline deserve repeated runs on other machines before making
@@ -404,11 +413,11 @@ code 1 only for empty lists, with a separate content check.
 ## Feature comparison
 
 This is a documented-capability comparison, not a usability study. The tested
-versions are `shtodo 0.1.0-beta.2`, Taskwarrior 3.5.0, todo.txt CLI 2.14.0,
-Taskbook 0.3.0, and topydo 0.16. The `shtodo` column describes current development
-behavior, including shell lifecycle additions, browsable trash, and TUI search
-and tabs since the measured beta.2 binary. TUI behavior and the added shell
-commands are described but not timed.
+versions are `shtodo 0.1.0-beta.3` with the unreleased concurrency changes,
+Taskwarrior 3.5.0, todo.txt CLI 2.14.0, Taskbook 0.3.0, and topydo 0.16.
+The `shtodo` column describes the current development behavior. TUI behavior
+and the fuller shell lifecycle have their own
+[paired measurements](./benchmarks/concurrent-usage-comparison.md).
 
 | Capability | shtodo | Taskwarrior | todo.txt CLI |
 | --- | --- | --- | --- |
