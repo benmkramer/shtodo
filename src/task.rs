@@ -294,6 +294,27 @@ impl TaskList {
         }
     }
 
+    /// Swap two non-deleted tasks without moving any other canonical slots.
+    pub(crate) fn swap_visible(
+        &mut self,
+        first: TaskId,
+        second: TaskId,
+    ) -> Result<bool, ListError> {
+        let index_of = |id| {
+            self.tasks
+                .iter()
+                .position(|task| task.id == id && !task.is_deleted())
+                .ok_or(ListError::TaskNotFound(id))
+        };
+        let first_index = index_of(first)?;
+        let second_index = index_of(second)?;
+        if first_index == second_index {
+            return Ok(false);
+        }
+        self.tasks.swap(first_index, second_index);
+        Ok(true)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ListError> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(ListError::InvalidData("unsupported schema version".into()));

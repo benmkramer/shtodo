@@ -57,11 +57,13 @@ combined, and the concurrency plan remains proposed work.
 
 - Search/filtering also touches `app`, `action`, `input`, `config`, `ui`, and
   usage/configuration docs. Trash uses its own `TrashState` selection and
-  `render_trash_content`; the normal `visible_tasks()` projection is unchanged.
-  `/` and `f` remain available for the search/filter branch. Preserve the active
-  normal filter/query when opening and closing trash. Integration must reconcile
-  normal selection if the last restored task falls outside that projection;
-  trash itself lists all tombstones in the scope.
+  `render_trash_content`; `TaskList::visible_tasks()` still means non-deleted tasks.
+  Search integration now uses `/`, Tab, and Shift-Tab in the live list. Opening
+  and closing trash preserves the active filter/query. A restored task is
+  selected in the live list only if it matches that projection; otherwise the
+  prior matching selection is retained or reconciled. Trash itself lists all
+  tombstones in the scope. Regression tests cover query/state-hidden restores,
+  matching restoration, empty filtered views, and help/return behavior.
 - The keymap now locates definitions by BindingId rather than hard-coded table
   offsets, so added search actions do not require renumbering those offsets.
   Resolve conflicts in BindingId/Action/Mode matches and recompute keymap counts
@@ -106,4 +108,4 @@ configs start, legacy keys still complete tasks, the `Ctrl-t` fallback opens
 trash and allows restoration, and Doctor explains the fully occupied case.
 
 No standalone feature decisions remain open. The filtered-selection integration
-case above must be resolved when combining this branch with search/filtering.
+case above is covered when combined with search/filtering.

@@ -49,8 +49,9 @@ with a short rationale.
 
 - JSON output is deferred because the agent-facing contract needs real usage
   before shtodo commits to a structured schema.
-- List filters and search are deferred because agents can filter the initial
-  explicit `open` and `done` rows themselves.
+- Shell list filters and search are deferred because agents can filter the
+  explicit `open` and `done` rows themselves. Transient TUI search and status
+  views are implemented separately and leave that shell contract unchanged.
 - Bulk deletion is deferred to keep retries and partial-failure behavior
   unambiguous.
 - Permanent deletion is rejected for this slice because existing recoverable

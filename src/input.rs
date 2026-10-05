@@ -15,6 +15,10 @@ pub(crate) enum BindingId {
     ToggleComplete,
     Delete,
     RestoreLatest,
+    StartSearch,
+    CycleView,
+    PreviousView,
+    ClearSearch,
     OpenTrash,
     TrashMoveDown,
     TrashMoveUp,
@@ -42,6 +46,15 @@ pub(crate) enum BindingId {
 }
 
 impl BindingId {
+    fn defaults_yield_to_overrides(self) -> bool {
+        // These defaults were added after the original configurable keymap.
+        // Existing user bindings must keep working when upgrading.
+        matches!(
+            self,
+            Self::StartSearch | Self::CycleView | Self::PreviousView | Self::ClearSearch
+        )
+    }
+
     pub(crate) fn from_config(mode: Mode, name: &str) -> Option<Self> {
         Some(match (mode, name) {
             (Mode::Normal, "move_down") => Self::MoveDown,
@@ -53,6 +66,10 @@ impl BindingId {
             (Mode::Normal, "toggle_complete") => Self::ToggleComplete,
             (Mode::Normal, "delete_task") => Self::Delete,
             (Mode::Normal, "restore_latest") => Self::RestoreLatest,
+            (Mode::Normal, "start_search") => Self::StartSearch,
+            (Mode::Normal, "cycle_view") => Self::CycleView,
+            (Mode::Normal, "previous_view") => Self::PreviousView,
+            (Mode::Normal, "clear_search") => Self::ClearSearch,
             (Mode::Normal, "open_trash") => Self::OpenTrash,
             (Mode::Trash, "move_down") => Self::TrashMoveDown,
             (Mode::Trash, "move_up") => Self::TrashMoveUp,
@@ -90,6 +107,10 @@ impl BindingId {
             Self::ToggleComplete => Some("toggle_complete"),
             Self::Delete => Some("delete_task"),
             Self::RestoreLatest => Some("restore_latest"),
+            Self::StartSearch => Some("start_search"),
+            Self::CycleView => Some("cycle_view"),
+            Self::PreviousView => Some("previous_view"),
+            Self::ClearSearch => Some("clear_search"),
             Self::OpenTrash => Some("open_trash"),
             Self::TrashMoveDown => Some("move_down"),
             Self::TrashMoveUp => Some("move_up"),
@@ -127,6 +148,10 @@ impl BindingId {
             | Self::ToggleComplete
             | Self::Delete
             | Self::RestoreLatest
+            | Self::StartSearch
+            | Self::CycleView
+            | Self::PreviousView
+            | Self::ClearSearch
             | Self::OpenTrash
             | Self::OpenHelp
             | Self::NormalQuit => Mode::Normal,
@@ -192,7 +217,12 @@ impl KeyChord {
                 modifiers.insert(KeyModifiers::ALT);
                 remainder = &remainder[4..];
             } else if lower.starts_with("shift-") {
-                return Err(KeyParseError("Shift modifier is not supported".into()));
+                if lower == "shift-tab" {
+                    break;
+                }
+                return Err(KeyParseError(
+                    "Shift modifier is only supported for Tab".into(),
+                ));
             } else {
                 break;
             }
@@ -211,7 +241,7 @@ impl KeyChord {
             "page-up" => KeyCode::PageUp,
             "page-down" => KeyCode::PageDown,
             "tab" => KeyCode::Tab,
-            "backtab" => KeyCode::BackTab,
+            "backtab" | "shift-tab" => KeyCode::BackTab,
             "enter" => KeyCode::Enter,
             "esc" => KeyCode::Esc,
             "space" => KeyCode::Char(' '),
@@ -235,10 +265,15 @@ impl KeyChord {
 
     fn from_event(event: KeyEvent) -> Self {
         let mut modifiers = event.modifiers;
-        if matches!(event.code, KeyCode::Char(_) | KeyCode::BackTab) {
+        let code = if event.code == KeyCode::Tab && modifiers.contains(KeyModifiers::SHIFT) {
+            KeyCode::BackTab
+        } else {
+            event.code
+        };
+        if matches!(code, KeyCode::Char(_) | KeyCode::BackTab) {
             modifiers.remove(KeyModifiers::SHIFT);
         }
-        let code = match event.code {
+        let code = match code {
             KeyCode::Char(character) => KeyCode::Char(normalize_character(character, modifiers)),
             code => code,
         };
@@ -263,7 +298,7 @@ impl KeyChord {
             KeyCode::PageUp => "Page-Up",
             KeyCode::PageDown => "Page-Down",
             KeyCode::Tab => "Tab",
-            KeyCode::BackTab => "Backtab",
+            KeyCode::BackTab => "Shift-Tab",
             KeyCode::Enter => "Enter",
             KeyCode::Esc => "Esc",
             KeyCode::Backspace => "Backspace",
@@ -659,6 +694,38 @@ static DEFINITIONS: &[Definition] = &[
         defaults: &[],
         fixed: &[chord(KeyCode::Char('c'), KeyModifiers::CONTROL)],
     },
+    Definition {
+        id: BindingId::StartSearch,
+        action: Action::StartSearch,
+        description: "search",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Char('/'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::CycleView,
+        action: Action::CycleView,
+        description: "next view",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Tab, KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::ClearSearch,
+        action: Action::ClearSearch,
+        description: "clear search",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Esc, KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::PreviousView,
+        action: Action::PreviousView,
+        description: "previous view",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::BackTab, KeyModifiers::NONE)],
+        fixed: &[],
+    },
 ];
 
 impl Keymap {
@@ -725,6 +792,22 @@ impl Keymap {
             keys[index] = parsed;
             sources[index] = Some((override_.order, override_.path.clone()));
         }
+        let explicit_keys = keys
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| sources[*index].is_some())
+            .flat_map(|(index, chords)| {
+                chords
+                    .iter()
+                    .map(move |chord| (DEFINITIONS[index].id.mode(), *chord))
+            })
+            .collect::<Vec<_>>();
+        for (index, definition) in DEFINITIONS.iter().enumerate() {
+            if sources[index].is_none() && definition.id.defaults_yield_to_overrides() {
+                keys[index]
+                    .retain(|chord| !explicit_keys.contains(&(definition.id.mode(), *chord)));
+            }
+        }
         resolve_open_trash_default(&mut keys, overrides);
         let mut seen = Vec::<(KeyChord, usize)>::new();
         for (index, definition) in DEFINITIONS.iter().enumerate() {
@@ -782,7 +865,7 @@ impl Keymap {
         }
         match (mode, chord) {
             (
-                Mode::Insert,
+                Mode::Insert | Mode::Search,
                 KeyChord {
                     code: KeyCode::Char(character),
                     modifiers,
@@ -793,15 +876,32 @@ impl Keymap {
     }
 
     pub(crate) fn bindings_for(&self, mode: Mode) -> impl Iterator<Item = &ResolvedBinding> {
+        // Search shares the configurable text editor, including commit/cancel and Ctrl-C.
+        let mode = if mode == Mode::Search {
+            Mode::Insert
+        } else {
+            mode
+        };
         self.bindings
             .iter()
             .filter(move |binding| binding.mode == mode)
     }
     pub(crate) fn configurable_action_count(&self) -> usize {
-        self.bindings
+        DEFINITIONS
             .iter()
             .filter(|binding| binding.id.config_name().is_some())
             .count()
+    }
+    pub(crate) fn unbound_actions_for(&self, mode: Mode) -> impl Iterator<Item = BindingId> {
+        DEFINITIONS.iter().filter_map(move |definition| {
+            (definition.id.mode() == mode
+                && definition.id.config_name().is_some()
+                && !self
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.id == definition.id))
+            .then_some(definition.id)
+        })
     }
     pub(crate) fn active_binding_count(&self) -> usize {
         self.bindings
@@ -910,7 +1010,7 @@ mod tests {
                 None
             );
         }
-        for key in ['r', '/', 'f'] {
+        for key in ['r', 'f'] {
             assert_eq!(
                 keymap.map_key(
                     Mode::Normal,
@@ -930,6 +1030,9 @@ mod tests {
             ("ctrl-n", "Ctrl-n"),
             ("ALT-left", "Alt-Left"),
             ("ctrl-alt-x", "Ctrl-Alt-x"),
+            ("backtab", "Shift-Tab"),
+            ("SHIFT-TAB", "Shift-Tab"),
+            ("ctrl-shift-tab", "Ctrl-Shift-Tab"),
         ] {
             assert_eq!(KeyChord::parse(source).unwrap().label(), expected);
         }
@@ -1287,8 +1390,8 @@ mod tests {
     #[test]
     fn keymap_should_expose_configurable_and_active_binding_counts() {
         let keymap = Keymap::defaults();
-        assert_eq!(keymap.configurable_action_count(), 31);
-        assert_eq!(keymap.active_binding_count(), 44);
+        assert_eq!(keymap.configurable_action_count(), 35);
+        assert_eq!(keymap.active_binding_count(), 48);
         assert_eq!(
             BindingId::from_config(Mode::Normal, "move_down"),
             Some(BindingId::MoveDown)
@@ -1325,5 +1428,368 @@ mod tests {
             keymap.map_key(Mode::Insert, pressed(KeyCode::Char('x'), KeyModifiers::ALT)),
             None
         );
+    }
+
+    #[test]
+    fn search_view_and_clear_defaults_should_coexist_with_trash_controls() {
+        let keymap = Keymap::defaults();
+        for (code, action) in [
+            (KeyCode::Char('/'), Action::StartSearch),
+            (KeyCode::Tab, Action::CycleView),
+            (KeyCode::BackTab, Action::PreviousView),
+            (KeyCode::Esc, Action::ClearSearch),
+            (KeyCode::Char('t'), Action::OpenTrash),
+        ] {
+            assert_eq!(
+                keymap.map_key(Mode::Normal, pressed(code, KeyModifiers::NONE)),
+                Some(action)
+            );
+        }
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('r'), KeyModifiers::NONE)
+            ),
+            None
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Trash, pressed(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Some(Action::RestoreSelected)
+        );
+    }
+
+    #[test]
+    fn search_should_share_configured_editor_keys_and_treat_normal_keys_as_text() {
+        let keymap = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.insert.commit_edit".into(),
+                id: BindingId::CommitEdit,
+                keys: vec!["ctrl-s".into()],
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.insert.cancel_edit".into(),
+                id: BindingId::CancelEdit,
+                keys: vec!["ctrl-g".into()],
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Search,
+                pressed(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::CommitEdit)
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Search,
+                pressed(KeyCode::Char('g'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::CancelEdit)
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Search, pressed(KeyCode::Enter, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Search, pressed(KeyCode::Esc, KeyModifiers::NONE)),
+            None
+        );
+        for character in ['q', 'f', '/', 'j', 't', 'r', 'é', ' '] {
+            assert_eq!(
+                keymap.map_key(
+                    Mode::Search,
+                    pressed(KeyCode::Char(character), KeyModifiers::NONE)
+                ),
+                Some(Action::InsertChar(character))
+            );
+        }
+        assert_eq!(
+            keymap.map_key(
+                Mode::Search,
+                pressed(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn search_actions_should_support_overrides_and_detect_existing_key_conflicts() {
+        let keymap = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.cycle_view".into(),
+            id: BindingId::CycleView,
+            keys: vec!["v".into(), "f".into(), "ctrl-v".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('v'), KeyModifiers::NONE)
+            ),
+            Some(Action::CycleView)
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Normal, pressed(KeyCode::Tab, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('f'), KeyModifiers::NONE)
+            ),
+            Some(Action::CycleView)
+        );
+        let issues = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.normal.cycle_view".into(),
+                id: BindingId::CycleView,
+                keys: vec!["f".into()],
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.start_search".into(),
+                id: BindingId::StartSearch,
+                keys: vec!["f".into()],
+            },
+        ])
+        .unwrap_err();
+        assert_eq!(issues[0].message, "\"f\" conflicts with cycle_view");
+    }
+
+    #[test]
+    fn existing_explicit_bindings_should_claim_all_new_search_defaults() {
+        let keymap = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.normal.toggle_complete".into(),
+                id: BindingId::ToggleComplete,
+                keys: vec!["f".into(), "tab".into(), "backtab".into()],
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.add_task".into(),
+                id: BindingId::StartAdd,
+                keys: vec!["/".into()],
+            },
+            BindingOverride {
+                order: 2,
+                path: "keybindings.normal.open_help".into(),
+                id: BindingId::OpenHelp,
+                keys: vec!["ESC".into()],
+            },
+        ])
+        .unwrap();
+        for (code, action) in [
+            (KeyCode::Char('f'), Action::ToggleComplete),
+            (KeyCode::Tab, Action::ToggleComplete),
+            (KeyCode::BackTab, Action::ToggleComplete),
+            (KeyCode::Char('/'), Action::StartAdd),
+            (KeyCode::Esc, Action::OpenHelp),
+        ] {
+            assert_eq!(
+                keymap.map_key(Mode::Normal, pressed(code, KeyModifiers::NONE)),
+                Some(action)
+            );
+        }
+        assert_eq!(
+            keymap.unbound_actions_for(Mode::Normal).collect::<Vec<_>>(),
+            vec![
+                BindingId::StartSearch,
+                BindingId::CycleView,
+                BindingId::ClearSearch,
+                BindingId::PreviousView,
+            ]
+        );
+        assert_eq!(keymap.configurable_action_count(), 35);
+        assert_eq!(keymap.active_binding_count(), 46);
+        assert!(keymap.unbound_actions_for(Mode::Insert).next().is_none());
+        for mode in [Mode::Normal, Mode::Insert, Mode::Search, Mode::Help] {
+            assert_eq!(
+                keymap.map_key(mode, pressed(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                Some(Action::Quit)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_search_binding_should_claim_another_unconfigured_search_default() {
+        let keymap = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.start_search".into(),
+            id: BindingId::StartSearch,
+            keys: vec!["tab".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(Mode::Normal, pressed(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Action::StartSearch)
+        );
+        assert_eq!(
+            keymap.unbound_actions_for(Mode::Normal).collect::<Vec<_>>(),
+            vec![BindingId::CycleView]
+        );
+    }
+
+    #[test]
+    fn view_tabs_should_normalize_shift_tab_events_and_stay_in_normal_mode() {
+        let keymap = Keymap::defaults();
+        for (code, modifiers) in [
+            (KeyCode::BackTab, KeyModifiers::NONE),
+            (KeyCode::BackTab, KeyModifiers::SHIFT),
+            (KeyCode::Tab, KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                keymap.map_key(Mode::Normal, pressed(code, modifiers)),
+                Some(Action::PreviousView)
+            );
+            for mode in [Mode::Insert, Mode::Search, Mode::Help, Mode::Trash] {
+                assert_eq!(keymap.map_key(mode, pressed(code, modifiers)), None);
+            }
+        }
+        for mode in [Mode::Insert, Mode::Search, Mode::Help, Mode::Trash] {
+            assert_eq!(
+                keymap.map_key(mode, pressed(KeyCode::Tab, KeyModifiers::NONE)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn previous_view_should_be_configurable_and_shift_tab_aliases_should_conflict() {
+        let keymap = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.previous_view".into(),
+            id: BindingId::PreviousView,
+            keys: vec!["ctrl-shift-tab".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(
+                    KeyCode::BackTab,
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            Some(Action::PreviousView)
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Normal, pressed(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            None
+        );
+        assert_eq!(
+            BindingId::from_config(Mode::Normal, "previous_view"),
+            Some(BindingId::PreviousView)
+        );
+
+        let issues = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.previous_view".into(),
+            id: BindingId::PreviousView,
+            keys: vec!["backtab".into(), "shift-tab".into()],
+        }])
+        .unwrap_err();
+        assert_eq!(issues[0].message, "duplicate key \"Shift-Tab\"");
+    }
+
+    #[test]
+    fn search_and_trash_upgrade_defaults_should_resolve_each_others_explicit_keys() {
+        let search_override = BindingOverride {
+            order: 0,
+            path: "keybindings.normal.start_search".into(),
+            id: BindingId::StartSearch,
+            keys: vec!["t".into()],
+        };
+        let keymap = Keymap::with_overrides(std::slice::from_ref(&search_override)).unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('t'), KeyModifiers::NONE)
+            ),
+            Some(Action::StartSearch)
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('t'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::OpenTrash)
+        );
+        let keymap = Keymap::with_overrides(&[
+            search_override,
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.open_trash".into(),
+                id: BindingId::OpenTrash,
+                keys: vec!["tab".into()],
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(Mode::Normal, pressed(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Action::OpenTrash)
+        );
+        assert_eq!(
+            keymap.unbound_actions_for(Mode::Normal).collect::<Vec<_>>(),
+            vec![BindingId::CycleView]
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Trash, pressed(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Some(Action::CloseTrash)
+        );
+    }
+
+    #[test]
+    fn explicit_search_and_legacy_bindings_should_still_conflict_in_either_source_order() {
+        for (legacy_order, search_order) in [(0, 1), (1, 0)] {
+            let issues = Keymap::with_overrides(&[
+                BindingOverride {
+                    order: legacy_order,
+                    path: "keybindings.normal.toggle_complete".into(),
+                    id: BindingId::ToggleComplete,
+                    keys: vec!["f".into()],
+                },
+                BindingOverride {
+                    order: search_order,
+                    path: "keybindings.normal.cycle_view".into(),
+                    id: BindingId::CycleView,
+                    keys: vec!["f".into()],
+                },
+            ])
+            .unwrap_err();
+            assert_eq!(issues.len(), 1);
+            assert_eq!(
+                issues[0].path,
+                if legacy_order > search_order {
+                    "keybindings.normal.toggle_complete"
+                } else {
+                    "keybindings.normal.cycle_view"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_insert_binding_should_not_remove_a_normal_search_default() {
+        let keymap = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.insert.commit_edit".into(),
+            id: BindingId::CommitEdit,
+            keys: vec!["tab".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(Mode::Normal, pressed(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Action::CycleView)
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Search, pressed(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Action::CommitEdit)
+        );
+        assert!(keymap.unbound_actions_for(Mode::Normal).next().is_none());
     }
 }

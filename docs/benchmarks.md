@@ -11,11 +11,12 @@ are included so the measurements can be inspected and repeated.
 
 **`shtodo` is deliberately simpler than the other tools in this comparison.**
 Today it offers a keyboard TUI for a checklist, global and per-directory lists,
-manual ordering, configurable keys, and recoverable deletion. Its shell task
-commands now include add, list, delete, done, reopen, edit, and restore, with
-optional `add --print-id` output for scripts. The measured beta.2 binary only
-offered add, list, and delete; the added lifecycle commands have not been timed.
-It has no search/filtering, priorities, tags, scheduling, recurrence,
+manual ordering, configurable keys, browsable trash, and transient TUI
+text search with All/Open/Done tabs. Its shell task commands now include add,
+list, delete, done, reopen, edit, and restore, with optional `add --print-id`
+output for scripts. Shell listing remains unfiltered. The measured beta.2
+binary only offered add, list, and delete; the added lifecycle commands have
+not been timed. It has no priorities, tags, scheduling, recurrence,
 sync, supported import/export, or structured JSON output. See the
 [current scope](./usage.md#version-one-limits) and
 [feature comparison](#feature-comparison).
@@ -405,18 +406,19 @@ code 1 only for empty lists, with a separate content check.
 This is a documented-capability comparison, not a usability study. The tested
 versions are `shtodo 0.1.0-beta.2`, Taskwarrior 3.5.0, todo.txt CLI 2.14.0,
 Taskbook 0.3.0, and topydo 0.16. The `shtodo` column describes current development
-behavior, including shell lifecycle additions since the measured beta.2 binary.
-TUI behavior and the added shell commands are described but not timed.
+behavior, including shell lifecycle additions, browsable trash, and TUI search
+and tabs since the measured beta.2 binary. TUI behavior and the added shell
+commands are described but not timed.
 
 | Capability | shtodo | Taskwarrior | todo.txt CLI |
 | --- | --- | --- | --- |
 | Interaction | Built-in keyboard TUI and small CLI | Rich CLI | Bash CLI |
 | Shell task lifecycle | Add, list, done, reopen, edit, delete, restore | Add, list, modify, done, delete | Add, list, replace, do, delete |
-| Organization | Global and exact-directory lists | Projects, tags, contexts, filters | Text files, `+projects`, `@contexts`, text filtering |
+| Organization | Global and exact-directory lists; TUI text search and All/Open/Done tabs | Projects, tags, contexts, filters | Text files, `+projects`, `@contexts`, text filtering |
 | Priority and scheduling | Neither | Priority, due dates, recurrence | Letter priorities; dates/text conventions, no core recurrence scheduler |
 | Data and integration | Local versioned JSON; no supported import/export | TaskChampion storage; JSON import/export and hooks | Human-editable text; add-ons |
 | Sync | None | Configured TaskChampion sync | External file tooling; no core sync engine |
-| Delete recovery | Retained tombstone; shell restore by ID or latest in TUI | Deleted status and undo | No equivalent core undo command |
+| Delete recovery | Retained tombstones; shell restore by ID or latest/selective restoration in TUI | Deleted status and undo | No equivalent core undo command |
 
 Sources: [shtodo usage](./usage.md),
 [Taskwarrior documentation](https://taskwarrior.org/docs/),

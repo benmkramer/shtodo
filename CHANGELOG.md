@@ -6,6 +6,10 @@ All notable changes to shtodo are documented in this file.
 
 ### Added
 
+- Transient TUI text search with `/` and All/Open/Done tabs with Tab and
+  Shift-Tab, with configurable controls and matching counts. Search composes
+  with status views; navigation and task actions preserve identity, and filtered reordering leaves
+  hidden rows in place.
 - A labeled TUI trash view with stable task IDs, completion states, newest-first
   deletion ordering, and selective restoration. Configurable Trash controls
   appear in the footer and contextual keyboard help.
@@ -18,6 +22,11 @@ All notable changes to shtodo are documented in this file.
 
 ### Fixed
 
+- Preserve existing explicit Normal-mode bindings that use `/`, Tab,
+  Shift-Tab, or `Esc` when loading the new search controls. Claimed search defaults become unbound
+  and appear in Help instead of rejecting a previously valid configuration.
+- Preserve the active live search/view and valid task selection when returning
+  from trash, including selective restoration of tasks hidden by that view.
 - Existing Normal `t` bindings continue to load when upgrading to the trash
   feature. Implicit `open_trash` falls back to `Ctrl-t`; if both keys are taken,
   it stays unbound and `shtodo doctor` explains how to configure an opening key.
