@@ -74,6 +74,10 @@ restore them by ID, with the TUI's `u` action for the latest deletion, or with
 command to select the exact current-directory list. `add --print-id` prints
 only the saved ID for scripts.
 
+In this checkout, shell commands and multiple TUIs can share a list. Open TUIs
+refresh once per second and retain drafts when another writer changes a task.
+See [concurrent-process guidance](./docs/usage.md#concurrent-processes).
+
 The essentials are:
 
 ```text
@@ -106,6 +110,9 @@ example prompts.
 - [Release process]
 - [Benchmarks and CLI comparison]: results, methodology, feature differences,
   and rerun instructions. Also see the [benchmark harness] and [recorded samples].
+- [Concurrency performance comparison](./docs/benchmarks/concurrent-usage-comparison.md):
+  shell latency, TUI saves, idle CPU, and concurrent writers, alongside the
+  [initial measurements](./docs/benchmarks/concurrent-usage.md).
 
 ## Scope
 

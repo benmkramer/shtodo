@@ -136,8 +136,15 @@ the most recently deleted task from the live list. Bindings are configurable;
 Use the CLI for task storage changes. Directly editing snapshots under
 `~/.shtodo` bypasses validation, writer locks, and atomic saves.
 
-On writer-lock contention, report that another process, often an open TUI,
-must release the same scope before retrying. Leave lock files intact.
+On writer-lock contention, report Busy and retry after the current mutation
+finishes. This checkout's Unreleased concurrency changes use short per-scope
+transactions and a one-second shell lock wait; its open TUIs can share a list.
+Installed builds from before that change hold the lock for an entire TUI
+session, so close that older session before retrying.
+Leave lock files intact. If an error says the change is visible but durability
+is unconfirmed, inspect the same scope before retrying; an add may already have
+created a task. Concurrency support depends on the build; a version number
+alone does not distinguish an Unreleased local build.
 For keybinding configuration errors, use `shtodo doctor`; it validates
 configuration, not task storage. All shell task commands bypass keybinding
 configuration. Mutations, including no-op requests, require the writer lock;

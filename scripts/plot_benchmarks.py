@@ -58,6 +58,11 @@ def main():
     fig.suptitle("Selected CLI operations on synthetic task lists", fontsize=15, y=0.99)
     hardware = metadata["machine"].get("hardware", {})
     chip = hardware.get("chip_type", metadata["machine"]["architecture"]) if isinstance(hardware, dict) else hardware
+    shtodo = report["tools"].get("shtodo")
+    provenance = f"Measured {metadata['started_at'][:10]}"
+    if shtodo:
+        provenance += f" | {shtodo['version'].splitlines()[0]} | binary SHA-256: {shtodo['sha256'][:12]}"
+    fig.text(0.06, 0.165, provenance, fontsize=9, color="#555555")
     fig.text(0.06, 0.125,
              f"{chip} | {metadata['runs']} samples per case | warm caches | "
              "lines: median; shading: median to p95 (not a confidence interval)", fontsize=9)

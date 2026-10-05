@@ -327,9 +327,16 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         })
         .collect::<Vec<_>>();
 
-    if let Some((EditKind::Add, visible, _)) = editor_view {
-        selected_index = Some(items.len());
-        items.push(editor_item(visible));
+    if let Some((kind, visible, _)) = editor_view {
+        let detached = match kind {
+            EditKind::Add => true,
+            EditKind::Edit(id) => !visible_tasks.iter().any(|task| task.id() == id),
+            EditKind::Search => false,
+        };
+        if detached {
+            selected_index = Some(items.len());
+            items.push(editor_item(visible));
+        }
     }
 
     let list = List::new(items)
@@ -389,7 +396,18 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
         .map(|binding| footer_binding(binding, app.mode()))
         .collect::<Vec<_>>()
         .join(" · ");
-    let detail = match (app.message(), hints.is_empty()) {
+    let conflict = if app.editor().is_some_and(|editor| editor.conflicted()) {
+        binding_label(keymap, Mode::Insert, BindingId::CancelEdit)
+            .map(|cancel| format!("Draft conflict; {cancel} cancel and reopen"))
+    } else {
+        None
+    };
+    let message = if app.needs_sync() || app.storage_unavailable() {
+        app.message()
+    } else {
+        conflict.as_deref().or(app.message())
+    };
+    let detail = match (message, hints.is_empty()) {
         (Some(message), false) => format!("{message} · {hints}"),
         (Some(message), true) => message.to_owned(),
         (None, _) => hints,
@@ -802,6 +820,37 @@ mod tests {
             binding_label(&keymap, crate::app::Mode::Normal, BindingId::MoveCursorLeft),
             None
         );
+    }
+
+    #[test]
+    fn deleted_target_should_keep_a_visible_draft_and_configured_conflict_hint() {
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::CancelEdit, &["ctrl-x"])]).unwrap();
+        let mut list = TaskList::new(ListScope::Global);
+        let id = list.add("draft 東京").unwrap();
+        list.add("remaining").unwrap();
+        let mut app = App::new(list.clone());
+        app.prepare(Action::StartEdit).unwrap();
+        app.prepare(Action::InsertChar('é')).unwrap();
+        list.delete(id).unwrap();
+        app.reconcile(list);
+
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 12));
+        assert_eq!(app.editor().unwrap().buffer(), "draft 東京é");
+        assert!(text.contains("draft") && text.contains('é'), "{text}");
+        assert!(text.contains("remaining"));
+        assert!(text.contains("INSERT  Draft conflict; Ctrl-x cancel and reopen"));
+        app.prepare(Action::InsertChar('!')).unwrap();
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 12));
+        assert_eq!(app.editor().unwrap().buffer(), "draft 東京é!");
+        assert!(text.contains("draft") && text.contains("é!"), "{text}");
+        assert!(text.contains("Draft conflict; Ctrl-x cancel and reopen"));
+        app.set_storage_error(Some("Storage unavailable: invalid snapshot".into()));
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 12));
+        assert!(text.contains("Storage unavailable: invalid snapshot"));
+        app.set_storage_error(None);
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 12));
+        assert!(text.contains("Draft conflict; Ctrl-x cancel and reopen"));
     }
 
     #[test]

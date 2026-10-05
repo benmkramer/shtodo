@@ -10,7 +10,7 @@ specified verification gates, and update its status only after completion.
 | --- | --- | --- | --- | --- | --- |
 | [001](./001-agent-shell-interface.md) | Add an agent-friendly list and soft-delete shell interface | P1 | M | none | DONE |
 | [004](./004-browsable-trash.md) | Add browsable TUI trash and selective restoration | P1 | M | 001 | DONE |
-| [Concurrent usage](./concurrent-usage.md) | Short storage transactions and safe TUI refresh | P1 | L | Contract review; see integration order | TODO |
+| [Concurrent usage](./concurrent-usage.md) | Short storage transactions and safe TUI refresh | P1 | L | Plan 001; see integration order | DONE |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a short reason, or REJECTED
 with a short rationale.
@@ -20,10 +20,12 @@ with a short rationale.
 - Plan 001 has no dependencies.
 - Feature 004 uses the existing persisted tombstones and scope-local IDs. Its
   record includes the shared restoration contract and parallel integration notes.
-- Concurrent usage is a proposed design awaiting review before runtime work.
-  Coordinate its mutation and projected-view contracts with the parallel shell
-  lifecycle, search/filter, and trash branches. Its plan defines integration
-  order without authorizing implementation of those features.
+- Concurrent usage was approved for this checkout's existing CLI and TUI.
+  Short transactions, snapshot/token consistency, retained drafts, and sync-only
+  recovery are implemented and verified locally, with separate measurements.
+  The latest `origin/main` shell lifecycle, search/filter, and trash features
+  are integrated with the same transactions and reconciliation, including
+  guarded selective restoration and projected reorder.
 
 ## Completed historical plans
 
@@ -40,10 +42,12 @@ with a short rationale.
   completion, ID, canonical position, and existing `restore_latest` behavior.
 - Shell lifecycle adds `set_completed` and changes `TaskList::edit` to return
   whether the live task changed. Existing TUI callers may discard the return
-  value. Shell handlers save only changes and keep the current lock architecture.
+  value. Every shell handler now uses the short transaction boundary and saves
+  only changes. TUI restoration and projected reorder use that same boundary.
 - Reconcile command dispatch, usage text, CLI tests, and shared documentation
-  with the search/filtering and trash branches during integration. Benchmark
-  timings remain historical; the added shell lifecycle commands are not timed.
+  with the search/filtering and trash branches during integration. Historical
+  benchmarks are retained. The [October 5 paired comparison](../benchmarks/concurrent-usage-comparison.md)
+  now measures the combined code and shell lifecycle commands against beta.3.
 
 ## Findings considered and rejected
 

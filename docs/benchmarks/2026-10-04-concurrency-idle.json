@@ -1,0 +1,173 @@
+{
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "04b44b3dbf807373c57962484865f5714e8b3b2c3e35a878c2f07f05e4eb22a3",
+  "sample_seconds": 60,
+  "samples": 3,
+  "warmup_seconds": 5,
+  "method": "Three independent fixture sizes run concurrently within each one-TUI / two-TUI phase. CPU uses per-process wait4 usage including startup and warmup; idle output bytes exclude warmup. This is not isolated throughput or a power-loss test.",
+  "groups": [
+    {
+      "records": 0,
+      "clients": 1,
+      "snapshot_bytes": 132,
+      "idle_output_bytes": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ]
+      ],
+      "process_usage": [
+        {
+          "cpu_seconds": 0.051881,
+          "elapsed_seconds": 185.31463254200207,
+          "percent_of_one_core": 0.027996170236714052
+        }
+      ]
+    },
+    {
+      "records": 1000,
+      "clients": 1,
+      "snapshot_bytes": 166983,
+      "idle_output_bytes": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ]
+      ],
+      "process_usage": [
+        {
+          "cpu_seconds": 0.063807,
+          "elapsed_seconds": 185.155563291999,
+          "percent_of_one_core": 0.034461292367096406
+        }
+      ]
+    },
+    {
+      "records": 10000,
+      "clients": 1,
+      "snapshot_bytes": 1691822,
+      "idle_output_bytes": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ]
+      ],
+      "process_usage": [
+        {
+          "cpu_seconds": 0.20251,
+          "elapsed_seconds": 185.08141841700126,
+          "percent_of_one_core": 0.1094167106196101
+        }
+      ]
+    },
+    {
+      "records": 0,
+      "clients": 2,
+      "snapshot_bytes": 132,
+      "idle_output_bytes": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "process_usage": [
+        {
+          "cpu_seconds": 0.055987999999999996,
+          "elapsed_seconds": 185.39654095800142,
+          "percent_of_one_core": 0.030199053181193477
+        },
+        {
+          "cpu_seconds": 0.054492,
+          "elapsed_seconds": 185.33252279200315,
+          "percent_of_one_core": 0.029402286862061353
+        }
+      ]
+    },
+    {
+      "records": 1000,
+      "clients": 2,
+      "snapshot_bytes": 166983,
+      "idle_output_bytes": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "process_usage": [
+        {
+          "cpu_seconds": 0.07348199999999999,
+          "elapsed_seconds": 185.27029816700087,
+          "percent_of_one_core": 0.03966205092073853
+        },
+        {
+          "cpu_seconds": 0.07025899999999999,
+          "elapsed_seconds": 185.20893770899784,
+          "percent_of_one_core": 0.03793499431997804
+        }
+      ]
+    },
+    {
+      "records": 10000,
+      "clients": 2,
+      "snapshot_bytes": 1691822,
+      "idle_output_bytes": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "process_usage": [
+        {
+          "cpu_seconds": 0.20231699999999997,
+          "elapsed_seconds": 185.12821370800157,
+          "percent_of_one_core": 0.10928480102936113
+        },
+        {
+          "cpu_seconds": 0.21101599999999998,
+          "elapsed_seconds": 185.0731400830009,
+          "percent_of_one_core": 0.11401762562917792
+        }
+      ]
+    }
+  ]
+}

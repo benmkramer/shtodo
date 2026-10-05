@@ -4,6 +4,13 @@ All notable changes to shtodo are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Concurrent shell commands and TUIs for the same list, with short writer
+  transactions, one-second refresh, and preserved drafts on conflicts or errors.
+- Bounded lock waits and synchronization recovery that does not repeat a
+  change after an uncertain save.
+
 ## [0.1.0-beta.3] - 2026-10-05
 
 ### Added

@@ -50,6 +50,10 @@ impl Task {
     pub(crate) fn is_deleted(&self) -> bool {
         self.deletion_sequence.is_some()
     }
+
+    pub(crate) fn deletion_sequence(&self) -> Option<u64> {
+        self.deletion_sequence
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -194,6 +198,7 @@ impl TaskList {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub(crate) fn toggle_complete(&mut self, id: TaskId) -> Result<(), ListError> {
         let task = self
             .tasks
@@ -365,7 +370,7 @@ impl TaskList {
     }
 }
 
-fn validated_text(text: &str) -> Result<&str, ListError> {
+pub(crate) fn validated_text(text: &str) -> Result<&str, ListError> {
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed.contains(['\n', '\r']) {
         return Err(ListError::InvalidText);
