@@ -11,6 +11,11 @@ shtodo list
 shtodo --local list
 shtodo delete 3
 shtodo --local delete 3
+shtodo [--local] done 3
+shtodo [--local] reopen 3
+shtodo [--local] edit 3 "New text"
+shtodo [--local] restore 3
+shtodo [--local] add --print-id "Fix the bug"
 shtodo doctor
 shtodo --help
 shtodo --version
@@ -21,7 +26,29 @@ a list for the exact directory from which it is run. `--local` does not search
 parent directories or use a repository root. Use `--help` (or `-h`) for usage
 and `--version` (or `-V`) for the installed version.
 
-### Shell listing and deletion
+In command syntax, `[--local]` means an optional flag before the command;
+do not type the brackets.
+
+### Adding from the shell
+
+`shtodo [--local] add "Task text"` adds one trimmed, non-empty, single-line
+task. Omitting the text reads one task from standard input, including an
+optional trailing newline. Multiple input lines are rejected, and missing or
+blank input produces an error with usage examples. By default, success prints
+`Added: Task text` after the task has been saved.
+
+For scripts, use exactly `shtodo [--local] add --print-id [<TASK>]`. Place
+`--print-id` immediately after `add`, before optional text. This mode prints
+only the persisted positive decimal ID and a newline after a successful save.
+It uses the same text validation and single-task stdin behavior:
+
+```sh
+task_id=$(shtodo add --print-id "Fix the bug")
+shtodo done "$task_id"
+printf 'Run the tests\n' | shtodo --local add --print-id
+```
+
+### Shell listing and task lifecycle
 
 `shtodo list` prints every non-deleted global task in canonical order. Use
 `shtodo --local list` for the exact current-directory scope. Each task occupies
@@ -57,16 +84,43 @@ snapshot:
 Already deleted 3: Fix the bug
 ```
 
-Deleted tasks retain their tombstones and can be restored with `u` in the TUI,
-or selected individually in the trash view opened with `t`.
+Deleted tasks retain their tombstones and can be restored by ID from the
+shell, with `u` in the TUI, or individually in the trash view opened with `t`.
 An unknown ID fails with `task 3 was not found`. Missing, zero, signed,
 nonnumeric, and extra IDs are usage errors. Deletion uses the selected scope's
 writer lock and atomic save path, so it fails if another writer holds that
-lock. Invalid keybinding configuration does not block either shell command.
+lock.
+
+The rest of the shell lifecycle accepts the same positive scope-local IDs:
+
+| Command | Behavior | Changed-task success | Unchanged-task success |
+| --- | --- | --- | --- |
+| `shtodo [--local] done <ID>` | Set a live task complete | `Completed 3: Fix the bug` | `Already done 3: Fix the bug` |
+| `shtodo [--local] reopen <ID>` | Set a live task incomplete | `Reopened 3: Fix the bug` | `Already open 3: Fix the bug` |
+| `shtodo [--local] edit <ID> "New text"` | Replace a live task's text | `Edited 3: New text` | `Unchanged 3: New text` |
+| `shtodo [--local] restore <ID>` | Clear a task's tombstone | `Restored 3: Fix the bug` | `Already live 3: Fix the bug` |
+
+`done` and `reopen` set explicit states, so retries never toggle a task.
+Unchanged edits compare the trimmed, validated text. These no-op successes,
+including restoring an already-live task, do not rewrite the snapshot.
+Editing requires exactly one text argument; it does not read stdin. Blank or
+multiline text fails with usage help. Completion and editing preserve IDs and
+canonical ordering. Restoration preserves the original text, completion, ID,
+and canonical position, and does not change how TUI `u` selects the latest
+remaining tombstone.
+
+`done`, `reopen`, and `edit` reject deleted IDs and point to the scoped
+`restore` command to run first. Unknown IDs fail. All shell mutations use the
+selected scope's existing writer lock, save changes atomically, and report
+success only after persistence succeeds. Even no-op mutations fail while
+another writer holds that lock. Invalid keybinding configuration does not
+block `add`, `list`, `delete`, `done`, `reopen`, `edit`, or `restore`.
+
+### Interactive editing
 
 The interface has Normal, Insert, Help, and Trash modes. Add or edit tasks in
-Insert mode, then press Enter to save. Task text is trimmed, must be non-empty and
-single-line, and Escape cancels an uncommitted add or edit. A terminal smaller
+Insert mode, then press Enter to save. Task text is trimmed, must be non-empty
+and single-line, and Escape cancels an uncommitted add or edit. A terminal smaller
 than 40 columns by 8 rows displays a resize message until it is large enough.
 Pressing Enter with blank or all-whitespace text keeps the editor in Insert
 mode, saves nothing, and shows `Task text cannot be empty`.
@@ -177,7 +231,8 @@ reorder, deletion, or restoration. Snapshots are written through a temporary
 file and atomically replace the previous canonical snapshot. Deletions are
 tombstones rather than immediate erasure, so `u` restores the latest deleted
 task and `t` lists deletions for selective restoration, even after quitting
-and relaunching. If no tombstone is available, `u` shows `Nothing to restore` and leaves the snapshot unchanged.
+and relaunching. If no tombstone is available, `u` shows `Nothing to restore`
+and leaves the snapshot unchanged.
 
 Each list scope has its own process lock. A second `shtodo` process for the
 same global or local list is rejected while the first holds the lock; a global

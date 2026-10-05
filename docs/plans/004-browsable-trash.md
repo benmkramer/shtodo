@@ -50,6 +50,11 @@ underlying canonical vector untouched. A shell trash reader can reuse it.
 
 ## Integration overlaps
 
+The shell lifecycle and concurrency-plan changes from main commit `02e4066`
+are integrated. There is one shared `restore(id)` implementation, with both
+branches' regression tests retained. Shell command and trash documentation are
+combined, and the concurrency plan remains proposed work.
+
 - Search/filtering also touches `app`, `action`, `input`, `config`, `ui`, and
   usage/configuration docs. Trash uses its own `TrashState` selection and
   `render_trash_content`; the normal `visible_tasks()` projection is unchanged.
@@ -80,8 +85,8 @@ All required gates passed:
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
-- `cargo test --locked`: 146 unit tests and 25 CLI tests, including 22 new
-  behavior/regression tests over the 125-unit/24-CLI baseline.
+- `cargo test --locked`: 154 unit tests and 39 CLI tests after integrating
+  current main. Trash adds 22 behavior/regression tests (21 unit and one CLI).
 - `cargo build --release --locked`
 - `git diff --check`
 

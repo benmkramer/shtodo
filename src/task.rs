@@ -72,6 +72,7 @@ pub(crate) enum MoveDirection {
 pub(crate) enum ListError {
     InvalidText,
     TaskNotFound(TaskId),
+    TaskDeleted(TaskId),
     TaskIdExhausted,
     DeletionSequenceExhausted,
     InvalidData(String),
@@ -82,6 +83,11 @@ impl fmt::Display for ListError {
         match self {
             Self::InvalidText => formatter.write_str("task text must be a non-empty single line"),
             Self::TaskNotFound(id) => write!(formatter, "task {} was not found", id.get()),
+            Self::TaskDeleted(id) => write!(
+                formatter,
+                "task {} is deleted; restore it before changing it",
+                id.get()
+            ),
             Self::TaskIdExhausted => formatter.write_str("task ID space is exhausted"),
             Self::DeletionSequenceExhausted => {
                 formatter.write_str("deletion sequence space is exhausted")
@@ -153,15 +159,39 @@ impl TaskList {
         Ok(id)
     }
 
-    pub(crate) fn edit(&mut self, id: TaskId, text: &str) -> Result<(), ListError> {
-        let text = validated_text(text)?;
+    /// Returns whether the live task's canonical text changed.
+    pub(crate) fn edit(&mut self, id: TaskId, text: &str) -> Result<bool, ListError> {
         let task = self
             .tasks
             .iter_mut()
             .find(|task| task.id == id)
             .ok_or(ListError::TaskNotFound(id))?;
+        if task.is_deleted() {
+            return Err(ListError::TaskDeleted(id));
+        }
+        let text = validated_text(text)?;
+        if task.text == text {
+            return Ok(false);
+        }
         task.text = text.into();
-        Ok(())
+        Ok(true)
+    }
+
+    /// Sets a live task's completion state, returning whether it changed.
+    pub(crate) fn set_completed(&mut self, id: TaskId, completed: bool) -> Result<bool, ListError> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or(ListError::TaskNotFound(id))?;
+        if task.is_deleted() {
+            return Err(ListError::TaskDeleted(id));
+        }
+        if task.completed == completed {
+            return Ok(false);
+        }
+        task.completed = completed;
+        Ok(true)
     }
 
     pub(crate) fn toggle_complete(&mut self, id: TaskId) -> Result<(), ListError> {
@@ -189,17 +219,6 @@ impl TaskList {
         Ok(())
     }
 
-    /// Clears only the tombstone marker, preserving the task and its canonical position.
-    /// Returns false for an already live task, or TaskNotFound for an unknown ID.
-    pub(crate) fn restore(&mut self, id: TaskId) -> Result<bool, ListError> {
-        let task = self
-            .tasks
-            .iter_mut()
-            .find(|task| task.id == id)
-            .ok_or(ListError::TaskNotFound(id))?;
-        Ok(task.deletion_sequence.take().is_some())
-    }
-
     pub(crate) fn restore_latest(&mut self) -> Result<Option<TaskId>, ListError> {
         let index = self
             .tasks
@@ -214,6 +233,16 @@ impl TaskList {
         let task = &mut self.tasks[index];
         task.deletion_sequence = None;
         Ok(Some(task.id))
+    }
+
+    /// Clears only the task's tombstone, returning false if it is already live.
+    pub(crate) fn restore(&mut self, id: TaskId) -> Result<bool, ListError> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or(ListError::TaskNotFound(id))?;
+        Ok(task.deletion_sequence.take().is_some())
     }
 
     pub(crate) fn move_visible(
@@ -464,6 +493,91 @@ mod tests {
 
         assert!(list.task(first).unwrap().completed());
         assert_eq!(list.task(second).unwrap().text(), "changed");
+    }
+
+    #[test]
+    fn set_completed_should_set_explicit_states_and_report_no_ops() {
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first").unwrap();
+        let second = list.add("second").unwrap();
+
+        assert!(!list.set_completed(first, false).unwrap());
+        assert!(list.set_completed(first, true).unwrap());
+        let completed = list.clone();
+        assert!(!list.set_completed(first, true).unwrap());
+        assert_eq!(list, completed);
+        assert!(!list.task(second).unwrap().completed());
+        assert!(list.set_completed(first, false).unwrap());
+        assert!(!list.task(first).unwrap().completed());
+    }
+
+    #[test]
+    fn edit_should_validate_trim_and_report_unchanged_canonical_text() {
+        let mut list = TaskList::new(ListScope::Global);
+        let id = list.add("original").unwrap();
+        list.set_completed(id, true).unwrap();
+        let before = list.clone();
+
+        assert!(!list.edit(id, "  original\n").unwrap());
+        assert_eq!(list, before);
+        for text in ["", "   ", "one\ntwo", "one\rtwo"] {
+            assert_eq!(list.edit(id, text), Err(ListError::InvalidText));
+            assert_eq!(list, before);
+        }
+        assert!(list.edit(id, "  changed  ").unwrap());
+        assert_eq!(list.task(id).unwrap().text(), "changed");
+        assert!(list.task(id).unwrap().completed());
+    }
+
+    #[test]
+    fn lifecycle_mutations_should_reject_deleted_and_unknown_ids_without_changes() {
+        let mut list = TaskList::new(ListScope::Global);
+        let deleted = list.add("deleted").unwrap();
+        list.delete(deleted).unwrap();
+        let before = list.clone();
+        let unknown = TaskId(42);
+
+        for completed in [true, false] {
+            assert_eq!(
+                list.set_completed(deleted, completed),
+                Err(ListError::TaskDeleted(deleted))
+            );
+            assert_eq!(
+                list.set_completed(unknown, completed),
+                Err(ListError::TaskNotFound(unknown))
+            );
+        }
+        assert_eq!(
+            list.edit(deleted, "changed"),
+            Err(ListError::TaskDeleted(deleted))
+        );
+        assert_eq!(
+            list.edit(unknown, "changed"),
+            Err(ListError::TaskNotFound(unknown))
+        );
+        assert_eq!(list.restore(unknown), Err(ListError::TaskNotFound(unknown)));
+        assert_eq!(list, before);
+    }
+
+    #[test]
+    fn restore_should_only_clear_the_selected_tombstone_in_canonical_position() {
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first").unwrap();
+        let deleted = list.add("deleted").unwrap();
+        let third = list.add("third").unwrap();
+        list.set_completed(deleted, true).unwrap();
+        list.delete(deleted).unwrap();
+        list.move_visible(first, MoveDirection::Down).unwrap();
+        list.delete(third).unwrap();
+        let mut expected = list.clone();
+        expected.tasks[1].deletion_sequence = None;
+
+        assert!(list.restore(deleted).unwrap());
+        assert_eq!(list, expected);
+        assert!(!list.restore(deleted).unwrap());
+        assert_eq!(list, expected);
+        assert_eq!(list.restore_latest().unwrap(), Some(third));
+        assert_eq!(list.restore_latest().unwrap(), None);
     }
 
     #[test]

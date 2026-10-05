@@ -1,0 +1,3 @@
+interface:
+  display_name: "shtodo"
+  short_description: "Manage shtodo tasks from your agent"

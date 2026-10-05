@@ -9,9 +9,13 @@ pub(crate) enum ScopeChoice {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Command {
     Run(ScopeChoice),
-    Add(ScopeChoice, Option<OsString>),
+    Add(ScopeChoice, Option<OsString>, bool),
     List(ScopeChoice),
     Delete(ScopeChoice, u64),
+    Done(ScopeChoice, u64),
+    Reopen(ScopeChoice, u64),
+    Edit(ScopeChoice, u64, OsString),
+    Restore(ScopeChoice, u64),
     Doctor,
     Help,
     Version,
@@ -21,6 +25,7 @@ pub(crate) enum Command {
 pub(crate) enum CliError {
     UnsupportedArguments { argument: OsString },
     MissingTaskId,
+    MissingTaskText,
     InvalidTaskId { value: OsString },
 }
 
@@ -31,6 +36,7 @@ impl fmt::Display for CliError {
                 write!(formatter, "unsupported shtodo arguments: {argument:?}")?;
             }
             Self::MissingTaskId => formatter.write_str("task ID is required")?,
+            Self::MissingTaskText => formatter.write_str("new task text is required")?,
             Self::InvalidTaskId { value } => {
                 write!(
                     formatter,
@@ -52,15 +58,31 @@ where
     match values.as_slice() {
         [] => Ok(Command::Run(ScopeChoice::Global)),
         [value] if value == "--local" => Ok(Command::Run(ScopeChoice::Local)),
-        [command] if command == "add" => Ok(Command::Add(ScopeChoice::Global, None)),
+        [command] if command == "add" => Ok(Command::Add(ScopeChoice::Global, None, false)),
+        [command, flag] if command == "add" && flag == "--print-id" => {
+            Ok(Command::Add(ScopeChoice::Global, None, true))
+        }
+        [command, flag, text] if command == "add" && flag == "--print-id" => {
+            Ok(Command::Add(ScopeChoice::Global, Some(text.clone()), true))
+        }
         [command, text] if command == "add" => {
-            Ok(Command::Add(ScopeChoice::Global, Some(text.clone())))
+            Ok(Command::Add(ScopeChoice::Global, Some(text.clone()), false))
         }
         [local, command] if local == "--local" && command == "add" => {
-            Ok(Command::Add(ScopeChoice::Local, None))
+            Ok(Command::Add(ScopeChoice::Local, None, false))
+        }
+        [local, command, flag]
+            if local == "--local" && command == "add" && flag == "--print-id" =>
+        {
+            Ok(Command::Add(ScopeChoice::Local, None, true))
+        }
+        [local, command, flag, text]
+            if local == "--local" && command == "add" && flag == "--print-id" =>
+        {
+            Ok(Command::Add(ScopeChoice::Local, Some(text.clone()), true))
         }
         [local, command, text] if local == "--local" && command == "add" => {
-            Ok(Command::Add(ScopeChoice::Local, Some(text.clone())))
+            Ok(Command::Add(ScopeChoice::Local, Some(text.clone()), false))
         }
         [command] if command == "list" => Ok(Command::List(ScopeChoice::Global)),
         [local, command] if local == "--local" && command == "list" => {
@@ -76,11 +98,56 @@ where
         [local, command, id] if local == "--local" && command == "delete" => {
             Ok(Command::Delete(ScopeChoice::Local, parse_task_id(id)?))
         }
+        [command] if is_lifecycle_command(command) => Err(CliError::MissingTaskId),
+        [local, command] if local == "--local" && is_lifecycle_command(command) => {
+            Err(CliError::MissingTaskId)
+        }
+        [command, id] if is_lifecycle_command(command) => {
+            parse_lifecycle_command(ScopeChoice::Global, command, id, None)
+        }
+        [local, command, id] if local == "--local" && is_lifecycle_command(command) => {
+            parse_lifecycle_command(ScopeChoice::Local, command, id, None)
+        }
+        [command, id, text] if command == "edit" => {
+            parse_lifecycle_command(ScopeChoice::Global, command, id, Some(text))
+        }
+        [local, command, id, text] if local == "--local" && command == "edit" => {
+            parse_lifecycle_command(ScopeChoice::Local, command, id, Some(text))
+        }
         [command] if command == "doctor" => Ok(Command::Doctor),
         [value] if value == "--help" || value == "-h" => Ok(Command::Help),
         [value] if value == "--version" || value == "-V" => Ok(Command::Version),
         [value, ..] => Err(CliError::UnsupportedArguments {
             argument: value.clone(),
+        }),
+    }
+}
+
+fn is_lifecycle_command(command: &OsString) -> bool {
+    matches!(
+        command.to_str(),
+        Some("done" | "reopen" | "edit" | "restore")
+    )
+}
+
+fn parse_lifecycle_command(
+    scope: ScopeChoice,
+    command: &OsString,
+    id: &OsString,
+    text: Option<&OsString>,
+) -> Result<Command, CliError> {
+    let id = parse_task_id(id)?;
+    match command.to_str() {
+        Some("done") => Ok(Command::Done(scope, id)),
+        Some("reopen") => Ok(Command::Reopen(scope, id)),
+        Some("restore") => Ok(Command::Restore(scope, id)),
+        Some("edit") => Ok(Command::Edit(
+            scope,
+            id,
+            text.ok_or(CliError::MissingTaskText)?.clone(),
+        )),
+        _ => Err(CliError::UnsupportedArguments {
+            argument: command.clone(),
         }),
     }
 }
@@ -108,10 +175,15 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo --local add <TASK>\n",
         "  shtodo add\n",
         "  shtodo --local add\n",
+        "  shtodo [--local] add --print-id [<TASK>]\n",
         "  shtodo list\n",
         "  shtodo --local list\n",
         "  shtodo delete <ID>\n",
         "  shtodo --local delete <ID>\n",
+        "  shtodo [--local] done <ID>\n",
+        "  shtodo [--local] reopen <ID>\n",
+        "  shtodo [--local] edit <ID> <TASK>\n",
+        "  shtodo [--local] restore <ID>\n",
         "  shtodo doctor\n",
         "  shtodo --help\n",
         "  shtodo --version\n",
@@ -121,10 +193,17 @@ pub(crate) fn usage() -> &'static str {
         "              When TASK is omitted, read it from standard input.\n",
         "  list        List non-deleted tasks with their IDs and states.\n",
         "  delete <ID> Soft-delete one task by its scope-local ID.\n",
+        "  done <ID>   Mark one live task done (safe to repeat).\n",
+        "  reopen <ID> Mark one live task open (safe to repeat).\n",
+        "  edit <ID> <TASK>\n",
+        "              Replace one live task's text with a non-empty single line.\n",
+        "  restore <ID>\n",
+        "              Restore one deleted task; already-live tasks succeed unchanged.\n",
         "  doctor      Validate ~/.shtodo/config.toml without opening the terminal UI.\n",
         "\n",
         "Options:\n",
         "  --local     Use the list for the current directory instead of the global list.\n",
+        "  --print-id  Put immediately after add; print only the saved task ID.\n",
         "  -h, --help  Show this help text.\n",
         "  -V, --version\n",
         "              Show the installed version.\n",
@@ -139,6 +218,12 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo --local list\n",
         "  shtodo delete 3\n",
         "  shtodo --local delete 3\n",
+        "  shtodo done 3\n",
+        "  shtodo reopen 3\n",
+        "  shtodo edit 3 \"Fix the remaining bug\"\n",
+        "  shtodo --local restore 3\n",
+        "  shtodo add --print-id \"Fix the bug\"\n",
+        "  printf 'Run the tests\\n' | shtodo --local add --print-id\n",
     )
 }
 
@@ -187,14 +272,16 @@ mod tests {
             parse_args(args(&["add", "hello world"])),
             Ok(Command::Add(
                 ScopeChoice::Global,
-                Some(OsString::from("hello world"))
+                Some(OsString::from("hello world")),
+                false
             ))
         );
         assert_eq!(
             parse_args(args(&["--local", "add", "hello world"])),
             Ok(Command::Add(
                 ScopeChoice::Local,
-                Some(OsString::from("hello world"))
+                Some(OsString::from("hello world")),
+                false
             ))
         );
     }
@@ -203,11 +290,11 @@ mod tests {
     fn parse_args_should_leave_add_text_empty_for_stdin() {
         assert_eq!(
             parse_args(args(&["add"])),
-            Ok(Command::Add(ScopeChoice::Global, None))
+            Ok(Command::Add(ScopeChoice::Global, None, false))
         );
         assert_eq!(
             parse_args(args(&["--local", "add"])),
-            Ok(Command::Add(ScopeChoice::Local, None))
+            Ok(Command::Add(ScopeChoice::Local, None, false))
         );
     }
 
@@ -284,5 +371,61 @@ mod tests {
         assert!(parse_args(args(&["--local", "--help"])).is_err());
         assert!(parse_args(args(&["project-name"])).is_err());
         assert!(parse_args(args(&["add", "one", "two"])).is_err());
+    }
+
+    #[test]
+    fn parse_args_should_accept_lifecycle_commands_in_both_scopes() {
+        for (prefix, scope) in [
+            (vec![], ScopeChoice::Global),
+            (vec!["--local"], ScopeChoice::Local),
+        ] {
+            for (command, expected) in [
+                ("done", Command::Done(scope, 3)),
+                ("reopen", Command::Reopen(scope, 3)),
+                ("restore", Command::Restore(scope, 3)),
+            ] {
+                let mut values = prefix.clone();
+                values.extend([command, "3"]);
+                assert_eq!(parse_args(args(&values)), Ok(expected));
+            }
+            let mut values = prefix;
+            values.extend(["edit", "3", "new text"]);
+            assert_eq!(
+                parse_args(args(&values)),
+                Ok(Command::Edit(scope, 3, OsString::from("new text")))
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_should_report_missing_edit_text_with_usage() {
+        for values in [vec!["edit", "3"], vec!["--local", "edit", "3"]] {
+            let error = parse_args(args(&values)).unwrap_err().to_string();
+            assert!(error.contains("new task text is required"));
+            assert!(error.contains("shtodo [--local] edit <ID> <TASK>"));
+        }
+    }
+
+    #[test]
+    fn parse_args_should_accept_print_id_before_optional_add_text() {
+        for (prefix, scope) in [
+            (vec![], ScopeChoice::Global),
+            (vec!["--local"], ScopeChoice::Local),
+        ] {
+            let mut values = prefix;
+            values.extend(["add", "--print-id"]);
+            assert_eq!(
+                parse_args(args(&values)),
+                Ok(Command::Add(scope, None, true))
+            );
+            values.push("new task");
+            assert_eq!(
+                parse_args(args(&values)),
+                Ok(Command::Add(scope, Some(OsString::from("new task")), true))
+            );
+        }
+        assert!(parse_args(args(&["--print-id", "add", "task"])).is_err());
+        assert!(parse_args(args(&["add", "task", "--print-id"])).is_err());
+        assert!(parse_args(args(&["add", "--print-id", "one", "two"])).is_err());
     }
 }
