@@ -55,6 +55,11 @@ shtodo list
 shtodo --local list
 shtodo delete 3
 shtodo --local delete 3
+shtodo done 3
+shtodo reopen 3
+shtodo edit 3 "Fix the remaining bug"
+shtodo restore 3
+shtodo add --print-id "Capture a task for a script"
 shtodo doctor
 ```
 
@@ -62,8 +67,11 @@ Running `shtodo` opens the default global list. Running `shtodo --local` opens
 a list for the exact directory from which it is run.
 
 `shtodo list` prints each non-deleted task's scope-local ID, state, and text.
-`shtodo delete <ID>` recoverably deletes one task from the selected scope, so
-the TUI's `u` action can restore it.
+Use `done`, `reopen`, `edit`, `delete`, and `restore` with one scope-local ID
+to manage a task from the shell. Deleted tasks retain their text and state;
+restore them by ID or with the TUI's `u` action. Add `--local` before the command
+to select the exact current-directory list. `add --print-id` prints only the
+saved ID for scripts.
 
 The essentials are:
 
