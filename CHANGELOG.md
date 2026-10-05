@@ -6,12 +6,22 @@ All notable changes to shtodo are documented in this file.
 
 ### Added
 
+- A labeled TUI trash view with stable task IDs, completion states, newest-first
+  deletion ordering, and selective restoration. Configurable Trash controls
+  appear in the footer and contextual keyboard help.
 - Shell `done`, `reopen`, `edit`, and `restore` commands for one scope-local
   task ID, with no-write success for already-matching states, unchanged text,
   and already-live restoration.
 - Optional `add --print-id` output for scripts, including single-task stdin.
 - Homebrew installation through `benmkramer/tap/shtodo`, with automatic formula
   updates from the release workflow.
+
+### Fixed
+
+- Existing Normal `t` bindings continue to load when upgrading to the trash
+  feature. Implicit `open_trash` falls back to `Ctrl-t`; if both keys are taken,
+  it stays unbound and `shtodo doctor` explains how to configure an opening key.
+  Explicit `open_trash` conflicts still fail validation.
 
 ## [0.1.0-beta.2] - 2026-09-05
 

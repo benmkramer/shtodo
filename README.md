@@ -69,14 +69,15 @@ a list for the exact directory from which it is run.
 `shtodo list` prints each non-deleted task's scope-local ID, state, and text.
 Use `done`, `reopen`, `edit`, `delete`, and `restore` with one scope-local ID
 to manage a task from the shell. Deleted tasks retain their text and state;
-restore them by ID or with the TUI's `u` action. Add `--local` before the command
-to select the exact current-directory list. `add --print-id` prints only the
-saved ID for scripts.
+restore them by ID, with the TUI's `u` action for the latest deletion, or with
+`t` to browse trash and restore a specific task. Add `--local` before the
+command to select the exact current-directory list. `add --print-id` prints
+only the saved ID for scripts.
 
 The essentials are:
 
 ```text
-i add · e edit · Space complete · d delete · u restore · ? help · q quit
+i add · e edit · Space complete · d delete · u restore latest · t trash · ? help · q quit
 ```
 
 See [Usage and keyboard controls] for the full interaction guide.

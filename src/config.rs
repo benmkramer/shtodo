@@ -115,7 +115,17 @@ impl LoadedKeymap {
                 self.keymap().active_binding_count()
             ),
         };
-        format!("Config: {}\n{result}\n", self.path().display())
+        let mut report = format!("Config: {}\n{result}\n", self.path().display());
+        if !self
+            .keymap()
+            .bindings_for(Mode::Normal)
+            .any(|binding| binding.id() == BindingId::OpenTrash)
+        {
+            report.push_str(
+                "Note: Trash has no opening key; configure keybindings.normal.open_trash\n",
+            );
+        }
+        report
     }
 }
 
@@ -298,6 +308,7 @@ fn parse_mode(name: &str) -> Option<Mode> {
         "normal" => Some(Mode::Normal),
         "insert" => Some(Mode::Insert),
         "help" => Some(Mode::Help),
+        "trash" => Some(Mode::Trash),
         _ => None,
     }
 }
@@ -307,6 +318,7 @@ fn mode_name(mode: Mode) -> &'static str {
         Mode::Normal => "normal",
         Mode::Insert => "insert",
         Mode::Help => "help",
+        Mode::Trash => "trash",
     }
 }
 
@@ -387,8 +399,8 @@ mod tests {
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::Defaults);
-        assert_eq!(loaded.keymap().configurable_action_count(), 24);
-        assert_eq!(loaded.keymap().active_binding_count(), 33);
+        assert_eq!(loaded.keymap().configurable_action_count(), 31);
+        assert_eq!(loaded.keymap().active_binding_count(), 44);
         assert!(!home.path().join(".shtodo").exists());
     }
 
@@ -404,7 +416,7 @@ move_down = ["x", "ctrl-n"]
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::File);
-        assert_eq!(loaded.keymap().active_binding_count(), 33);
+        assert_eq!(loaded.keymap().active_binding_count(), 44);
         assert_eq!(
             labels_for(loaded.keymap(), BindingId::MoveDown),
             vec!["x", "Ctrl-n"]
@@ -413,6 +425,126 @@ move_down = ["x", "ctrl-n"]
             labels_for(loaded.keymap(), BindingId::MoveUp),
             vec!["k", "Up"]
         );
+    }
+
+    #[test]
+    fn existing_normal_t_binding_should_load_with_a_trash_fallback() {
+        use crate::{action::Action, app::Mode};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let home = configured_home("[keybindings.normal]\ntoggle_complete = [\"t\"]\n");
+        let loaded = load(home.path()).unwrap();
+
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::ToggleComplete),
+            vec!["t"]
+        );
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::OpenTrash),
+            vec!["Ctrl-t"]
+        );
+        assert_eq!(
+            loaded.keymap().map_key(
+                Mode::Normal,
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)
+            ),
+            Some(Action::ToggleComplete)
+        );
+        assert_eq!(
+            loaded.keymap().map_key(
+                Mode::Normal,
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::OpenTrash)
+        );
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::CloseTrash),
+            vec!["t", "Esc"]
+        );
+    }
+
+    #[test]
+    fn existing_config_should_load_and_report_when_both_trash_default_keys_are_taken() {
+        let home = configured_home("[keybindings.normal]\ntoggle_complete = [\"t\", \"CTRL-T\"]\n");
+        let loaded = load(home.path()).unwrap();
+
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::ToggleComplete),
+            vec!["t", "Ctrl-t"]
+        );
+        assert!(
+            !loaded
+                .keymap()
+                .bindings_for(crate::app::Mode::Normal)
+                .any(|binding| binding.id() == BindingId::OpenTrash)
+        );
+        assert!(
+            loaded
+                .doctor_report()
+                .contains("Trash has no opening key; configure keybindings.normal.open_trash")
+        );
+    }
+
+    #[test]
+    fn explicit_open_trash_binding_should_still_report_configured_conflicts() {
+        let home = configured_home(
+            "[keybindings.normal]\ntoggle_complete = [\"t\"]\nopen_trash = [\"t\"]\n",
+        );
+        let error = load(home.path()).unwrap_err();
+
+        assert!(error.to_string().contains("keybindings.normal.open_trash"));
+        assert!(error.to_string().contains("conflicts with toggle_complete"));
+    }
+
+    #[test]
+    fn load_should_accept_independent_trash_bindings_and_preserve_other_defaults() {
+        let home = configured_home(
+            r#"
+[keybindings.normal]
+open_trash = ["b"]
+[keybindings.trash]
+restore_selected = ["enter", "r"]
+close_trash = ["b", "esc"]
+move_down = ["n"]
+"#,
+        );
+        let loaded = load(home.path()).unwrap();
+        assert_eq!(labels_for(loaded.keymap(), BindingId::OpenTrash), vec!["b"]);
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::RestoreSelected),
+            vec!["Enter", "r"]
+        );
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::CloseTrash),
+            vec!["b", "Esc"]
+        );
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::TrashMoveDown),
+            vec!["n"]
+        );
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::MoveDown),
+            vec!["j", "Down"]
+        );
+    }
+
+    #[test]
+    fn load_should_reject_conflicts_and_reserved_keys_in_trash() {
+        for (key, message) in [
+            ("t", "conflicts with close_trash"),
+            ("ctrl-c", "Ctrl-C is reserved"),
+        ] {
+            let home = configured_home(&format!(
+                "[keybindings.trash]\nrestore_selected = [\"{key}\"]\n"
+            ));
+            let error = load(home.path()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("keybindings.trash.restore_selected")
+            );
+            assert!(error.to_string().contains(message));
+        }
     }
 
     #[test]

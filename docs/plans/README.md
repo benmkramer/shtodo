@@ -9,6 +9,7 @@ specified verification gates, and update its status only after completion.
 | Plan | Title | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- | --- |
 | [001](./001-agent-shell-interface.md) | Add an agent-friendly list and soft-delete shell interface | P1 | M | none | DONE |
+| [004](./004-browsable-trash.md) | Add browsable TUI trash and selective restoration | P1 | M | 001 | DONE |
 | [Concurrent usage](./concurrent-usage.md) | Short storage transactions and safe TUI refresh | P1 | L | Contract review; see integration order | TODO |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a short reason, or REJECTED
@@ -17,6 +18,8 @@ with a short rationale.
 ## Dependency notes
 
 - Plan 001 has no dependencies.
+- Feature 004 uses the existing persisted tombstones and scope-local IDs. Its
+  record includes the shared restoration contract and parallel integration notes.
 - Concurrent usage is a proposed design awaiting review before runtime work.
   Coordinate its mutation and projected-view contracts with the parallel shell
   lifecycle, search/filter, and trash branches. Its plan defines integration

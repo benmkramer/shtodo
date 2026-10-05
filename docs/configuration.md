@@ -3,7 +3,7 @@
 The optional configuration file is `~/.shtodo/config.toml`; shtodo does not
 create it. When the file is missing, shtodo uses its compiled defaults.
 Configuring an action replaces that action's defaults; omitted actions retain
-their defaults.
+their defaults, with the trash compatibility exception described below.
 
 ```toml
 [keybindings.normal]
@@ -11,6 +11,11 @@ move_down = ["j", "down", "ctrl-n"]
 move_up = ["k", "up", "ctrl-p"]
 add_task = ["a"]
 open_help = ["?"]
+open_trash = ["t"]
+
+[keybindings.trash]
+restore_selected = ["r"]
+close_trash = ["t", "esc"]
 
 [keybindings.insert]
 commit_edit = ["enter"]
@@ -40,6 +45,26 @@ Shell task commands (`add`, `list`, `delete`, `done`, `reopen`, `edit`, and
 `restore`) do not load keybinding configuration. They remain available when
 the configuration is invalid; `add --print-id` has the same independence.
 
+### Existing bindings and the new trash default
+
+Existing Normal bindings take priority over the new implicit `open_trash`
+default. If your config already assigns `t` to another Normal action, trash
+opens with `Ctrl-t`; the footer, Help, and empty-list hint show that fallback.
+For example, this existing config continues to load and keeps `t` completing
+tasks:
+
+```toml
+[keybindings.normal]
+toggle_complete = ["t"]
+```
+
+If both `t` and `Ctrl-t` are already assigned, the config still loads and the
+implicit trash opening binding is omitted. `shtodo doctor` reports that trash
+needs an opening key. Set `open_trash = ["b"]` (or another unused Normal key)
+to enable it. An explicit `open_trash` override still participates in ordinary
+conflict validation. Other binding conflicts and reserved-key errors remain
+invalid. Trash `close_trash` remains independent and defaults to `t` and Esc.
+
 ## Default actions
 
 ### Normal
@@ -55,6 +80,7 @@ the configuration is invalid; `add --print-id` has the same independence.
 | `toggle_complete` | `space`      |
 | `delete_task`     | `d`          |
 | `restore_latest`  | `u`          |
+| `open_trash`      | `t`          |
 | `open_help`       | `?`          |
 | `quit`            | `q`          |
 
@@ -81,7 +107,24 @@ the configuration is invalid; `add --print-id` has the same independence.
 | ------------ | ------------ |
 | `close_help` | `?`, `esc`   |
 
-`Ctrl-C` is a fixed emergency quit key in all three modes.
+### Trash
+
+| Action             | Default keys |
+| ------------------ | ------------ |
+| `move_down`        | `j`, `down`  |
+| `move_up`          | `k`, `up`    |
+| `restore_selected` | `r`          |
+| `close_trash`      | `t`, `esc`   |
+| `open_help`        | `?`          |
+| `quit`             | `q`          |
+
+Trash bindings are independent of Normal bindings. For example, changing
+Normal `open_trash` does not change Trash `close_trash`; configure both to use
+the same key if desired. Normal navigation, help, and quit overrides do not
+carry into Trash. Duplicate keys conflict within a mode; the same key can be
+used in different modes. Trash help and footer use the resolved Trash keymap.
+
+`Ctrl-C` is a fixed emergency quit key in all four modes.
 
 See [Usage and keyboard controls] for the interaction guide.
 
