@@ -1,6 +1,6 @@
 ---
 name: shtodo
-description: Manage tasks with the shtodo CLI when the user asks to use shtodo or has established it as their task tracker. Covers global and directory-local lists, adding tasks, listing tasks, and recoverable deletion. Do not activate for unrelated coding plans or generic TODO comments.
+description: Manage tasks with the shtodo CLI when the user asks to use shtodo or has established it as their task tracker. Covers global and directory-local lists and the full task lifecycle. Do not activate for unrelated coding plans or generic TODO comments.
 ---
 
 # shtodo
@@ -12,7 +12,7 @@ requested or covered by an established shtodo workflow.
 
 Run `shtodo --version` and `shtodo --help` before first use in a session.
 Treat the installed help as authoritative for available commands; this skill
-describes shtodo 0.1.0-beta.2, and newer versions may add commands. If the
+describes shtodo 0.1.0-beta.3, and newer versions may add commands. If the
 binary is missing, report that prerequisite and point to the
 [installation instructions](https://github.com/benmkramer/shtodo#installation).
 
@@ -75,9 +75,41 @@ task, not a batch; invoke `add` separately for each requested task. Supply
 text or a closed input pipe so the command does not wait for stdin.
 
 Success prints `Added: <text>` without an ID. List the same scope afterward
-to verify the addition and obtain its ID if needed. Adding identical text
-creates another task. If an add's outcome is uncertain, inspect the list
-before retrying to avoid duplicates.
+to verify the addition. For scripts, put `--print-id` immediately after
+`add`, before optional text, to print only the persisted ID and a newline:
+
+```sh
+shtodo add --print-id 'Review the release notes'
+printf '%s\n' 'Run the tests' | shtodo --local add --print-id
+```
+
+Adding identical text creates another task. If an add's outcome is uncertain,
+inspect the list before retrying to avoid duplicates.
+
+### Complete, reopen, edit, and restore tasks
+
+Resolve the target's persisted ID in the intended scope, then use one of:
+
+```sh
+shtodo done 3
+shtodo reopen 3
+shtodo edit 3 'Review the updated release notes'
+shtodo restore 3
+```
+
+For directory-local tasks, put `--local` before the command. `done` and
+`reopen` set explicit states, so retries never toggle completion. `edit`
+requires one literal, trimmed, non-empty, single-line text argument and does
+not read stdin. `restore` recovers a deleted task by ID, preserving its text,
+completion state, and saved position. Retain deleted IDs for later restoration;
+`list` omits tombstones.
+
+Success prints `Completed <ID>: <text>`, `Reopened <ID>: <text>`,
+`Edited <ID>: <text>`, or `Restored <ID>: <text>`. Already-matching states,
+unchanged edits, and already-live restoration succeed without rewriting the
+snapshot, with `Already done`, `Already open`, `Unchanged`, or `Already live`
+in the corresponding output. `done`, `reopen`, and `edit` reject deleted IDs;
+restore them first. Unknown IDs fail. List the same scope to verify the result.
 
 ### Delete tasks
 
@@ -93,13 +125,13 @@ recoverable deletion. Deletion is distinct from marking a task complete.
 
 ## Unsupported actions and errors
 
-The current shell interface cannot complete, reopen, edit, reorder, or
-restore tasks. When asked for one of these actions, explain the limitation
-and give the relevant TUI action. In the correct scope, Space toggles the
-selected task's completion, `e` edits, and `u` restores the most recently
-deleted task, including across restarts. `J` and `K` move the selected task
-down and up. Bindings are configurable; `?` opens keyboard help by default.
-Do not substitute deletion for completion.
+Shell commands do not reorder tasks or offer search, filters, or structured
+JSON output. For reordering, `J` and `K` move the selected TUI task down and
+up. In the TUI, `/` searches, Tab and Shift-Tab cycle All/Open/Done views,
+`t` opens browsable trash, `r` restores its selected task, and `u` restores
+the most recently deleted task from the live list. Bindings are configurable;
+`?` opens contextual keyboard help by default. Use `done` for completion and
+`delete` for recoverable deletion.
 
 Use the CLI for task storage changes. Directly editing snapshots under
 `~/.shtodo` bypasses validation, writer locks, and atomic saves.
@@ -107,6 +139,7 @@ Use the CLI for task storage changes. Directly editing snapshots under
 On writer-lock contention, report that another process, often an open TUI,
 must release the same scope before retrying. Leave lock files intact.
 For keybinding configuration errors, use `shtodo doctor`; it validates
-configuration, not task storage. Shell `add`, `list`, and `delete` bypass
-keybinding configuration. Report storage or permission errors as failures
-without resetting data or switching scopes.
+configuration, not task storage. All shell task commands bypass keybinding
+configuration. Mutations, including no-op requests, require the writer lock;
+`list` can read while it is held. Report storage or permission errors as
+failures without resetting data or switching scopes.
