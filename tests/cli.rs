@@ -171,7 +171,7 @@ fn doctor_should_summarize_valid_effective_keymap_without_task_storage() {
     assert!(output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains("OK: 27 configurable actions, 35 active bindings")
+            .contains("OK: 28 configurable actions, 36 active bindings")
     );
     assert!(!home.path().join(".shtodo/global").exists());
     assert!(!home.path().join(".shtodo/projects").exists());
@@ -573,6 +573,9 @@ fn doctor_should_accept_existing_bindings_on_new_search_default_keys() {
         "[keybindings.normal]\ntoggle_complete = [\"f\"]\n",
         "[keybindings.normal]\nadd_task = [\"/\"]\n",
         "[keybindings.normal]\nopen_help = [\"esc\"]\n",
+        "[keybindings.normal]\ntoggle_complete = [\"tab\"]\n",
+        "[keybindings.normal]\ntoggle_complete = [\"shift-tab\"]\n",
+        "[keybindings.normal]\ntoggle_complete = [\"backtab\"]\n",
         "[keybindings.normal]\ntoggle_complete = [\"f\"]\nadd_task = [\"/\"]\nopen_help = [\"esc\"]\n",
     ] {
         let home = tempfile::tempdir().unwrap();
@@ -583,7 +586,7 @@ fn doctor_should_accept_existing_bindings_on_new_search_default_keys() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("27 configurable actions"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("28 configurable actions"));
         assert_eq!(
             std::fs::read_to_string(home.path().join(".shtodo/config.toml")).unwrap(),
             config

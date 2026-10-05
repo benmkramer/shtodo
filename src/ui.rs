@@ -5,11 +5,11 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Tabs},
 };
 
 use crate::{
-    app::{App, EditKind, Mode},
+    app::{App, EditKind, Mode, TaskView},
     input::{BindingId, Keymap, ResolvedBinding},
     task::{ListScope, Task},
 };
@@ -198,11 +198,41 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
 }
 
 fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let prefix = format!(
-        "View: {} · {} matches · /",
-        app.view().label(),
-        app.visible_tasks().count(),
+    let tabs = [TaskView::All, TaskView::Open, TaskView::Done];
+    let tab_width = tabs
+        .iter()
+        .map(|view| view.label().len() + 2)
+        .sum::<usize>()
+        + 2;
+    let columns =
+        Layout::horizontal([Constraint::Length(tab_width as u16), Constraint::Min(1)]).split(area);
+    let selected = match app.view() {
+        TaskView::All => 0,
+        TaskView::Open => 1,
+        TaskView::Done => 2,
+    };
+    frame.render_widget(
+        Tabs::new(tabs.map(|view| {
+            if view == app.view() {
+                format!("[{}]", view.label())
+            } else {
+                format!(" {} ", view.label())
+            }
+        }))
+        .select(selected)
+        .padding("", "")
+        .divider("│")
+        .style(Style::default().fg(Color::Gray))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Green)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
+        columns[0],
     );
+    let area = columns[1];
+    let prefix = format!(" · {} matches · /", app.visible_tasks().count());
     let prefix_width = Line::from(prefix.as_str())
         .width()
         .min(usize::from(area.width)) as u16;
@@ -244,7 +274,8 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         } else if !no_tasks && app.mode() == Mode::Normal {
             let hints = [
                 (BindingId::ClearSearch, "clear search"),
-                (BindingId::CycleView, "cycle view"),
+                (BindingId::CycleView, "next view"),
+                (BindingId::PreviousView, "previous view"),
                 (BindingId::StartSearch, "edit search"),
             ]
             .into_iter()
@@ -836,7 +867,8 @@ mod tests {
             "? show help",
             "q / Ctrl-C quit",
             "/ search",
-            "f cycle All/Open/Done",
+            "Tab next view",
+            "Shift-Tab previous view",
             "Esc clear search",
             "Enter apply search",
             "Esc cancel search",
@@ -945,7 +977,7 @@ mod tests {
         app.apply(Action::CycleView).unwrap();
         let buffer = render_app(&app, 80, 12);
         assert!(buffer_row(&buffer, 80, 0).contains("2 open · 1 done"));
-        assert!(buffer_row(&buffer, 80, 1).contains("View: Open · 1 matches · /NEEDLE"));
+        assert!(buffer_row(&buffer, 80, 1).contains("All │[Open]│ Done  · 1 matches · /NEEDLE"));
         let text = buffer_text(&buffer);
         assert!(text.contains("needle open"));
         assert!(!text.contains("needle done"));
@@ -967,7 +999,7 @@ mod tests {
         let text = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 12));
         assert!(text.contains("No matching tasks"));
         assert!(!text.contains("No tasks yet"));
-        assert!(text.contains("Ctrl-g clear search · v cycle view"));
+        assert!(text.contains("Ctrl-g clear search · v next view"));
         assert!(!text.contains("existing"));
         assert!(text.contains("0 matches"));
     }
@@ -997,6 +1029,7 @@ mod tests {
         let keymap = Keymap::with_overrides(&[
             override_for(BindingId::StartSearch, &["s", "/"]),
             override_for(BindingId::CycleView, &["v"]),
+            override_for(BindingId::PreviousView, &["ctrl-v"]),
             override_for(BindingId::CommitEdit, &["ctrl-s"]),
             override_for(BindingId::CancelEdit, &["ctrl-g"]),
         ])
@@ -1004,7 +1037,8 @@ mod tests {
         let mut app = App::new(TaskList::new(ListScope::Global));
         let normal = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
         assert!(normal.contains("s search"));
-        assert!(normal.contains("v cycle All/Open/Done"));
+        assert!(normal.contains("v next view"));
+        assert!(normal.contains("Ctrl-v previous view"));
         app.apply(Action::StartSearch).unwrap();
         let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
         assert!(footer.contains("Ctrl-s apply search · Ctrl-g cancel search"));
@@ -1013,7 +1047,10 @@ mod tests {
         app.apply(Action::OpenHelp).unwrap();
         let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
         assert!(help.contains("s / / search"));
-        assert!(help.contains("v cycle All/Open/Done"));
+        assert!(help.contains("v next view"));
+        assert!(help.contains("Ctrl-v previous view"));
+        assert!(!help.contains("Tab next view"));
+        assert!(!help.contains("Shift-Tab previous view"));
         assert!(help.contains("Ctrl-s apply search (Insert keys)"));
         assert!(help.contains("Ctrl-g cancel search"));
     }
@@ -1045,7 +1082,7 @@ mod tests {
     #[test]
     fn help_should_explain_unbound_search_actions_without_advertising_reclaimed_keys() {
         let keymap = Keymap::with_overrides(&[
-            override_for(BindingId::ToggleComplete, &["f"]),
+            override_for(BindingId::ToggleComplete, &["f", "tab", "shift-tab"]),
             override_for(BindingId::StartAdd, &["/"]),
             override_for(BindingId::OpenHelp, &["esc"]),
         ])
@@ -1056,11 +1093,17 @@ mod tests {
         assert!(footer.contains("Esc help"));
         assert!(footer.contains("f toggle complete"));
         assert!(!footer.contains("/ search"));
-        assert!(!footer.contains("cycle All/Open/Done"));
+        assert!(!footer.contains("next view"));
+        assert!(!footer.contains("previous view"));
         assert!(!footer.contains("clear search"));
         app.apply(Action::OpenHelp).unwrap();
         let help = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
-        for name in ["start_search", "cycle_view", "clear_search"] {
+        for name in [
+            "start_search",
+            "cycle_view",
+            "previous_view",
+            "clear_search",
+        ] {
             assert!(help.contains(&format!("Unbound: {name} (config)")));
         }
     }
@@ -1068,7 +1111,7 @@ mod tests {
     #[test]
     fn no_matches_should_show_available_recovery_keys_when_clear_or_view_is_unbound() {
         let keymap = Keymap::with_overrides(&[
-            override_for(BindingId::ToggleComplete, &["f"]),
+            override_for(BindingId::ToggleComplete, &["tab"]),
             override_for(BindingId::Delete, &["esc"]),
         ])
         .unwrap();
@@ -1080,6 +1123,39 @@ mod tests {
         assert!(text.contains("No matching tasks"));
         assert!(text.contains("/ edit search"));
         assert!(!text.contains("Esc clear search"));
-        assert!(!text.contains("f cycle view"));
+        assert!(!text.contains("Tab next view"));
+        assert!(text.contains("Shift-Tab previous view"));
+    }
+
+    #[test]
+    fn tabs_should_highlight_the_active_view_and_help_should_show_both_directions() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        for (selected_x, tab_strip) in [
+            (1, "[All]│ Open │ Done "),
+            (7, " All │[Open]│ Done "),
+            (14, " All │ Open │[Done]"),
+        ] {
+            let buffer = render_app(&app, 40, 8);
+            assert!(buffer_row(&buffer, 40, 1).starts_with(tab_strip));
+            for x in [1, 7, 14] {
+                let cell = &buffer[(x, 1)];
+                assert_eq!(cell.fg == Color::Green, x == selected_x);
+                assert_eq!(
+                    cell.modifier.contains(Modifier::UNDERLINED),
+                    x == selected_x
+                );
+                assert_eq!(cell.bg == Color::DarkGray, x == selected_x);
+            }
+            app.apply(Action::CycleView).unwrap();
+        }
+        app.apply(Action::PreviousView).unwrap();
+        let buffer = render_app(&app, 40, 8);
+        assert_eq!(buffer[(14, 1)].fg, Color::Green);
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app(&app, 80, 24));
+        assert!(help.contains("Tab next view"));
+        assert!(help.contains("Shift-Tab previous view"));
+        assert!(help.contains("Enter apply search"));
+        assert!(help.contains("Esc cancel search"));
     }
 }

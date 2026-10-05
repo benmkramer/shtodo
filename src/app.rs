@@ -37,6 +37,14 @@ impl TaskView {
         }
     }
 
+    fn previous(self) -> Self {
+        match self {
+            Self::All => Self::Done,
+            Self::Open => Self::All,
+            Self::Done => Self::Open,
+        }
+    }
+
     fn matches(self, task: &Task) -> bool {
         match self {
             Self::All => true,
@@ -360,6 +368,7 @@ impl App {
                 | Action::RestoreLatest
                 | Action::StartSearch
                 | Action::CycleView
+                | Action::PreviousView
                 | Action::ClearSearch
                 | Action::OpenHelp
                 | Action::Quit
@@ -379,7 +388,8 @@ impl App {
             Action::Delete => self.delete_selected()?,
             Action::RestoreLatest => self.restore_latest()?,
             Action::StartSearch => self.start_search(),
-            Action::CycleView => self.cycle_view(),
+            Action::CycleView => self.cycle_view(MoveDirection::Down),
+            Action::PreviousView => self.cycle_view(MoveDirection::Up),
             Action::ClearSearch => self.clear_search(),
             Action::OpenHelp => self.open_help(),
             Action::Quit => Transition::Quit,
@@ -491,8 +501,11 @@ impl App {
         Transition::Transient
     }
 
-    fn cycle_view(&mut self) -> Transition {
-        self.view = self.view.next();
+    fn cycle_view(&mut self, direction: MoveDirection) -> Transition {
+        self.view = match direction {
+            MoveDirection::Down => self.view.next(),
+            MoveDirection::Up => self.view.previous(),
+        };
         self.reconcile_selection();
         Transition::Transient
     }
@@ -1383,6 +1396,59 @@ mod view_tests {
     }
 
     #[test]
+    fn previous_view_should_wrap_and_preserve_matching_selection_and_order() {
+        let mut list = TaskList::new(ListScope::Global);
+        let open = list.add("match open").unwrap();
+        let done = list.add("match done").unwrap();
+        list.toggle_complete(done).unwrap();
+        list.add("hidden work").unwrap();
+        let snapshot = list.clone();
+        let mut app = App::new(list);
+        search(&mut app, "match");
+        for (view, selected, ids) in [
+            (TaskView::Done, done, vec![done]),
+            (TaskView::Open, open, vec![open]),
+            (TaskView::All, open, vec![open, done]),
+        ] {
+            assert_eq!(
+                app.apply(Action::PreviousView).unwrap(),
+                Transition::Transient
+            );
+            assert_eq!(app.view(), view);
+            assert_eq!(app.selected(), Some(selected));
+            assert_eq!(visible_ids(&app), ids);
+        }
+        assert_eq!(app.tasks(), &snapshot);
+        assert_eq!(app.query(), "match");
+        app.apply(Action::CycleView).unwrap();
+        app.apply(Action::PreviousView).unwrap();
+        assert_eq!(app.view(), TaskView::All);
+        assert_eq!(app.selected(), Some(open));
+    }
+
+    #[test]
+    fn previous_view_should_handle_empty_matches_and_recover_selection() {
+        let mut list = TaskList::new(ListScope::Global);
+        let open = list.add("open task").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::PreviousView).unwrap();
+        assert_eq!(app.view(), TaskView::Done);
+        assert_eq!(app.selected(), None);
+        app.apply(Action::PreviousView).unwrap();
+        assert_eq!(app.view(), TaskView::Open);
+        assert_eq!(app.selected(), Some(open));
+        search(&mut app, "absent");
+        for _ in 0..3 {
+            app.apply(Action::PreviousView).unwrap();
+            assert_eq!(app.selected(), None);
+            assert!(visible_ids(&app).is_empty());
+            assert!(app.celebration().is_none());
+        }
+        app.apply(Action::ClearSearch).unwrap();
+        assert_eq!(app.selected(), Some(open));
+    }
+
+    #[test]
     fn cycling_view_should_preserve_identity_or_choose_next_then_previous_match() {
         let mut list = TaskList::new(ListScope::Global);
         let first = list.add("open first").unwrap();
@@ -1489,6 +1555,7 @@ mod view_tests {
                 Action::StartAdd,
                 Action::StartEdit,
                 Action::CycleView,
+                Action::PreviousView,
                 Action::ClearSearch,
                 Action::MoveTaskDown,
                 Action::MoveDown,

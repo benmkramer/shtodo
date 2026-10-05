@@ -6,17 +6,17 @@ All notable changes to shtodo are documented in this file.
 
 ### Added
 
-- Transient TUI text search with `/` and All/Open/Done views with `f`, with
-  configurable controls and matching counts. Search composes with status views;
-  navigation and task actions preserve identity, and filtered reordering leaves
+- Transient TUI text search with `/` and All/Open/Done tabs with Tab and
+  Shift-Tab, with configurable controls and matching counts. Search composes
+  with status views; navigation and task actions preserve identity, and filtered reordering leaves
   hidden rows in place.
 - Homebrew installation through `benmkramer/tap/shtodo`, with automatic formula
   updates from the release workflow.
 
 ### Fixed
 
-- Preserve existing explicit Normal-mode bindings that use `/`, `f`, or `Esc`
-  when loading the new search controls. Claimed search defaults become unbound
+- Preserve existing explicit Normal-mode bindings that use `/`, Tab,
+  Shift-Tab, or `Esc` when loading the new search controls. Claimed search defaults become unbound
   and appear in Help instead of rejecting a previously valid configuration.
 
 ## [0.1.0-beta.2] - 2026-09-05

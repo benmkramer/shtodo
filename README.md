@@ -69,7 +69,7 @@ The essentials are:
 
 ```text
 i add · e edit · Space complete · d delete · u restore
-/ search · f view · ? help · q quit
+/ search · Tab / Shift-Tab views · ? help · q quit
 ```
 
 See [Usage and keyboard controls] for the full interaction guide.

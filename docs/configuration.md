@@ -11,7 +11,8 @@ move_down = ["j", "down", "ctrl-n"]
 move_up = ["k", "up", "ctrl-p"]
 add_task = ["a"]
 start_search = ["/"]
-cycle_view = ["f"]
+cycle_view = ["tab"]
+previous_view = ["shift-tab"]
 clear_search = ["esc"]
 open_help = ["?"]
 
@@ -25,15 +26,17 @@ close_help = ["?", "esc"]
 
 Array order matters: the first key is used in the footer and every key is
 shown in Help. Accepted named keys are `up`, `down`, `left`, `right`, `home`,
-`end`, `page-up`, `page-down`, `tab`, `backtab`, `enter`, `esc`, `space`,
-`backspace`, `delete`, and `insert`. Ctrl and Alt modifiers use forms such as
-`ctrl-n`, `alt-left`, and `ctrl-alt-x`; shifted printable characters use the
+`end`, `page-up`, `page-down`, `tab`, `backtab` (also `shift-tab`), `enter`,
+`esc`, `space`, `backspace`, `delete`, and `insert`. Ctrl and Alt modifiers use
+forms such as `ctrl-n`, `alt-left`, and `ctrl-alt-x`; shifted printable characters use the
 resulting character such as `J`. Named keys and modifier names are ASCII
 case-insensitive, while unmodified printable characters remain case-sensitive.
 Modified ASCII letters normalize to lowercase for matching and conflict
 detection. Help and diagnostics show canonical labels generated from that
 normalized form, such as `Down`, `Ctrl-n`, and `Alt-Left`, regardless of the
-casing used in the config file.
+casing used in the config file. `backtab` and `shift-tab` both display as
+`Shift-Tab` and refer to the same key. Shift is supported explicitly for Tab;
+other shifted printable characters use their resulting character.
 
 `Ctrl-C` is fixed in all modes and cannot be configured. Invalid config stops
 interactive startup and points to `shtodo doctor`. `shtodo doctor` checks the
@@ -41,10 +44,11 @@ same parser and validator without opening task storage or the TUI.
 
 ## Upgrading existing configurations
 
-The new Normal-mode defaults for `start_search` (`/`), `cycle_view` (`f`), and
-`clear_search` (`esc`) yield to explicit bindings in the same mode. Existing
-valid configs that already use those keys continue to load and keep their
-behavior. The conflicting new default becomes unbound; shtodo does not
+The new Normal-mode defaults for `start_search` (`/`), `cycle_view` (`tab`),
+`previous_view` (`shift-tab`), and `clear_search` (`esc`) yield to explicit
+bindings in the same mode. Existing valid configs that already use those keys
+continue to load and keep their behavior. The conflicting new default becomes
+unbound; shtodo does not
 rewrite your config or choose an alternative key automatically.
 
 Help marks these actions as `Unbound: cycle_view (config)` or the corresponding
@@ -53,7 +57,7 @@ assign it a free key, for example:
 
 ```toml
 [keybindings.normal]
-toggle_complete = ["f"]
+toggle_complete = ["tab"]
 cycle_view = ["v"]
 ```
 
@@ -78,7 +82,8 @@ including configs with unbound search actions.
 | `delete_task`     | `d`          |
 | `restore_latest`  | `u`          |
 | `start_search`    | `/`          |
-| `cycle_view`      | `f`          |
+| `cycle_view`      | `tab`        |
+| `previous_view`   | `shift-tab`  |
 | `clear_search`    | `esc`        |
 | `open_help`       | `?`          |
 | `quit`            | `q`          |
@@ -115,9 +120,12 @@ selection. Cursor movement and deletion work the same way as in Insert.
 Changing an Insert binding changes it for both editors, and Help and the
 Search footer show the effective keys with search-specific accept/cancel hints.
 
-In Normal mode, `start_search` opens the current query, `cycle_view` cycles
-All/Open/Done, and `clear_search` clears only the query. Search/view state is
-never stored in configuration or task snapshots.
+In Normal mode, `start_search` opens the current query, `cycle_view` moves to
+the next All/Open/Done tab, `previous_view` moves to the previous tab, and
+`clear_search` clears only the query. Both tab controls wrap at either end.
+To use a letter shortcut instead, configure `cycle_view = ["f"]` or another
+free key in `[keybindings.normal]`. Search/view state is never stored in
+configuration or task snapshots.
 
 `Ctrl-C` is a fixed emergency quit key in all four modes.
 

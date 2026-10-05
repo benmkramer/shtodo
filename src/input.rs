@@ -17,6 +17,7 @@ pub(crate) enum BindingId {
     RestoreLatest,
     StartSearch,
     CycleView,
+    PreviousView,
     ClearSearch,
     OpenHelp,
     NormalQuit,
@@ -43,7 +44,7 @@ impl BindingId {
         // Existing user bindings must keep working when upgrading.
         matches!(
             self,
-            Self::StartSearch | Self::CycleView | Self::ClearSearch
+            Self::StartSearch | Self::CycleView | Self::PreviousView | Self::ClearSearch
         )
     }
 
@@ -60,6 +61,7 @@ impl BindingId {
             (Mode::Normal, "restore_latest") => Self::RestoreLatest,
             (Mode::Normal, "start_search") => Self::StartSearch,
             (Mode::Normal, "cycle_view") => Self::CycleView,
+            (Mode::Normal, "previous_view") => Self::PreviousView,
             (Mode::Normal, "clear_search") => Self::ClearSearch,
             (Mode::Normal, "open_help") => Self::OpenHelp,
             (Mode::Normal, "quit") => Self::NormalQuit,
@@ -93,6 +95,7 @@ impl BindingId {
             Self::RestoreLatest => Some("restore_latest"),
             Self::StartSearch => Some("start_search"),
             Self::CycleView => Some("cycle_view"),
+            Self::PreviousView => Some("previous_view"),
             Self::ClearSearch => Some("clear_search"),
             Self::OpenHelp => Some("open_help"),
             Self::NormalQuit => Some("quit"),
@@ -126,6 +129,7 @@ impl BindingId {
             | Self::RestoreLatest
             | Self::StartSearch
             | Self::CycleView
+            | Self::PreviousView
             | Self::ClearSearch
             | Self::OpenHelp
             | Self::NormalQuit => Mode::Normal,
@@ -185,7 +189,12 @@ impl KeyChord {
                 modifiers.insert(KeyModifiers::ALT);
                 remainder = &remainder[4..];
             } else if lower.starts_with("shift-") {
-                return Err(KeyParseError("Shift modifier is not supported".into()));
+                if lower == "shift-tab" {
+                    break;
+                }
+                return Err(KeyParseError(
+                    "Shift modifier is only supported for Tab".into(),
+                ));
             } else {
                 break;
             }
@@ -204,7 +213,7 @@ impl KeyChord {
             "page-up" => KeyCode::PageUp,
             "page-down" => KeyCode::PageDown,
             "tab" => KeyCode::Tab,
-            "backtab" => KeyCode::BackTab,
+            "backtab" | "shift-tab" => KeyCode::BackTab,
             "enter" => KeyCode::Enter,
             "esc" => KeyCode::Esc,
             "space" => KeyCode::Char(' '),
@@ -228,10 +237,15 @@ impl KeyChord {
 
     fn from_event(event: KeyEvent) -> Self {
         let mut modifiers = event.modifiers;
-        if matches!(event.code, KeyCode::Char(_) | KeyCode::BackTab) {
+        let code = if event.code == KeyCode::Tab && modifiers.contains(KeyModifiers::SHIFT) {
+            KeyCode::BackTab
+        } else {
+            event.code
+        };
+        if matches!(code, KeyCode::Char(_) | KeyCode::BackTab) {
             modifiers.remove(KeyModifiers::SHIFT);
         }
-        let code = match event.code {
+        let code = match code {
             KeyCode::Char(character) => KeyCode::Char(normalize_character(character, modifiers)),
             code => code,
         };
@@ -256,7 +270,7 @@ impl KeyChord {
             KeyCode::PageUp => "Page-Up",
             KeyCode::PageDown => "Page-Down",
             KeyCode::Tab => "Tab",
-            KeyCode::BackTab => "Backtab",
+            KeyCode::BackTab => "Shift-Tab",
             KeyCode::Enter => "Enter",
             KeyCode::Esc => "Esc",
             KeyCode::Backspace => "Backspace",
@@ -598,9 +612,9 @@ static DEFINITIONS: &[Definition] = &[
     Definition {
         id: BindingId::CycleView,
         action: Action::CycleView,
-        description: "cycle All/Open/Done",
+        description: "next view",
         footer_priority: Some(1),
-        defaults: &[chord(KeyCode::Char('f'), KeyModifiers::NONE)],
+        defaults: &[chord(KeyCode::Tab, KeyModifiers::NONE)],
         fixed: &[],
     },
     Definition {
@@ -609,6 +623,14 @@ static DEFINITIONS: &[Definition] = &[
         description: "clear search",
         footer_priority: Some(1),
         defaults: &[chord(KeyCode::Esc, KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::PreviousView,
+        action: Action::PreviousView,
+        description: "previous view",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::BackTab, KeyModifiers::NONE)],
         fixed: &[],
     },
 ];
@@ -833,6 +855,7 @@ fn definition_index(id: BindingId) -> usize {
         BindingId::StartSearch => 26,
         BindingId::CycleView => 27,
         BindingId::ClearSearch => 28,
+        BindingId::PreviousView => 29,
     }
 }
 fn issue(override_: &BindingOverride, message: impl Into<String>) -> KeymapIssue {
@@ -863,6 +886,9 @@ mod tests {
             ("ctrl-n", "Ctrl-n"),
             ("ALT-left", "Alt-Left"),
             ("ctrl-alt-x", "Ctrl-Alt-x"),
+            ("backtab", "Shift-Tab"),
+            ("SHIFT-TAB", "Shift-Tab"),
+            ("ctrl-shift-tab", "Ctrl-Shift-Tab"),
         ] {
             assert_eq!(KeyChord::parse(source).unwrap().label(), expected);
         }
@@ -1220,8 +1246,8 @@ mod tests {
     #[test]
     fn keymap_should_expose_configurable_and_active_binding_counts() {
         let keymap = Keymap::defaults();
-        assert_eq!(keymap.configurable_action_count(), 27);
-        assert_eq!(keymap.active_binding_count(), 36);
+        assert_eq!(keymap.configurable_action_count(), 28);
+        assert_eq!(keymap.active_binding_count(), 37);
         assert_eq!(
             BindingId::from_config(Mode::Normal, "move_down"),
             Some(BindingId::MoveDown)
@@ -1265,7 +1291,8 @@ mod tests {
         let keymap = Keymap::defaults();
         for (code, action) in [
             (KeyCode::Char('/'), Action::StartSearch),
-            (KeyCode::Char('f'), Action::CycleView),
+            (KeyCode::Tab, Action::CycleView),
+            (KeyCode::BackTab, Action::PreviousView),
             (KeyCode::Esc, Action::ClearSearch),
         ] {
             assert_eq!(
@@ -1347,7 +1374,7 @@ mod tests {
             order: 0,
             path: "keybindings.normal.cycle_view".into(),
             id: BindingId::CycleView,
-            keys: vec!["v".into(), "ctrl-v".into()],
+            keys: vec!["v".into(), "f".into(), "ctrl-v".into()],
         }])
         .unwrap();
         assert_eq!(
@@ -1358,11 +1385,15 @@ mod tests {
             Some(Action::CycleView)
         );
         assert_eq!(
+            keymap.map_key(Mode::Normal, pressed(KeyCode::Tab, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
             keymap.map_key(
                 Mode::Normal,
                 pressed(KeyCode::Char('f'), KeyModifiers::NONE)
             ),
-            None
+            Some(Action::CycleView)
         );
         let issues = Keymap::with_overrides(&[
             BindingOverride {
@@ -1389,7 +1420,7 @@ mod tests {
                 order: 0,
                 path: "keybindings.normal.toggle_complete".into(),
                 id: BindingId::ToggleComplete,
-                keys: vec!["f".into()],
+                keys: vec!["f".into(), "tab".into(), "backtab".into()],
             },
             BindingOverride {
                 order: 1,
@@ -1407,6 +1438,8 @@ mod tests {
         .unwrap();
         for (code, action) in [
             (KeyCode::Char('f'), Action::ToggleComplete),
+            (KeyCode::Tab, Action::ToggleComplete),
+            (KeyCode::BackTab, Action::ToggleComplete),
             (KeyCode::Char('/'), Action::StartAdd),
             (KeyCode::Esc, Action::OpenHelp),
         ] {
@@ -1420,11 +1453,12 @@ mod tests {
             vec![
                 BindingId::StartSearch,
                 BindingId::CycleView,
-                BindingId::ClearSearch
+                BindingId::ClearSearch,
+                BindingId::PreviousView,
             ]
         );
-        assert_eq!(keymap.configurable_action_count(), 27);
-        assert_eq!(keymap.active_binding_count(), 33);
+        assert_eq!(keymap.configurable_action_count(), 28);
+        assert_eq!(keymap.active_binding_count(), 35);
         assert!(keymap.unbound_actions_for(Mode::Insert).next().is_none());
         for mode in [Mode::Normal, Mode::Insert, Mode::Search, Mode::Help] {
             assert_eq!(
@@ -1440,20 +1474,79 @@ mod tests {
             order: 0,
             path: "keybindings.normal.start_search".into(),
             id: BindingId::StartSearch,
-            keys: vec!["f".into()],
+            keys: vec!["tab".into()],
         }])
         .unwrap();
         assert_eq!(
-            keymap.map_key(
-                Mode::Normal,
-                pressed(KeyCode::Char('f'), KeyModifiers::NONE)
-            ),
+            keymap.map_key(Mode::Normal, pressed(KeyCode::Tab, KeyModifiers::NONE)),
             Some(Action::StartSearch)
         );
         assert_eq!(
             keymap.unbound_actions_for(Mode::Normal).collect::<Vec<_>>(),
             vec![BindingId::CycleView]
         );
+    }
+
+    #[test]
+    fn view_tabs_should_normalize_shift_tab_events_and_stay_in_normal_mode() {
+        let keymap = Keymap::defaults();
+        for (code, modifiers) in [
+            (KeyCode::BackTab, KeyModifiers::NONE),
+            (KeyCode::BackTab, KeyModifiers::SHIFT),
+            (KeyCode::Tab, KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                keymap.map_key(Mode::Normal, pressed(code, modifiers)),
+                Some(Action::PreviousView)
+            );
+            for mode in [Mode::Insert, Mode::Search, Mode::Help] {
+                assert_eq!(keymap.map_key(mode, pressed(code, modifiers)), None);
+            }
+        }
+        for mode in [Mode::Insert, Mode::Search, Mode::Help] {
+            assert_eq!(
+                keymap.map_key(mode, pressed(KeyCode::Tab, KeyModifiers::NONE)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn previous_view_should_be_configurable_and_shift_tab_aliases_should_conflict() {
+        let keymap = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.previous_view".into(),
+            id: BindingId::PreviousView,
+            keys: vec!["ctrl-shift-tab".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(
+                    KeyCode::BackTab,
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            Some(Action::PreviousView)
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Normal, pressed(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            None
+        );
+        assert_eq!(
+            BindingId::from_config(Mode::Normal, "previous_view"),
+            Some(BindingId::PreviousView)
+        );
+
+        let issues = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.previous_view".into(),
+            id: BindingId::PreviousView,
+            keys: vec!["backtab".into(), "shift-tab".into()],
+        }])
+        .unwrap_err();
+        assert_eq!(issues[0].message, "duplicate key \"Shift-Tab\"");
     }
 
     #[test]
@@ -1492,21 +1585,15 @@ mod tests {
             order: 0,
             path: "keybindings.insert.commit_edit".into(),
             id: BindingId::CommitEdit,
-            keys: vec!["f".into()],
+            keys: vec!["tab".into()],
         }])
         .unwrap();
         assert_eq!(
-            keymap.map_key(
-                Mode::Normal,
-                pressed(KeyCode::Char('f'), KeyModifiers::NONE)
-            ),
+            keymap.map_key(Mode::Normal, pressed(KeyCode::Tab, KeyModifiers::NONE)),
             Some(Action::CycleView)
         );
         assert_eq!(
-            keymap.map_key(
-                Mode::Search,
-                pressed(KeyCode::Char('f'), KeyModifiers::NONE)
-            ),
+            keymap.map_key(Mode::Search, pressed(KeyCode::Tab, KeyModifiers::NONE)),
             Some(Action::CommitEdit)
         );
         assert!(keymap.unbound_actions_for(Mode::Normal).next().is_none());

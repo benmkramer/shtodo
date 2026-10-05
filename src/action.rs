@@ -11,6 +11,7 @@ pub(crate) enum Action {
     RestoreLatest,
     StartSearch,
     CycleView,
+    PreviousView,
     ClearSearch,
     OpenHelp,
     CloseHelp,

@@ -86,7 +86,8 @@ mode, saves nothing, and shows `Task text cannot be empty`.
 | `d`           | Delete the selected task                        |
 | `u`           | Restore the most recently deleted task          |
 | `/`           | Enter or refine text search                     |
-| `f`           | Cycle All, Open, and Done views                  |
+| Tab           | Move to the next All, Open, or Done tab          |
+| Shift-Tab     | Move to the previous view tab                    |
 | Esc           | Clear the accepted search, keeping the view     |
 | `?`           | Open keyboard help                              |
 | `q` or Ctrl-C | Quit                                            |
@@ -124,10 +125,13 @@ To change these controls, see [Configuring keybindings].
 
 ## Search and task views
 
-Each TUI session starts in All with an empty search. Press `f` to cycle All,
-Open, Done, then All again. Press `/` to edit the current query. Matches update
-as you type and combine with the active view. Search uses a literal substring
-of task text after Unicode lowercasing; spaces and punctuation are literal,
+Each TUI session starts in All with an empty search. The tab strip highlights
+and brackets the active view, such as `[All]`. Tab moves through All, Open,
+Done, then All again; Shift-Tab moves backward, wrapping from All to Done.
+These controls work in Normal mode;
+accept or cancel an edit before switching views. Press `/` to edit the current
+query. Matches update as you type and combine with the active view. Search uses
+a literal substring of task text after Unicode lowercasing; spaces and punctuation are literal,
 and there are no regular expressions, accent normalization, or tags.
 
 Search mode uses the same text editing bindings as Insert mode. Enter accepts
@@ -137,9 +141,9 @@ mode, Escape clears an accepted query while keeping Open/Done filtering. `q`,
 `f`, `/`, and Space are text while editing a query; Ctrl-C still quits. All of
 these keys follow the configured bindings described in [Configuring keybindings].
 
-The status line shows the active view, matching count, and `/query`, including
-an empty query. The header's open/done counts cover all non-deleted tasks in
-the scope. An empty list shows `No tasks yet`; a populated list whose current
+The tab strip and status line show the active view, matching count, and
+`/query`, including an empty query. The header's open/done counts cover all
+non-deleted tasks in the scope. An empty list shows `No tasks yet`; a populated list whose current
 view/search matches nothing shows `No matching tasks`. Search and view changes
 are transient, do not save anything, and do not affect `shtodo list` output.
 

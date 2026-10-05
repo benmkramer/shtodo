@@ -388,8 +388,8 @@ mod tests {
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::Defaults);
-        assert_eq!(loaded.keymap().configurable_action_count(), 27);
-        assert_eq!(loaded.keymap().active_binding_count(), 36);
+        assert_eq!(loaded.keymap().configurable_action_count(), 28);
+        assert_eq!(loaded.keymap().active_binding_count(), 37);
         assert!(!home.path().join(".shtodo").exists());
     }
 
@@ -405,7 +405,7 @@ move_down = ["x", "ctrl-n"]
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::File);
-        assert_eq!(loaded.keymap().active_binding_count(), 36);
+        assert_eq!(loaded.keymap().active_binding_count(), 37);
         assert_eq!(
             labels_for(loaded.keymap(), BindingId::MoveDown),
             vec!["x", "Ctrl-n"]
@@ -622,6 +622,7 @@ add_task = ["j"]
 [keybindings.normal]
 start_search = ["s"]
 cycle_view = ["v"]
+previous_view = ["ctrl-v"]
 clear_search = ["ctrl-g"]
 [keybindings.insert]
 commit_edit = ["ctrl-s"]
@@ -633,6 +634,10 @@ commit_edit = ["ctrl-s"]
             vec!["s"]
         );
         assert_eq!(labels_for(loaded.keymap(), BindingId::CycleView), vec!["v"]);
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::PreviousView),
+            vec!["Ctrl-v"]
+        );
         assert_eq!(
             labels_for(loaded.keymap(), BindingId::ClearSearch),
             vec!["Ctrl-g"]
@@ -647,16 +652,23 @@ commit_edit = ["ctrl-s"]
 
     #[test]
     fn load_should_preserve_existing_normal_bindings_that_claim_new_search_defaults() {
-        for key in ["f", "/", "esc"] {
+        for (key, label) in [
+            ("f", "f"),
+            ("/", "/"),
+            ("esc", "Esc"),
+            ("tab", "Tab"),
+            ("backtab", "Shift-Tab"),
+            ("shift-tab", "Shift-Tab"),
+        ] {
             let home = configured_home(&format!(
                 "[keybindings.normal]\ntoggle_complete = [\"{key}\"]\n"
             ));
             let loaded = load(home.path()).unwrap();
             assert_eq!(
                 labels_for(loaded.keymap(), BindingId::ToggleComplete),
-                vec![if key == "esc" { "Esc" } else { key }]
+                vec![label]
             );
-            assert_eq!(loaded.keymap().configurable_action_count(), 27);
+            assert_eq!(loaded.keymap().configurable_action_count(), 28);
             assert!(!home.path().join(".shtodo/global").exists());
         }
     }
