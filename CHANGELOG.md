@@ -6,6 +6,10 @@ All notable changes to shtodo are documented in this file.
 
 ### Added
 
+- Shell `done`, `reopen`, `edit`, and `restore` commands for one scope-local
+  task ID, with no-write success for already-matching states, unchanged text,
+  and already-live restoration.
+- Optional `add --print-id` output for scripts, including single-task stdin.
 - Homebrew installation through `benmkramer/tap/shtodo`, with automatic formula
   updates from the release workflow.
 

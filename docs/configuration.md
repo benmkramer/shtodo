@@ -36,6 +36,10 @@ casing used in the config file.
 interactive startup and points to `shtodo doctor`. `shtodo doctor` checks the
 same parser and validator without opening task storage or the TUI.
 
+Shell task commands (`add`, `list`, `delete`, `done`, `reopen`, `edit`, and
+`restore`) do not load keybinding configuration. They remain available when
+the configuration is invalid; `add --print-id` has the same independence.
+
 ## Default actions
 
 ### Normal

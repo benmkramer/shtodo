@@ -27,6 +27,21 @@ with a short rationale.
 - [Shtodo version-one implementation](./2026-09-01-shtodo-v1.md)
 - [User-configured keybindings](./2026-09-01-user-configured-keybindings.md)
 
+## Parallel integration notes
+
+- The shell lifecycle and browsable-trash branches share
+  `pub(crate) fn restore(&mut self, id: TaskId) -> Result<bool, ListError>` in
+  `src/task.rs`. Keep one implementation when combining them: clear only
+  `deletion_sequence`, return `true` for a restored tombstone, `false` for an
+  already-live task, and `TaskNotFound` for an unknown ID. Preserve text,
+  completion, ID, canonical position, and existing `restore_latest` behavior.
+- Shell lifecycle adds `set_completed` and changes `TaskList::edit` to return
+  whether the live task changed. Existing TUI callers may discard the return
+  value. Shell handlers save only changes and keep the current lock architecture.
+- Reconcile command dispatch, usage text, CLI tests, and shared documentation
+  with the search/filtering and trash branches during integration. Benchmark
+  timings remain historical; the added shell lifecycle commands are not timed.
+
 ## Findings considered and rejected
 
 - JSON output is deferred because the agent-facing contract needs real usage
