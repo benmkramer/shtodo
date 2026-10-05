@@ -38,6 +38,15 @@ pub(crate) enum BindingId {
 }
 
 impl BindingId {
+    fn defaults_yield_to_overrides(self) -> bool {
+        // These defaults were added after the original configurable keymap.
+        // Existing user bindings must keep working when upgrading.
+        matches!(
+            self,
+            Self::StartSearch | Self::CycleView | Self::ClearSearch
+        )
+    }
+
     pub(crate) fn from_config(mode: Mode, name: &str) -> Option<Self> {
         Some(match (mode, name) {
             (Mode::Normal, "move_down") => Self::MoveDown,
@@ -662,6 +671,22 @@ impl Keymap {
             keys[index] = parsed;
             sources[index] = Some((override_.order, override_.path.clone()));
         }
+        let explicit_keys = keys
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| sources[*index].is_some())
+            .flat_map(|(index, chords)| {
+                chords
+                    .iter()
+                    .map(move |chord| (DEFINITIONS[index].id.mode(), *chord))
+            })
+            .collect::<Vec<_>>();
+        for (index, definition) in DEFINITIONS.iter().enumerate() {
+            if sources[index].is_none() && definition.id.defaults_yield_to_overrides() {
+                keys[index]
+                    .retain(|chord| !explicit_keys.contains(&(definition.id.mode(), *chord)));
+            }
+        }
         let mut seen = Vec::<(KeyChord, usize)>::new();
         for (index, definition) in DEFINITIONS.iter().enumerate() {
             for chord in keys[index].iter().chain(definition.fixed) {
@@ -740,10 +765,21 @@ impl Keymap {
             .filter(move |binding| binding.mode == mode)
     }
     pub(crate) fn configurable_action_count(&self) -> usize {
-        self.bindings
+        DEFINITIONS
             .iter()
             .filter(|binding| binding.id.config_name().is_some())
             .count()
+    }
+    pub(crate) fn unbound_actions_for(&self, mode: Mode) -> impl Iterator<Item = BindingId> {
+        DEFINITIONS.iter().filter_map(move |definition| {
+            (definition.id.mode() == mode
+                && definition.id.config_name().is_some()
+                && !self
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.id == definition.id))
+            .then_some(definition.id)
+        })
     }
     pub(crate) fn active_binding_count(&self) -> usize {
         self.bindings
@@ -1328,13 +1364,151 @@ mod tests {
             ),
             None
         );
-        let issues = Keymap::with_overrides(&[BindingOverride {
+        let issues = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.normal.cycle_view".into(),
+                id: BindingId::CycleView,
+                keys: vec!["f".into()],
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.start_search".into(),
+                id: BindingId::StartSearch,
+                keys: vec!["f".into()],
+            },
+        ])
+        .unwrap_err();
+        assert_eq!(issues[0].message, "\"f\" conflicts with cycle_view");
+    }
+
+    #[test]
+    fn existing_explicit_bindings_should_claim_all_new_search_defaults() {
+        let keymap = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.normal.toggle_complete".into(),
+                id: BindingId::ToggleComplete,
+                keys: vec!["f".into()],
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.add_task".into(),
+                id: BindingId::StartAdd,
+                keys: vec!["/".into()],
+            },
+            BindingOverride {
+                order: 2,
+                path: "keybindings.normal.open_help".into(),
+                id: BindingId::OpenHelp,
+                keys: vec!["ESC".into()],
+            },
+        ])
+        .unwrap();
+        for (code, action) in [
+            (KeyCode::Char('f'), Action::ToggleComplete),
+            (KeyCode::Char('/'), Action::StartAdd),
+            (KeyCode::Esc, Action::OpenHelp),
+        ] {
+            assert_eq!(
+                keymap.map_key(Mode::Normal, pressed(code, KeyModifiers::NONE)),
+                Some(action)
+            );
+        }
+        assert_eq!(
+            keymap.unbound_actions_for(Mode::Normal).collect::<Vec<_>>(),
+            vec![
+                BindingId::StartSearch,
+                BindingId::CycleView,
+                BindingId::ClearSearch
+            ]
+        );
+        assert_eq!(keymap.configurable_action_count(), 27);
+        assert_eq!(keymap.active_binding_count(), 33);
+        assert!(keymap.unbound_actions_for(Mode::Insert).next().is_none());
+        for mode in [Mode::Normal, Mode::Insert, Mode::Search, Mode::Help] {
+            assert_eq!(
+                keymap.map_key(mode, pressed(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                Some(Action::Quit)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_search_binding_should_claim_another_unconfigured_search_default() {
+        let keymap = Keymap::with_overrides(&[BindingOverride {
             order: 0,
             path: "keybindings.normal.start_search".into(),
             id: BindingId::StartSearch,
             keys: vec!["f".into()],
         }])
-        .unwrap_err();
-        assert_eq!(issues[0].message, "\"f\" conflicts with cycle_view");
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('f'), KeyModifiers::NONE)
+            ),
+            Some(Action::StartSearch)
+        );
+        assert_eq!(
+            keymap.unbound_actions_for(Mode::Normal).collect::<Vec<_>>(),
+            vec![BindingId::CycleView]
+        );
+    }
+
+    #[test]
+    fn explicit_search_and_legacy_bindings_should_still_conflict_in_either_source_order() {
+        for (legacy_order, search_order) in [(0, 1), (1, 0)] {
+            let issues = Keymap::with_overrides(&[
+                BindingOverride {
+                    order: legacy_order,
+                    path: "keybindings.normal.toggle_complete".into(),
+                    id: BindingId::ToggleComplete,
+                    keys: vec!["f".into()],
+                },
+                BindingOverride {
+                    order: search_order,
+                    path: "keybindings.normal.cycle_view".into(),
+                    id: BindingId::CycleView,
+                    keys: vec!["f".into()],
+                },
+            ])
+            .unwrap_err();
+            assert_eq!(issues.len(), 1);
+            assert_eq!(
+                issues[0].path,
+                if legacy_order > search_order {
+                    "keybindings.normal.toggle_complete"
+                } else {
+                    "keybindings.normal.cycle_view"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_insert_binding_should_not_remove_a_normal_search_default() {
+        let keymap = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.insert.commit_edit".into(),
+            id: BindingId::CommitEdit,
+            keys: vec!["f".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('f'), KeyModifiers::NONE)
+            ),
+            Some(Action::CycleView)
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Search,
+                pressed(KeyCode::Char('f'), KeyModifiers::NONE)
+            ),
+            Some(Action::CommitEdit)
+        );
+        assert!(keymap.unbound_actions_for(Mode::Normal).next().is_none());
     }
 }

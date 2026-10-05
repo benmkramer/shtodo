@@ -644,4 +644,20 @@ commit_edit = ["ctrl-s"]
             .unwrap();
         assert_eq!(commit.preferred_label(), "Ctrl-s");
     }
+
+    #[test]
+    fn load_should_preserve_existing_normal_bindings_that_claim_new_search_defaults() {
+        for key in ["f", "/", "esc"] {
+            let home = configured_home(&format!(
+                "[keybindings.normal]\ntoggle_complete = [\"{key}\"]\n"
+            ));
+            let loaded = load(home.path()).unwrap();
+            assert_eq!(
+                labels_for(loaded.keymap(), BindingId::ToggleComplete),
+                vec![if key == "esc" { "Esc" } else { key }]
+            );
+            assert_eq!(loaded.keymap().configurable_action_count(), 27);
+            assert!(!home.path().join(".shtodo/global").exists());
+        }
+    }
 }

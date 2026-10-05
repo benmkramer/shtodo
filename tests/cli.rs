@@ -566,3 +566,29 @@ fn stored_task_text_at(path: &std::path::Path) -> String {
     let snapshot: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     snapshot["tasks"][0]["text"].as_str().unwrap().to_owned()
 }
+
+#[test]
+fn doctor_should_accept_existing_bindings_on_new_search_default_keys() {
+    for config in [
+        "[keybindings.normal]\ntoggle_complete = [\"f\"]\n",
+        "[keybindings.normal]\nadd_task = [\"/\"]\n",
+        "[keybindings.normal]\nopen_help = [\"esc\"]\n",
+        "[keybindings.normal]\ntoggle_complete = [\"f\"]\nadd_task = [\"/\"]\nopen_help = [\"esc\"]\n",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        write_config(home.path(), config);
+        let output = run_with_home(home.path(), &["doctor"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("27 configurable actions"));
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(".shtodo/config.toml")).unwrap(),
+            config
+        );
+        assert!(!home.path().join(".shtodo/global").exists());
+        assert!(!home.path().join(".shtodo/projects").exists());
+    }
+}

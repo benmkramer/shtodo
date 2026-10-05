@@ -241,14 +241,20 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
             )
         {
             text.push_str(&format!("\nPress {add} to add · {help} for help"));
-        } else if !no_tasks
-            && app.mode() == Mode::Normal
-            && let (Some(clear), Some(view)) = (
-                binding_label(keymap, Mode::Normal, BindingId::ClearSearch),
-                binding_label(keymap, Mode::Normal, BindingId::CycleView),
-            )
-        {
-            text.push_str(&format!("\n{clear} clear search · {view} cycle view"));
+        } else if !no_tasks && app.mode() == Mode::Normal {
+            let hints = [
+                (BindingId::ClearSearch, "clear search"),
+                (BindingId::CycleView, "cycle view"),
+                (BindingId::StartSearch, "edit search"),
+            ]
+            .into_iter()
+            .filter_map(|(id, description)| {
+                binding_label(keymap, Mode::Normal, id).map(|key| format!("{key} {description}"))
+            })
+            .collect::<Vec<_>>();
+            if !hints.is_empty() {
+                text.push_str(&format!("\n{}", hints.join(" · ")));
+            }
         }
         frame.render_widget(Paragraph::new(text), area);
         return;
@@ -431,6 +437,10 @@ fn help_lines(keymap: &Keymap, mode: Mode) -> Vec<Line<'static>> {
             binding.labels().collect::<Vec<_>>().join(" / "),
             binding.description()
         ))
+    }));
+    lines.extend(keymap.unbound_actions_for(mode).filter_map(|id| {
+        id.config_name()
+            .map(|name| Line::from(format!("Unbound: {name} (config)")))
     }));
     lines
 }
@@ -1030,5 +1040,46 @@ mod tests {
         assert!(!text.contains("hidden task"));
         assert!(!text.contains("match task 0"));
         assert!(buffer_row(&buffer, 40, 6).contains("› ○ match task 18"));
+    }
+
+    #[test]
+    fn help_should_explain_unbound_search_actions_without_advertising_reclaimed_keys() {
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::ToggleComplete, &["f"]),
+            override_for(BindingId::StartAdd, &["/"]),
+            override_for(BindingId::OpenHelp, &["esc"]),
+        ])
+        .unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 200, 12), 200, 11);
+        assert!(footer.contains("/ add task"));
+        assert!(footer.contains("Esc help"));
+        assert!(footer.contains("f toggle complete"));
+        assert!(!footer.contains("/ search"));
+        assert!(!footer.contains("cycle All/Open/Done"));
+        assert!(!footer.contains("clear search"));
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+        for name in ["start_search", "cycle_view", "clear_search"] {
+            assert!(help.contains(&format!("Unbound: {name} (config)")));
+        }
+    }
+
+    #[test]
+    fn no_matches_should_show_available_recovery_keys_when_clear_or_view_is_unbound() {
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::ToggleComplete, &["f"]),
+            override_for(BindingId::Delete, &["esc"]),
+        ])
+        .unwrap();
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("existing").unwrap();
+        let mut app = App::new(list);
+        search_for(&mut app, "absent");
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 12));
+        assert!(text.contains("No matching tasks"));
+        assert!(text.contains("/ edit search"));
+        assert!(!text.contains("Esc clear search"));
+        assert!(!text.contains("f cycle view"));
     }
 }

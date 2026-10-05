@@ -3,7 +3,7 @@
 The optional configuration file is `~/.shtodo/config.toml`; shtodo does not
 create it. When the file is missing, shtodo uses its compiled defaults.
 Configuring an action replaces that action's defaults; omitted actions retain
-their defaults.
+their defaults subject to the upgrade compatibility rules below.
 
 ```toml
 [keybindings.normal]
@@ -38,6 +38,29 @@ casing used in the config file.
 `Ctrl-C` is fixed in all modes and cannot be configured. Invalid config stops
 interactive startup and points to `shtodo doctor`. `shtodo doctor` checks the
 same parser and validator without opening task storage or the TUI.
+
+## Upgrading existing configurations
+
+The new Normal-mode defaults for `start_search` (`/`), `cycle_view` (`f`), and
+`clear_search` (`esc`) yield to explicit bindings in the same mode. Existing
+valid configs that already use those keys continue to load and keep their
+behavior. The conflicting new default becomes unbound; shtodo does not
+rewrite your config or choose an alternative key automatically.
+
+Help marks these actions as `Unbound: cycle_view (config)` or the corresponding
+action name. The footer shows active bindings. To enable an unbound action,
+assign it a free key, for example:
+
+```toml
+[keybindings.normal]
+toggle_complete = ["f"]
+cycle_view = ["v"]
+```
+
+Conflicts between explicit bindings and conflicts with older defaults are
+still configuration errors. `Ctrl-C` remains fixed. `shtodo doctor` reports
+the number of supported configurable actions and the effective active keys,
+including configs with unbound search actions.
 
 ## Default actions
 
