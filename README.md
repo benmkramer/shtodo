@@ -73,10 +73,26 @@ i add · e edit · Space complete · d delete · u restore · ? help · q quit
 
 See [Usage and keyboard controls] for the full interaction guide.
 
+## Agent skill
+
+An optional [shtodo skill](./skills/shtodo/SKILL.md) helps LLM-based agents
+use the CLI with the right scope, task IDs, and verification. With Node.js
+and npm available, install it for your agent:
+
+```sh
+npx skills add benmkramer/shtodo --skill shtodo --global
+```
+
+The installer supports Codex, Claude Code, Cursor, and other compatible
+agents. Install the shtodo binary separately using the instructions above.
+See [Agent skill installation and usage] for manual installation and
+example prompts.
+
 ## Documentation
 
 - [Usage and keyboard controls]
 - [Configuring keybindings]
+- [Agent skill installation and usage]
 - [Release process]
 - [Benchmarks and CLI comparison]: results, methodology, feature differences,
   and rerun instructions. Also see the [benchmark harness] and [recorded samples].
@@ -103,6 +119,7 @@ This project is licensed under the MIT license ([LICENSE] or
 [GitHub Release]: https://github.com/benmkramer/shtodo/releases
 [Usage and keyboard controls]: ./docs/usage.md
 [Configuring keybindings]: ./docs/configuration.md
+[Agent skill installation and usage]: ./docs/agent-skill.md
 [Release process]: ./docs/releasing.md
 [Benchmarks and CLI comparison]: ./docs/benchmarks.md
 [benchmark harness]: ./scripts/benchmark.py
