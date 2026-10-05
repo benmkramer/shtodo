@@ -249,8 +249,9 @@ fn each_pre_replace_failure_should_preserve_canonical_and_release_the_lock() {
         );
         assert!(matches!(result, Err(TransactionError::Failed(_))));
         assert_eq!(fs::read(&store.paths.data_file).unwrap(), before);
+        // Parallel subprocess tests can briefly inherit the descriptor before exec.
         let _guard = store
-            .acquire(ScopePresence::RequireExisting, Duration::ZERO)
+            .acquire(ScopePresence::RequireExisting, SHELL_LOCK_BUDGET)
             .unwrap();
     }
 }
