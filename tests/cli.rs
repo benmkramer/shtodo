@@ -171,7 +171,7 @@ fn doctor_should_summarize_valid_effective_keymap_without_task_storage() {
     assert!(output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains("OK: 24 configurable actions, 32 active bindings")
+            .contains("OK: 31 configurable actions, 43 active bindings")
     );
     assert!(!home.path().join(".shtodo/global").exists());
     assert!(!home.path().join(".shtodo/projects").exists());

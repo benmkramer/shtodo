@@ -6,6 +6,9 @@ All notable changes to shtodo are documented in this file.
 
 ### Added
 
+- A labeled TUI trash view with stable task IDs, completion states, newest-first
+  deletion ordering, and selective restoration. Configurable Trash controls
+  appear in the footer and contextual keyboard help.
 - Homebrew installation through `benmkramer/tap/shtodo`, with automatic formula
   updates from the release workflow.
 

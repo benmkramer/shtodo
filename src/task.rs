@@ -119,6 +119,17 @@ impl TaskList {
             .filter(|task| task.deletion_sequence.is_none())
     }
 
+    /// Lists tombstones from most recently deleted to oldest without changing canonical order.
+    pub(crate) fn deleted_tasks(&self) -> Vec<&Task> {
+        let mut deleted = self
+            .tasks
+            .iter()
+            .filter(|task| task.is_deleted())
+            .collect::<Vec<_>>();
+        deleted.sort_unstable_by_key(|task| std::cmp::Reverse(task.deletion_sequence));
+        deleted
+    }
+
     pub(crate) fn task(&self, id: TaskId) -> Option<&Task> {
         self.tasks.iter().find(|task| task.id == id)
     }
@@ -176,6 +187,17 @@ impl TaskList {
         self.tasks[index].deletion_sequence = Some(self.next_deletion_sequence);
         self.next_deletion_sequence = next_deletion_sequence;
         Ok(())
+    }
+
+    /// Clears only the tombstone marker, preserving the task and its canonical position.
+    /// Returns false for an already live task, or TaskNotFound for an unknown ID.
+    pub(crate) fn restore(&mut self, id: TaskId) -> Result<bool, ListError> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or(ListError::TaskNotFound(id))?;
+        Ok(task.deletion_sequence.take().is_some())
     }
 
     pub(crate) fn restore_latest(&mut self) -> Result<Option<TaskId>, ListError> {
@@ -317,7 +339,74 @@ fn project_path_is_absolute(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListScope, MoveDirection, TaskId, TaskList, project_path_is_absolute};
+    use super::{ListError, ListScope, MoveDirection, TaskId, TaskList, project_path_is_absolute};
+
+    #[test]
+    fn deleted_tasks_should_use_deletion_order_without_changing_canonical_order() {
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("same text").unwrap();
+        let second = list.add("same text").unwrap();
+        list.add("live").unwrap();
+        list.delete(second).unwrap();
+        list.delete(first).unwrap();
+        let before = list.clone();
+
+        assert_eq!(
+            list.deleted_tasks()
+                .iter()
+                .map(|task| task.id())
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert_eq!(list, before);
+        list.restore(second).unwrap();
+        list.delete(second).unwrap();
+        assert_eq!(
+            list.deleted_tasks()
+                .iter()
+                .map(|task| task.id())
+                .collect::<Vec<_>>(),
+            vec![second, first]
+        );
+    }
+
+    #[test]
+    fn restore_should_clear_only_the_selected_tombstone_marker() {
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first").unwrap();
+        let second = list.add("done task").unwrap();
+        let third = list.add("third").unwrap();
+        list.toggle_complete(second).unwrap();
+        list.delete(second).unwrap();
+        list.delete(first).unwrap();
+        let mut expected = list.clone();
+        expected.tasks[1].deletion_sequence = None;
+
+        assert_eq!(list.restore(second), Ok(true));
+        assert_eq!(list, expected);
+        assert_eq!(
+            list.visible_tasks()
+                .map(|task| task.id())
+                .collect::<Vec<_>>(),
+            vec![second, third]
+        );
+        assert_eq!(list.restore_latest().unwrap(), Some(first));
+    }
+
+    #[test]
+    fn restore_should_be_idempotent_for_live_tasks_and_reject_unknown_ids() {
+        let mut list = TaskList::new(ListScope::Global);
+        let live = list.add("live").unwrap();
+        let before = list.clone();
+
+        assert_eq!(list.restore(live), Ok(false));
+        assert_eq!(
+            list.restore(TaskId(999)),
+            Err(ListError::TaskNotFound(TaskId(999)))
+        );
+        assert_eq!(list, before);
+        assert!(list.deleted_tasks().is_empty());
+    }
 
     #[test]
     fn task_id_should_accept_only_positive_shell_integers() {

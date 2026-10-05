@@ -11,6 +11,11 @@ move_down = ["j", "down", "ctrl-n"]
 move_up = ["k", "up", "ctrl-p"]
 add_task = ["a"]
 open_help = ["?"]
+open_trash = ["t"]
+
+[keybindings.trash]
+restore_selected = ["r"]
+close_trash = ["t", "esc"]
 
 [keybindings.insert]
 commit_edit = ["enter"]
@@ -51,6 +56,7 @@ same parser and validator without opening task storage or the TUI.
 | `toggle_complete` | `space`      |
 | `delete_task`     | `d`          |
 | `restore_latest`  | `u`          |
+| `open_trash`      | `t`          |
 | `open_help`       | `?`          |
 | `quit`            | `q`          |
 
@@ -77,7 +83,24 @@ same parser and validator without opening task storage or the TUI.
 | ------------ | ------------ |
 | `close_help` | `?`, `esc`   |
 
-`Ctrl-C` is a fixed emergency quit key in all three modes.
+### Trash
+
+| Action             | Default keys |
+| ------------------ | ------------ |
+| `move_down`        | `j`, `down`  |
+| `move_up`          | `k`, `up`    |
+| `restore_selected` | `r`          |
+| `close_trash`      | `t`, `esc`   |
+| `open_help`        | `?`          |
+| `quit`             | `q`          |
+
+Trash bindings are independent of Normal bindings. For example, changing
+Normal `open_trash` does not change Trash `close_trash`; configure both to use
+the same key if desired. Normal navigation, help, and quit overrides do not
+carry into Trash. Duplicate keys conflict within a mode; the same key can be
+used in different modes. Trash help and footer use the resolved Trash keymap.
+
+`Ctrl-C` is a fixed emergency quit key in all four modes.
 
 See [Usage and keyboard controls] for the interaction guide.
 

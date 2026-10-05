@@ -10,6 +10,7 @@ pub(crate) enum Mode {
     Normal,
     Insert,
     Help,
+    Trash,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -206,10 +207,15 @@ impl Celebration {
     }
 }
 
+struct TrashState {
+    selected: Option<TaskId>,
+}
+
 pub(crate) struct App {
     tasks: TaskList,
     mode: Mode,
     selected: Option<TaskId>,
+    trash: Option<TrashState>,
     editor: Option<Editor>,
     message: Option<String>,
     celebration: Option<Celebration>,
@@ -222,6 +228,7 @@ impl App {
             tasks,
             mode: Mode::Normal,
             selected,
+            trash: None,
             editor: None,
             message: None,
             celebration: None,
@@ -233,6 +240,7 @@ impl App {
             Mode::Normal => self.apply_normal(action),
             Mode::Insert => self.apply_insert(action),
             Mode::Help => self.apply_help(action),
+            Mode::Trash => self.apply_trash(action),
         }
     }
 
@@ -241,11 +249,17 @@ impl App {
     }
 
     pub(crate) fn selected(&self) -> Option<TaskId> {
-        self.selected
+        self.trash
+            .as_ref()
+            .map_or(self.selected, |trash| trash.selected)
+    }
+
+    pub(crate) fn is_trash_view(&self) -> bool {
+        self.trash.is_some()
     }
 
     pub(crate) fn selected_task(&self) -> Option<&Task> {
-        self.selected.and_then(|id| self.tasks.task(id))
+        self.selected().and_then(|id| self.tasks.task(id))
     }
 
     pub(crate) fn tasks(&self) -> &TaskList {
@@ -287,6 +301,7 @@ impl App {
                 | Action::ToggleComplete
                 | Action::Delete
                 | Action::RestoreLatest
+                | Action::OpenTrash
                 | Action::OpenHelp
                 | Action::Quit
         ) {
@@ -304,11 +319,98 @@ impl App {
             Action::ToggleComplete => self.toggle_complete()?,
             Action::Delete => self.delete_selected()?,
             Action::RestoreLatest => self.restore_latest()?,
+            Action::OpenTrash => self.open_trash(),
             Action::OpenHelp => self.open_help(),
             Action::Quit => Transition::Quit,
             _ => Transition::Unchanged,
         };
         Ok(Self::after_message_clear(transition, message_was_cleared))
+    }
+
+    fn apply_trash(&mut self, action: Action) -> Result<Transition, ListError> {
+        if !matches!(
+            action,
+            Action::MoveDown
+                | Action::MoveUp
+                | Action::RestoreSelected
+                | Action::CloseTrash
+                | Action::OpenHelp
+                | Action::Quit
+        ) {
+            return Ok(Transition::Unchanged);
+        }
+        let message_was_cleared = self.clear_message();
+        let transition = match action {
+            Action::MoveDown => self.move_trash_selection(MoveDirection::Down),
+            Action::MoveUp => self.move_trash_selection(MoveDirection::Up),
+            Action::RestoreSelected => self.restore_selected()?,
+            Action::CloseTrash => self.close_trash(),
+            Action::OpenHelp => self.open_help(),
+            Action::Quit => Transition::Quit,
+            _ => Transition::Unchanged,
+        };
+        Ok(Self::after_message_clear(transition, message_was_cleared))
+    }
+
+    fn open_trash(&mut self) -> Transition {
+        self.trash = Some(TrashState {
+            selected: self.tasks.deleted_tasks().first().map(|task| task.id()),
+        });
+        self.mode = Mode::Trash;
+        Transition::Transient
+    }
+
+    fn close_trash(&mut self) -> Transition {
+        self.trash = None;
+        self.mode = Mode::Normal;
+        Transition::Transient
+    }
+
+    fn move_trash_selection(&mut self, direction: MoveDirection) -> Transition {
+        let deleted = self.tasks.deleted_tasks();
+        let Some(index) = deleted
+            .iter()
+            .position(|task| Some(task.id()) == self.selected())
+        else {
+            return Transition::Unchanged;
+        };
+        let next = match direction {
+            MoveDirection::Up => index.checked_sub(1),
+            MoveDirection::Down => Some(index + 1),
+        }
+        .and_then(|index| deleted.get(index))
+        .map(|task| task.id());
+        if let (Some(trash), Some(next)) = (&mut self.trash, next) {
+            trash.selected = Some(next);
+            Transition::Transient
+        } else {
+            Transition::Unchanged
+        }
+    }
+
+    fn restore_selected(&mut self) -> Result<Transition, ListError> {
+        let Some(selected) = self.selected() else {
+            self.message = Some("Nothing to restore".into());
+            return Ok(Transition::Transient);
+        };
+        let deleted = self.tasks.deleted_tasks();
+        let next = deleted
+            .iter()
+            .position(|task| task.id() == selected)
+            .and_then(|index| {
+                deleted
+                    .get(index + 1)
+                    .or_else(|| index.checked_sub(1).and_then(|index| deleted.get(index)))
+            })
+            .map(|task| task.id());
+        if !self.tasks.restore(selected)? {
+            return Ok(Transition::Unchanged);
+        }
+        if let Some(trash) = &mut self.trash {
+            trash.selected = next;
+        }
+        self.selected = Some(selected);
+        Ok(Transition::Persisted)
     }
 
     fn apply_insert(&mut self, action: Action) -> Result<Transition, ListError> {
@@ -474,7 +576,7 @@ impl App {
     }
 
     fn open_help(&mut self) -> Transition {
-        if self.mode != Mode::Normal {
+        if !matches!(self.mode, Mode::Normal | Mode::Trash) {
             return Transition::Unchanged;
         }
         self.mode = Mode::Help;
@@ -485,7 +587,11 @@ impl App {
         if self.mode != Mode::Help {
             return Transition::Unchanged;
         }
-        self.mode = Mode::Normal;
+        self.mode = if self.is_trash_view() {
+            Mode::Trash
+        } else {
+            Mode::Normal
+        };
         Transition::Transient
     }
 
@@ -689,6 +795,180 @@ mod tests {
             app.apply(Action::InsertChar(character)).unwrap();
         }
         app
+    }
+
+    #[test]
+    fn trash_should_open_at_newest_and_preserve_normal_selection_on_return() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("live first").unwrap();
+        let live_second = list.add("live second").unwrap();
+        let older = list.add("older").unwrap();
+        let newest = list.add("newest").unwrap();
+        list.delete(older).unwrap();
+        list.delete(newest).unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::MoveDown).unwrap();
+        let before = app.tasks().clone();
+
+        assert_eq!(app.apply(Action::OpenTrash).unwrap(), Transition::Transient);
+        assert_eq!(app.mode(), Mode::Trash);
+        assert_eq!(app.selected(), Some(newest));
+        assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Unchanged);
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Transient);
+        assert_eq!(app.selected(), Some(older));
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Unchanged);
+        assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Transient);
+        assert_eq!(app.selected(), Some(newest));
+        app.apply(Action::CloseTrash).unwrap();
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.selected(), Some(live_second));
+        assert_eq!(app.tasks(), &before);
+    }
+
+    #[test]
+    fn selective_restore_should_stay_in_trash_select_neighbors_and_empty_safely() {
+        let mut list = TaskList::new(ListScope::Global);
+        let oldest = list.add("oldest").unwrap();
+        let middle = list.add("middle").unwrap();
+        let newest = list.add("newest").unwrap();
+        for id in [oldest, middle, newest] {
+            list.delete(id).unwrap();
+        }
+        let mut app = App::new(list);
+        app.apply(Action::OpenTrash).unwrap();
+        app.apply(Action::MoveDown).unwrap();
+
+        assert_eq!(
+            app.apply(Action::RestoreSelected).unwrap(),
+            Transition::Persisted
+        );
+        assert_eq!(app.selected(), Some(oldest));
+        assert_eq!(app.mode(), Mode::Trash);
+        assert_eq!(
+            app.apply(Action::RestoreSelected).unwrap(),
+            Transition::Persisted
+        );
+        assert_eq!(app.selected(), Some(newest));
+        assert_eq!(
+            app.apply(Action::RestoreSelected).unwrap(),
+            Transition::Persisted
+        );
+        assert_eq!(app.selected(), None);
+        assert_eq!(app.mode(), Mode::Trash);
+        assert_eq!(
+            app.apply(Action::RestoreSelected).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.message(), Some("Nothing to restore"));
+        app.apply(Action::CloseTrash).unwrap();
+        assert_eq!(app.selected(), Some(newest));
+        assert_eq!(app.message(), None);
+        assert_eq!(
+            app.tasks()
+                .visible_tasks()
+                .map(|task| task.id())
+                .collect::<Vec<_>>(),
+            vec![oldest, middle, newest]
+        );
+        assert_eq!(app.celebration(), None);
+    }
+
+    #[test]
+    fn empty_trash_should_allow_navigation_help_and_return_without_saving() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenTrash).unwrap();
+        assert_eq!(app.selected(), None);
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Unchanged);
+        assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Unchanged);
+        assert_eq!(
+            app.apply(Action::RestoreSelected).unwrap(),
+            Transition::Transient
+        );
+        app.apply(Action::OpenHelp).unwrap();
+        app.apply(Action::CloseHelp).unwrap();
+        assert_eq!(app.mode(), Mode::Trash);
+        app.apply(Action::CloseTrash).unwrap();
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.selected(), None);
+    }
+
+    #[test]
+    fn trash_should_block_all_normal_mutations_and_editor_actions() {
+        let mut list = TaskList::new(ListScope::Global);
+        let id = list.add("deleted").unwrap();
+        list.delete(id).unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::OpenTrash).unwrap();
+        let before = app.tasks().clone();
+        for action in [
+            Action::StartAdd,
+            Action::StartEdit,
+            Action::ToggleComplete,
+            Action::Delete,
+            Action::MoveTaskDown,
+            Action::MoveTaskUp,
+            Action::RestoreLatest,
+            Action::InsertChar('x'),
+            Action::CommitEdit,
+            Action::CancelEdit,
+            Action::OpenTrash,
+        ] {
+            assert_eq!(
+                app.apply(action).unwrap(),
+                Transition::Unchanged,
+                "unexpected trash action: {action:?}"
+            );
+        }
+        assert_eq!(app.tasks(), &before);
+        assert_eq!(app.mode(), Mode::Trash);
+        assert!(app.editor().is_none());
+        assert_eq!(app.selected(), Some(id));
+        assert_eq!(app.apply(Action::Quit).unwrap(), Transition::Quit);
+    }
+
+    #[test]
+    fn help_from_trash_should_preserve_selection_and_block_restoration_until_closed() {
+        let mut list = TaskList::new(ListScope::Global);
+        let older = list.add("older").unwrap();
+        let newer = list.add("newer").unwrap();
+        list.delete(older).unwrap();
+        list.delete(newer).unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::OpenTrash).unwrap();
+        app.apply(Action::MoveDown).unwrap();
+        app.apply(Action::OpenHelp).unwrap();
+        assert!(app.is_trash_view());
+        for action in [
+            Action::RestoreSelected,
+            Action::CloseTrash,
+            Action::MoveDown,
+        ] {
+            assert_eq!(app.apply(action).unwrap(), Transition::Unchanged);
+        }
+        app.apply(Action::CloseHelp).unwrap();
+        assert_eq!(app.mode(), Mode::Trash);
+        assert_eq!(app.selected(), Some(older));
+        app.apply(Action::RestoreSelected).unwrap();
+        assert!(!app.tasks().task(older).unwrap().is_deleted());
+        assert!(app.tasks().task(newer).unwrap().is_deleted());
+    }
+
+    #[test]
+    fn trash_actions_should_not_leak_into_normal_or_insert_modes() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        for action in [Action::RestoreSelected, Action::CloseTrash] {
+            assert_eq!(app.apply(action).unwrap(), Transition::Unchanged);
+        }
+        app.apply(Action::StartAdd).unwrap();
+        for action in [
+            Action::OpenTrash,
+            Action::RestoreSelected,
+            Action::CloseTrash,
+        ] {
+            assert_eq!(app.apply(action).unwrap(), Transition::Unchanged);
+        }
+        assert_eq!(app.mode(), Mode::Insert);
+        assert!(!app.is_trash_view());
     }
 
     #[test]

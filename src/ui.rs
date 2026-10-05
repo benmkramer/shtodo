@@ -74,7 +74,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
     render_content(frame, regions[1], app, keymap);
     render_footer(frame, regions[2], app, keymap);
     if app.mode() == Mode::Help {
-        render_help(frame, regions[1], keymap);
+        render_help(frame, regions[1], keymap, app.is_trash_view());
     }
 }
 
@@ -164,7 +164,11 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
         .filter(|task| !task.completed())
         .count();
     let done_count = visible_tasks.len() - open_count;
-    let counts = format!("{open_count} open · {done_count} done");
+    let counts = if app.is_trash_view() {
+        format!("{} deleted", app.tasks().deleted_tasks().len())
+    } else {
+        format!("{open_count} open · {done_count} done")
+    };
     let columns = Layout::horizontal([
         Constraint::Min(1),
         Constraint::Length(counts.chars().count() as u16),
@@ -179,7 +183,11 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(" {scope}")),
+        Span::raw(if app.is_trash_view() {
+            format!(" TRASH · {scope} · newest first")
+        } else {
+            format!(" {scope}")
+        }),
     ]);
 
     frame.render_widget(Paragraph::new(title), columns[0]);
@@ -190,6 +198,10 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
 }
 
 fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, keymap: &Keymap) {
+    if app.is_trash_view() {
+        render_trash_content(frame, area, app, keymap);
+        return;
+    }
     let visible_tasks = app.tasks().visible_tasks().collect::<Vec<_>>();
     let editor = app.editor();
     if visible_tasks.is_empty() && editor.is_none() {
@@ -199,6 +211,9 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
             binding_label(keymap, Mode::Normal, BindingId::OpenHelp),
         ) {
             text.push_str(&format!("\nPress {add} to add · {help} for help"));
+        }
+        if let Some(trash) = binding_label(keymap, Mode::Normal, BindingId::OpenTrash) {
+            text.push_str(&format!("\nPress {trash} to browse trash"));
         }
         frame.render_widget(Paragraph::new(text), area);
         return;
@@ -245,6 +260,33 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
     }
 }
 
+fn render_trash_content(frame: &mut Frame<'_>, area: Rect, app: &App, keymap: &Keymap) {
+    let deleted = app.tasks().deleted_tasks();
+    if deleted.is_empty() {
+        let mut text = "Trash is empty".to_owned();
+        if let Some(close) = binding_label(keymap, Mode::Trash, BindingId::CloseTrash) {
+            text.push_str(&format!("\nPress {close} to return to the list"));
+        }
+        frame.render_widget(Paragraph::new(text), area);
+        return;
+    }
+    let selected = deleted
+        .iter()
+        .position(|task| Some(task.id()) == app.selected());
+    let items = deleted
+        .iter()
+        .map(|task| {
+            let state = if task.completed() { "done" } else { "open" };
+            ListItem::new(format!("{}  {state}  {}", task.id().get(), task.text()))
+        })
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .highlight_symbol("› ")
+        .highlight_style(Style::default().bg(Color::DarkGray));
+    let mut state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
 fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, keymap: &Keymap) {
     let mut bindings = keymap
         .bindings_for(app.mode())
@@ -266,15 +308,25 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
     frame.render_widget(Paragraph::new(text), area);
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap) {
-    let block = Block::bordered().title("Keyboard help");
+fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) {
+    let block = Block::bordered().title(if trash {
+        "Keyboard help: Trash"
+    } else {
+        "Keyboard help"
+    });
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let normal = help_lines(keymap, Mode::Normal);
-    let mut insert_and_help = help_lines(keymap, Mode::Insert);
-    insert_and_help.push(Line::default());
+    let normal = help_lines(keymap, if trash { Mode::Trash } else { Mode::Normal });
+    let mut insert_and_help = if trash {
+        Vec::new()
+    } else {
+        help_lines(keymap, Mode::Insert)
+    };
+    if !trash {
+        insert_and_help.push(Line::default());
+    }
     insert_and_help.extend(help_lines(keymap, Mode::Help));
     if let Some(normal_width) = help_column_width(&normal, &insert_and_help, inner) {
         let columns =
@@ -373,6 +425,7 @@ fn mode_name(mode: Mode) -> &'static str {
         Mode::Normal => "Normal",
         Mode::Insert => "Insert",
         Mode::Help => "Help",
+        Mode::Trash => "Trash",
     }
 }
 
@@ -427,6 +480,7 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Normal => "NORMAL",
         Mode::Insert => "INSERT",
         Mode::Help => "HELP",
+        Mode::Trash => "TRASH",
     }
 }
 
@@ -468,6 +522,7 @@ mod tests {
                     crate::app::Mode::Normal => "normal",
                     crate::app::Mode::Insert => "insert",
                     crate::app::Mode::Help => "help",
+                    crate::app::Mode::Trash => "trash",
                 },
                 id.config_name().unwrap()
             ),
@@ -497,6 +552,98 @@ mod tests {
         assert!(text.contains("i add"));
         assert!(text.contains("? help"));
         assert!(text.contains("NORMAL"));
+        assert!(text.contains("Press t to browse trash"));
+    }
+
+    #[test]
+    fn trash_should_render_label_scope_ids_states_and_newest_first() {
+        let mut tasks = TaskList::new(ListScope::Global);
+        let oldest = tasks.add("same text").unwrap();
+        let newest = tasks.add("same text").unwrap();
+        tasks.add("live task").unwrap();
+        tasks.toggle_complete(newest).unwrap();
+        tasks.delete(oldest).unwrap();
+        tasks.delete(newest).unwrap();
+        let mut app = App::new(tasks);
+        app.apply(Action::OpenTrash).unwrap();
+
+        let buffer = render_app(&app, 80, 12);
+        assert!(buffer_row(&buffer, 80, 0).contains("TRASH · global · newest first"));
+        assert!(buffer_row(&buffer, 80, 0).contains("2 deleted"));
+        assert!(buffer_row(&buffer, 80, 1).contains("› 2  done  same text"));
+        assert!(buffer_row(&buffer, 80, 2).contains("1  open  same text"));
+        assert!(!buffer_text(&buffer).contains("live task"));
+        assert_eq!(buffer[(0, 1)].bg, ratatui::style::Color::DarkGray);
+    }
+
+    #[test]
+    fn empty_trash_should_use_custom_close_hint_and_prioritize_restore_and_return() {
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::CloseTrash, &["b", "esc"]),
+            override_for(BindingId::RestoreSelected, &["x"]),
+        ])
+        .unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenTrash).unwrap();
+        let buffer = render_app_with_keymap(&app, &keymap, 40, 8);
+
+        assert!(buffer_text(&buffer).contains("Trash is empty"));
+        assert!(buffer_text(&buffer).contains("Press b to return to the list"));
+        let footer = buffer_row(&buffer, 40, 7);
+        assert!(footer.contains("TRASH  x restore task · b close trash"));
+        assert!(!buffer_text(&buffer).contains("add task"));
+    }
+
+    #[test]
+    fn trash_help_should_use_its_keymap_and_exclude_normal_mutation_hints() {
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::RestoreSelected, &["enter", "x"]),
+            override_for(BindingId::CloseTrash, &["b", "esc"]),
+            override_for(BindingId::TrashMoveDown, &["n", "down"]),
+        ])
+        .unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenTrash).unwrap();
+        app.apply(Action::OpenHelp).unwrap();
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+
+        for hint in [
+            "Keyboard help: Trash",
+            "Enter / x restore task",
+            "b / Esc close trash",
+            "n / Down move down",
+            "q / Ctrl-C quit",
+            "? / Esc close help",
+        ] {
+            assert!(text.contains(hint), "missing help hint: {hint}");
+        }
+        for hint in [
+            "add task",
+            "edit task",
+            "toggle complete",
+            "delete task",
+            "move task down",
+            "restore latest",
+        ] {
+            assert!(!text.contains(hint), "inactive trash hint: {hint}");
+        }
+    }
+
+    #[test]
+    fn selected_trash_row_should_stay_visible_when_scrolling() {
+        let mut tasks = TaskList::new(ListScope::Global);
+        for index in 0..20 {
+            let id = tasks.add(&format!("deleted {index}")).unwrap();
+            tasks.delete(id).unwrap();
+        }
+        let mut app = App::new(tasks);
+        app.apply(Action::OpenTrash).unwrap();
+        for _ in 0..19 {
+            app.apply(Action::MoveDown).unwrap();
+        }
+        let text = buffer_text(&render_app(&app, 40, 8));
+        assert!(text.contains("› 1  open  deleted 0"));
+        assert!(!text.contains("20  open  deleted 19"));
     }
 
     #[test]
@@ -740,6 +887,7 @@ mod tests {
             "Space toggle complete",
             "d delete task",
             "u restore latest",
+            "t show trash",
             "? show help",
             "q / Ctrl-C quit",
             "Insert",

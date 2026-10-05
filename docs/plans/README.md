@@ -9,6 +9,7 @@ specified verification gates, and update its status only after completion.
 | Plan | Title | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- | --- |
 | [001](./001-agent-shell-interface.md) | Add an agent-friendly list and soft-delete shell interface | P1 | M | none | DONE |
+| [004](./004-browsable-trash.md) | Add browsable TUI trash and selective restoration | P1 | M | 001 | DONE |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a short reason, or REJECTED
 with a short rationale.
@@ -16,6 +17,8 @@ with a short rationale.
 ## Dependency notes
 
 - Plan 001 has no dependencies.
+- Feature 004 uses the existing persisted tombstones and scope-local IDs. Its
+  record includes the shared restoration contract and parallel integration notes.
 
 ## Completed historical plans
 

@@ -63,12 +63,13 @@ a list for the exact directory from which it is run.
 
 `shtodo list` prints each non-deleted task's scope-local ID, state, and text.
 `shtodo delete <ID>` recoverably deletes one task from the selected scope, so
-the TUI's `u` action can restore it.
+the TUI's `u` action can restore the latest deletion, or `t` can open trash
+to choose a specific task to restore.
 
 The essentials are:
 
 ```text
-i add · e edit · Space complete · d delete · u restore · ? help · q quit
+i add · e edit · Space complete · d delete · u restore latest · t trash · ? help · q quit
 ```
 
 See [Usage and keyboard controls] for the full interaction guide.

@@ -57,14 +57,15 @@ snapshot:
 Already deleted 3: Fix the bug
 ```
 
-Deleted tasks retain their tombstones and can be restored with `u` in the TUI.
+Deleted tasks retain their tombstones and can be restored with `u` in the TUI,
+or selected individually in the trash view opened with `t`.
 An unknown ID fails with `task 3 was not found`. Missing, zero, signed,
 nonnumeric, and extra IDs are usage errors. Deletion uses the selected scope's
 writer lock and atomic save path, so it fails if another writer holds that
 lock. Invalid keybinding configuration does not block either shell command.
 
-The interface has Normal, Insert, and Help modes. Add or edit tasks in Insert
-mode, then press Enter to save. Task text is trimmed, must be non-empty and
+The interface has Normal, Insert, Help, and Trash modes. Add or edit tasks in
+Insert mode, then press Enter to save. Task text is trimmed, must be non-empty and
 single-line, and Escape cancels an uncommitted add or edit. A terminal smaller
 than 40 columns by 8 rows displays a resize message until it is large enough.
 Pressing Enter with blank or all-whitespace text keeps the editor in Insert
@@ -85,6 +86,7 @@ mode, saves nothing, and shows `Task text cannot be empty`.
 | Space         | Toggle the selected task complete or incomplete |
 | `d`           | Delete the selected task                        |
 | `u`           | Restore the most recently deleted task          |
+| `t`           | Open trash for the current scope                |
 | `?`           | Open keyboard help                              |
 | `q` or Ctrl-C | Quit                                            |
 
@@ -112,10 +114,49 @@ Alt-b and Alt-f aliases above.
 
 ### Help mode
 
+Help shows the current view's bindings. From the normal list it also shows
+Insert controls; from trash it shows Trash controls. Closing help returns to
+the view and selection from which it was opened.
+
 | Key        | Action              |
 | ---------- | ------------------- |
 | `?` or Esc | Close keyboard help |
 | Ctrl-C     | Quit                |
+
+### Trash mode
+
+Press `t` from the normal list to browse deleted tasks in the current global
+or exact-directory scope. The header and footer label this view `TRASH`.
+Rows show each task's stable scope-local ID, `open` or `done` completion
+state, and text, including tasks deleted with the shell `delete` command.
+Trash is ordered by persisted `deletion_sequence`, most recently deleted
+first, and opens with the newest deletion selected. No timestamps are added.
+
+| Key           | Action                         |
+| ------------- | ------------------------------ |
+| `j` or Down   | Select the next older deletion |
+| `k` or Up     | Select the next newer deletion |
+| `r`           | Restore the selected task      |
+| `t` or Esc    | Return to the normal list      |
+| `?`           | Open trash keyboard help       |
+| `q` or Ctrl-C | Quit                           |
+
+Restoration saves immediately and leaves trash open. Selection moves to the
+next older deletion, or to the preceding newer deletion if there is no older
+one. Restoring the final tombstone clears selection and shows `Trash is empty`.
+Pressing `r` in empty trash shows `Nothing to restore` without saving.
+Navigation stops at either end of the list.
+
+Returning to the normal list selects the last task restored during that visit.
+If nothing was restored, it preserves the prior normal-list selection.
+Reopening trash starts again at the newest remaining deletion. Restoration
+only clears the deletion marker; text, completion, ID, and canonical position
+are preserved. The normal list's `u` still restores the latest remaining
+deletion, including after a restart.
+
+Normal mutation keys (`i`, `e`, Space, `d`, `J`, `K`, and `u`) are inactive
+in trash. Tombstones cannot be edited, completed, reordered, or permanently
+removed from this view. Browse and help actions never save the snapshot.
 
 To change these controls, see [Configuring keybindings].
 
@@ -131,8 +172,8 @@ Changes are saved immediately after a successful add, edit, completion toggle,
 reorder, deletion, or restoration. Snapshots are written through a temporary
 file and atomically replace the previous canonical snapshot. Deletions are
 tombstones rather than immediate erasure, so `u` restores the latest deleted
-task even after quitting and relaunching. If no tombstone is available, `u`
-shows `Nothing to restore` and leaves the snapshot unchanged.
+task and `t` lists deletions for selective restoration, even after quitting
+and relaunching. If no tombstone is available, `u` shows `Nothing to restore` and leaves the snapshot unchanged.
 
 Each list scope has its own process lock. A second `shtodo` process for the
 same global or local list is rejected while the first holds the lock; a global
@@ -146,14 +187,14 @@ different local-list identity, even if its name is unchanged. The read-only
 Version one is intentionally local and narrow. It does not include accounts,
 synchronization, network access, sharing or collaboration, recurring tasks,
 reminders, notifications, dates or due dates, priorities, tags, or multiple
-named lists. It has no trash view, sidebar, mouse interaction, Git-root
+named lists. It has no sidebar, mouse interaction, Git-root
 discovery for local scope, runtime plugins or extensions, custom themes,
 search, filtering, import, export, structured JSON output, bulk commands,
-permanent deletion, or additional task-management modes.
+permanent deletion, or bulk restoration.
 
-The following work is explicitly deferred: a trash view that lists, restores,
-and permanently removes tombstones; a sidebar for global, project, trash, and
-later views. Editing is scalar-value-based, so grapheme-cluster-aware editing
+The following work is explicitly deferred: permanent deletion and automatic
+purging of tombstones; a sidebar for global, project, trash, and later views.
+Editing is scalar-value-based, so grapheme-cluster-aware editing
 is deferred if it becomes necessary. Homebrew and other package-manager
 distribution, plus broader Windows runtime testing and support, are also
 deferred. Windows is kept build-compatible where practical, but full Windows
