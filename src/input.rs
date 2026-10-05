@@ -15,6 +15,9 @@ pub(crate) enum BindingId {
     ToggleComplete,
     Delete,
     RestoreLatest,
+    StartSearch,
+    CycleView,
+    ClearSearch,
     OpenHelp,
     NormalQuit,
     MoveCursorLeft,
@@ -46,6 +49,9 @@ impl BindingId {
             (Mode::Normal, "toggle_complete") => Self::ToggleComplete,
             (Mode::Normal, "delete_task") => Self::Delete,
             (Mode::Normal, "restore_latest") => Self::RestoreLatest,
+            (Mode::Normal, "start_search") => Self::StartSearch,
+            (Mode::Normal, "cycle_view") => Self::CycleView,
+            (Mode::Normal, "clear_search") => Self::ClearSearch,
             (Mode::Normal, "open_help") => Self::OpenHelp,
             (Mode::Normal, "quit") => Self::NormalQuit,
             (Mode::Insert, "move_cursor_left") => Self::MoveCursorLeft,
@@ -76,6 +82,9 @@ impl BindingId {
             Self::ToggleComplete => Some("toggle_complete"),
             Self::Delete => Some("delete_task"),
             Self::RestoreLatest => Some("restore_latest"),
+            Self::StartSearch => Some("start_search"),
+            Self::CycleView => Some("cycle_view"),
+            Self::ClearSearch => Some("clear_search"),
             Self::OpenHelp => Some("open_help"),
             Self::NormalQuit => Some("quit"),
             Self::MoveCursorLeft => Some("move_cursor_left"),
@@ -106,6 +115,9 @@ impl BindingId {
             | Self::ToggleComplete
             | Self::Delete
             | Self::RestoreLatest
+            | Self::StartSearch
+            | Self::CycleView
+            | Self::ClearSearch
             | Self::OpenHelp
             | Self::NormalQuit => Mode::Normal,
             Self::MoveCursorLeft
@@ -566,6 +578,30 @@ static DEFINITIONS: &[Definition] = &[
         defaults: &[],
         fixed: &[chord(KeyCode::Char('c'), KeyModifiers::CONTROL)],
     },
+    Definition {
+        id: BindingId::StartSearch,
+        action: Action::StartSearch,
+        description: "search",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Char('/'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::CycleView,
+        action: Action::CycleView,
+        description: "cycle All/Open/Done",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Char('f'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::ClearSearch,
+        action: Action::ClearSearch,
+        description: "clear search",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Esc, KeyModifiers::NONE)],
+        fixed: &[],
+    },
 ];
 
 impl Keymap {
@@ -682,7 +718,7 @@ impl Keymap {
         }
         match (mode, chord) {
             (
-                Mode::Insert,
+                Mode::Insert | Mode::Search,
                 KeyChord {
                     code: KeyCode::Char(character),
                     modifiers,
@@ -693,6 +729,12 @@ impl Keymap {
     }
 
     pub(crate) fn bindings_for(&self, mode: Mode) -> impl Iterator<Item = &ResolvedBinding> {
+        // Search shares the configurable text editor, including commit/cancel and Ctrl-C.
+        let mode = if mode == Mode::Search {
+            Mode::Insert
+        } else {
+            mode
+        };
         self.bindings
             .iter()
             .filter(move |binding| binding.mode == mode)
@@ -752,6 +794,9 @@ fn definition_index(id: BindingId) -> usize {
         BindingId::InsertEmergencyQuit => 23,
         BindingId::CloseHelp => 24,
         BindingId::HelpEmergencyQuit => 25,
+        BindingId::StartSearch => 26,
+        BindingId::CycleView => 27,
+        BindingId::ClearSearch => 28,
     }
 }
 fn issue(override_: &BindingOverride, message: impl Into<String>) -> KeymapIssue {
@@ -1139,8 +1184,8 @@ mod tests {
     #[test]
     fn keymap_should_expose_configurable_and_active_binding_counts() {
         let keymap = Keymap::defaults();
-        assert_eq!(keymap.configurable_action_count(), 24);
-        assert_eq!(keymap.active_binding_count(), 33);
+        assert_eq!(keymap.configurable_action_count(), 27);
+        assert_eq!(keymap.active_binding_count(), 36);
         assert_eq!(
             BindingId::from_config(Mode::Normal, "move_down"),
             Some(BindingId::MoveDown)
@@ -1177,5 +1222,119 @@ mod tests {
             keymap.map_key(Mode::Insert, pressed(KeyCode::Char('x'), KeyModifiers::ALT)),
             None
         );
+    }
+
+    #[test]
+    fn search_view_and_clear_defaults_should_leave_trash_keys_available() {
+        let keymap = Keymap::defaults();
+        for (code, action) in [
+            (KeyCode::Char('/'), Action::StartSearch),
+            (KeyCode::Char('f'), Action::CycleView),
+            (KeyCode::Esc, Action::ClearSearch),
+        ] {
+            assert_eq!(
+                keymap.map_key(Mode::Normal, pressed(code, KeyModifiers::NONE)),
+                Some(action)
+            );
+        }
+        for character in ['t', 'r'] {
+            assert_eq!(
+                keymap.map_key(
+                    Mode::Normal,
+                    pressed(KeyCode::Char(character), KeyModifiers::NONE)
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn search_should_share_configured_editor_keys_and_treat_normal_keys_as_text() {
+        let keymap = Keymap::with_overrides(&[
+            BindingOverride {
+                order: 0,
+                path: "keybindings.insert.commit_edit".into(),
+                id: BindingId::CommitEdit,
+                keys: vec!["ctrl-s".into()],
+            },
+            BindingOverride {
+                order: 1,
+                path: "keybindings.insert.cancel_edit".into(),
+                id: BindingId::CancelEdit,
+                keys: vec!["ctrl-g".into()],
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Search,
+                pressed(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::CommitEdit)
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Search,
+                pressed(KeyCode::Char('g'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::CancelEdit)
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Search, pressed(KeyCode::Enter, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Search, pressed(KeyCode::Esc, KeyModifiers::NONE)),
+            None
+        );
+        for character in ['q', 'f', '/', 'j', 't', 'r', 'é', ' '] {
+            assert_eq!(
+                keymap.map_key(
+                    Mode::Search,
+                    pressed(KeyCode::Char(character), KeyModifiers::NONE)
+                ),
+                Some(Action::InsertChar(character))
+            );
+        }
+        assert_eq!(
+            keymap.map_key(
+                Mode::Search,
+                pressed(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn search_actions_should_support_overrides_and_detect_existing_key_conflicts() {
+        let keymap = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.cycle_view".into(),
+            id: BindingId::CycleView,
+            keys: vec!["v".into(), "ctrl-v".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('v'), KeyModifiers::NONE)
+            ),
+            Some(Action::CycleView)
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('f'), KeyModifiers::NONE)
+            ),
+            None
+        );
+        let issues = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.start_search".into(),
+            id: BindingId::StartSearch,
+            keys: vec!["f".into()],
+        }])
+        .unwrap_err();
+        assert_eq!(issues[0].message, "\"f\" conflicts with cycle_view");
     }
 }

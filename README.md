@@ -68,7 +68,8 @@ the TUI's `u` action can restore it.
 The essentials are:
 
 ```text
-i add · e edit · Space complete · d delete · u restore · ? help · q quit
+i add · e edit · Space complete · d delete · u restore
+/ search · f view · ? help · q quit
 ```
 
 See [Usage and keyboard controls] for the full interaction guide.
@@ -85,8 +86,8 @@ See [Usage and keyboard controls] for the full interaction guide.
 
 Version one is intentionally local and narrow. It does not include accounts,
 synchronization, sharing, recurring tasks, reminders, dates, priorities, tags,
-search, or multiple named lists. See [Version-one limits] for the complete
-scope and deferred features.
+or multiple named lists. The TUI supports text search and All/Open/Done views.
+See [Version-one limits] for the complete scope and deferred features.
 
 See [Benchmarks and CLI comparison] for selected command latencies and feature
 differences. `shtodo`'s narrow scope matters when interpreting those

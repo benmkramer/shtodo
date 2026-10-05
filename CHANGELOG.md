@@ -6,6 +6,10 @@ All notable changes to shtodo are documented in this file.
 
 ### Added
 
+- Transient TUI text search with `/` and All/Open/Done views with `f`, with
+  configurable controls and matching counts. Search composes with status views;
+  navigation and task actions preserve identity, and filtered reordering leaves
+  hidden rows in place.
 - Homebrew installation through `benmkramer/tap/shtodo`, with automatic formula
   updates from the release workflow.
 

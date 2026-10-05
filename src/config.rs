@@ -306,6 +306,7 @@ fn mode_name(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "normal",
         Mode::Insert => "insert",
+        Mode::Search => "insert",
         Mode::Help => "help",
     }
 }
@@ -387,8 +388,8 @@ mod tests {
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::Defaults);
-        assert_eq!(loaded.keymap().configurable_action_count(), 24);
-        assert_eq!(loaded.keymap().active_binding_count(), 33);
+        assert_eq!(loaded.keymap().configurable_action_count(), 27);
+        assert_eq!(loaded.keymap().active_binding_count(), 36);
         assert!(!home.path().join(".shtodo").exists());
     }
 
@@ -404,7 +405,7 @@ move_down = ["x", "ctrl-n"]
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::File);
-        assert_eq!(loaded.keymap().active_binding_count(), 33);
+        assert_eq!(loaded.keymap().active_binding_count(), 36);
         assert_eq!(
             labels_for(loaded.keymap(), BindingId::MoveDown),
             vec!["x", "Ctrl-n"]
@@ -612,5 +613,35 @@ add_task = ["j"]
         let expected = home.join(".shtodo").join("config.toml");
 
         assert_eq!(super::config_path(home).as_os_str(), expected.as_os_str());
+    }
+
+    #[test]
+    fn load_should_resolve_search_and_view_actions_and_shared_editor_keys() {
+        let home = configured_home(
+            r#"
+[keybindings.normal]
+start_search = ["s"]
+cycle_view = ["v"]
+clear_search = ["ctrl-g"]
+[keybindings.insert]
+commit_edit = ["ctrl-s"]
+"#,
+        );
+        let loaded = load(home.path()).unwrap();
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::StartSearch),
+            vec!["s"]
+        );
+        assert_eq!(labels_for(loaded.keymap(), BindingId::CycleView), vec!["v"]);
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::ClearSearch),
+            vec!["Ctrl-g"]
+        );
+        let commit = loaded
+            .keymap()
+            .bindings_for(crate::app::Mode::Search)
+            .find(|binding| binding.id() == BindingId::CommitEdit)
+            .unwrap();
+        assert_eq!(commit.preferred_label(), "Ctrl-s");
     }
 }

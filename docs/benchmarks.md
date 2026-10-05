@@ -11,9 +11,10 @@ are included so the measurements can be inspected and repeated.
 
 **`shtodo` is deliberately simpler than the other tools in this comparison.**
 Today it offers a keyboard TUI for a checklist, global and per-directory lists,
-manual ordering, configurable keys, and recoverable deletion. Its shell task
-commands are limited to add, list, and delete; editing, completion, and recovery
-use the TUI. It has no search/filtering, priorities, tags, scheduling, recurrence,
+manual ordering, configurable keys, recoverable deletion, and transient TUI
+text search with All/Open/Done views. Its shell task commands are limited to
+add, list, and delete; editing, completion, and recovery use the TUI. Shell
+listing remains unfiltered. It has no priorities, tags, scheduling, recurrence,
 sync, supported import/export, or structured JSON output. See the
 [current scope](./usage.md#version-one-limits) and
 [feature comparison](#feature-comparison).
@@ -403,6 +404,8 @@ code 1 only for empty lists, with a separate content check.
 This is a documented-capability comparison, not a usability study. The tested
 versions are `shtodo 0.1.0-beta.2`, Taskwarrior 3.5.0, todo.txt CLI 2.14.0,
 Taskbook 0.3.0, and topydo 0.16. TUI behavior is described but not timed.
+The recorded `shtodo` binary predates TUI search and status views; those are
+available in the current checkout and are not measured by these samples.
 
 | Capability | shtodo | Taskwarrior | todo.txt CLI |
 | --- | --- | --- | --- |

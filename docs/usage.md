@@ -63,8 +63,8 @@ nonnumeric, and extra IDs are usage errors. Deletion uses the selected scope's
 writer lock and atomic save path, so it fails if another writer holds that
 lock. Invalid keybinding configuration does not block either shell command.
 
-The interface has Normal, Insert, and Help modes. Add or edit tasks in Insert
-mode, then press Enter to save. Task text is trimmed, must be non-empty and
+The interface has Normal, Insert, Search, and Help modes. Add or edit tasks in
+Insert mode, then press Enter to save. Task text is trimmed, must be non-empty and
 single-line, and Escape cancels an uncommitted add or edit. A terminal smaller
 than 40 columns by 8 rows displays a resize message until it is large enough.
 Pressing Enter with blank or all-whitespace text keeps the editor in Insert
@@ -85,6 +85,9 @@ mode, saves nothing, and shows `Task text cannot be empty`.
 | Space         | Toggle the selected task complete or incomplete |
 | `d`           | Delete the selected task                        |
 | `u`           | Restore the most recently deleted task          |
+| `/`           | Enter or refine text search                     |
+| `f`           | Cycle All, Open, and Done views                  |
+| Esc           | Clear the accepted search, keeping the view     |
 | `?`           | Open keyboard help                              |
 | `q` or Ctrl-C | Quit                                            |
 
@@ -119,6 +122,44 @@ Alt-b and Alt-f aliases above.
 
 To change these controls, see [Configuring keybindings].
 
+## Search and task views
+
+Each TUI session starts in All with an empty search. Press `f` to cycle All,
+Open, Done, then All again. Press `/` to edit the current query. Matches update
+as you type and combine with the active view. Search uses a literal substring
+of task text after Unicode lowercasing; spaces and punctuation are literal,
+and there are no regular expressions, accent normalization, or tags.
+
+Search mode uses the same text editing bindings as Insert mode. Enter accepts
+the query and returns to the list, including an empty query. Escape cancels
+search editing and restores the previous query and selected task. From Normal
+mode, Escape clears an accepted query while keeping Open/Done filtering. `q`,
+`f`, `/`, and Space are text while editing a query; Ctrl-C still quits. All of
+these keys follow the configured bindings described in [Configuring keybindings].
+
+The status line shows the active view, matching count, and `/query`, including
+an empty query. The header's open/done counts cover all non-deleted tasks in
+the scope. An empty list shows `No tasks yet`; a populated list whose current
+view/search matches nothing shows `No matching tasks`. Search and view changes
+are transient, do not save anything, and do not affect `shtodo list` output.
+
+Matching tasks retain their manual, canonical order. Navigation and task
+actions operate on those same rows. Selection keeps its task identity while
+that task still matches. If completion, reopening, editing, or a view change
+hides it, selection moves to the next matching task in canonical order, then
+the previous one. Deletion also selects the next match, then the previous one.
+No matches means no selected task, so navigation, reordering, editing,
+completion, and deletion safely do nothing.
+
+`J`/`K` swap the selected task with its next/previous matching neighbor in
+their existing canonical slots. Hidden tasks and tombstones stay in their
+slots. This preserves manual ordering without shifting hidden rows. A new or
+restored task is selected if it matches; otherwise the current selection is
+kept and a message explains that the task is hidden by the view/search. `u`
+still restores the most recently deleted task even if it will be hidden.
+The completion celebration occurs only when the final actual open task is
+completed, including open tasks hidden by search.
+
 ## Storage and project lists
 
 The global list is stored at `~/.shtodo/global/tasks.json`. A local list is
@@ -148,7 +189,7 @@ synchronization, network access, sharing or collaboration, recurring tasks,
 reminders, notifications, dates or due dates, priorities, tags, or multiple
 named lists. It has no trash view, sidebar, mouse interaction, Git-root
 discovery for local scope, runtime plugins or extensions, custom themes,
-search, filtering, import, export, structured JSON output, bulk commands,
+shell search or filters, import, export, structured JSON output, bulk commands,
 permanent deletion, or additional task-management modes.
 
 The following work is explicitly deferred: a trash view that lists, restores,

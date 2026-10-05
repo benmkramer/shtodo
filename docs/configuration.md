@@ -10,6 +10,9 @@ their defaults.
 move_down = ["j", "down", "ctrl-n"]
 move_up = ["k", "up", "ctrl-p"]
 add_task = ["a"]
+start_search = ["/"]
+cycle_view = ["f"]
+clear_search = ["esc"]
 open_help = ["?"]
 
 [keybindings.insert]
@@ -51,6 +54,9 @@ same parser and validator without opening task storage or the TUI.
 | `toggle_complete` | `space`      |
 | `delete_task`     | `d`          |
 | `restore_latest`  | `u`          |
+| `start_search`    | `/`          |
+| `cycle_view`      | `f`          |
+| `clear_search`    | `esc`        |
 | `open_help`       | `?`          |
 | `quit`            | `q`          |
 
@@ -77,7 +83,20 @@ same parser and validator without opening task storage or the TUI.
 | ------------ | ------------ |
 | `close_help` | `?`, `esc`   |
 
-`Ctrl-C` is a fixed emergency quit key in all three modes.
+### Search
+
+Search shares every binding in `[keybindings.insert]`; there is no separate
+`[keybindings.search]` table. In Search mode, `commit_edit` accepts the query
+and returns to Normal, while `cancel_edit` restores the previous query and
+selection. Cursor movement and deletion work the same way as in Insert.
+Changing an Insert binding changes it for both editors, and Help and the
+Search footer show the effective keys with search-specific accept/cancel hints.
+
+In Normal mode, `start_search` opens the current query, `cycle_view` cycles
+All/Open/Done, and `clear_search` clears only the query. Search/view state is
+never stored in configuration or task snapshots.
+
+`Ctrl-C` is a fixed emergency quit key in all four modes.
 
 See [Usage and keyboard controls] for the interaction guide.
 

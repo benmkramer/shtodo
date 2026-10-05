@@ -65,16 +65,24 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
 
     let regions = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
     .split(frame.area());
 
     render_header(frame, regions[0], app);
-    render_content(frame, regions[1], app, keymap);
-    render_footer(frame, regions[2], app, keymap);
+    render_view(frame, regions[1], app);
+    render_content(frame, regions[2], app, keymap);
+    render_footer(frame, regions[3], app, keymap);
     if app.mode() == Mode::Help {
-        render_help(frame, regions[1], keymap);
+        let help_area = Rect::new(
+            regions[1].x,
+            regions[1].y,
+            regions[1].width,
+            regions[1].height + regions[2].height,
+        );
+        render_help(frame, help_area, keymap);
     }
 }
 
@@ -189,16 +197,58 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
     );
 }
 
+fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let prefix = format!(
+        "View: {} · {} matches · /",
+        app.view().label(),
+        app.visible_tasks().count(),
+    );
+    let prefix_width = Line::from(prefix.as_str())
+        .width()
+        .min(usize::from(area.width)) as u16;
+    let query_width = area.width.saturating_sub(prefix_width);
+    let (query, cursor_column) = if app.mode() == Mode::Search {
+        app.editor().map_or((app.query(), 0), |editor| {
+            editor_window(editor.buffer(), editor.cursor(), query_width)
+        })
+    } else {
+        (app.query(), 0)
+    };
+    frame.render_widget(Paragraph::new(format!("{prefix}{query}")), area);
+    if app.mode() == Mode::Search {
+        frame.set_cursor_position((area.x + prefix_width + cursor_column, area.y));
+    }
+}
+
 fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, keymap: &Keymap) {
-    let visible_tasks = app.tasks().visible_tasks().collect::<Vec<_>>();
-    let editor = app.editor();
+    let visible_tasks = app.visible_tasks().collect::<Vec<_>>();
+    let editor = app
+        .editor()
+        .filter(|editor| editor.kind() != EditKind::Search);
     if visible_tasks.is_empty() && editor.is_none() {
-        let mut text = "No tasks yet".to_owned();
-        if let (Some(add), Some(help)) = (
-            binding_label(keymap, Mode::Normal, BindingId::StartAdd),
-            binding_label(keymap, Mode::Normal, BindingId::OpenHelp),
-        ) {
+        let no_tasks = app.tasks().visible_tasks().next().is_none();
+        let mut text = if no_tasks {
+            "No tasks yet"
+        } else {
+            "No matching tasks"
+        }
+        .to_owned();
+        if no_tasks
+            && app.mode() == Mode::Normal
+            && let (Some(add), Some(help)) = (
+                binding_label(keymap, Mode::Normal, BindingId::StartAdd),
+                binding_label(keymap, Mode::Normal, BindingId::OpenHelp),
+            )
+        {
             text.push_str(&format!("\nPress {add} to add · {help} for help"));
+        } else if !no_tasks
+            && app.mode() == Mode::Normal
+            && let (Some(clear), Some(view)) = (
+                binding_label(keymap, Mode::Normal, BindingId::ClearSearch),
+                binding_label(keymap, Mode::Normal, BindingId::CycleView),
+            )
+        {
+            text.push_str(&format!("\n{clear} clear search · {view} cycle view"));
         }
         frame.render_widget(Paragraph::new(text), area);
         return;
@@ -253,7 +303,7 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
     bindings.sort_by_key(|binding| binding.footer_priority());
     let hints = bindings
         .into_iter()
-        .map(footer_binding)
+        .map(|binding| footer_binding(binding, app.mode()))
         .collect::<Vec<_>>()
         .join(" · ");
     let detail = match (app.message(), hints.is_empty()) {
@@ -272,7 +322,24 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap) {
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let normal = help_lines(keymap, Mode::Normal);
+    let mut normal = help_lines(keymap, Mode::Normal);
+    normal.push(Line::default());
+    for id in [BindingId::CommitEdit, BindingId::CancelEdit] {
+        if let Some(binding) = keymap
+            .bindings_for(Mode::Search)
+            .find(|binding| binding.id() == id)
+        {
+            normal.push(Line::from(format!(
+                "{} {}",
+                binding.labels().collect::<Vec<_>>().join(" / "),
+                if id == BindingId::CommitEdit {
+                    "apply search (Insert keys)"
+                } else {
+                    search_description(binding)
+                },
+            )));
+        }
+    }
     let mut insert_and_help = help_lines(keymap, Mode::Insert);
     insert_and_help.push(Line::default());
     insert_and_help.extend(help_lines(keymap, Mode::Help));
@@ -372,6 +439,7 @@ fn mode_name(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "Normal",
         Mode::Insert => "Insert",
+        Mode::Search => "Search",
         Mode::Help => "Help",
     }
 }
@@ -414,10 +482,23 @@ fn binding_label(keymap: &Keymap, mode: Mode, id: BindingId) -> Option<&str> {
         .map(ResolvedBinding::preferred_label)
 }
 
-fn footer_binding(binding: &ResolvedBinding) -> String {
-    let description = match binding.description().strip_prefix("show ") {
+fn search_description(binding: &ResolvedBinding) -> &'static str {
+    match binding.id() {
+        BindingId::CommitEdit => "apply search",
+        BindingId::CancelEdit => "cancel search",
+        _ => binding.description(),
+    }
+}
+
+fn footer_binding(binding: &ResolvedBinding, mode: Mode) -> String {
+    let description = if mode == Mode::Search {
+        search_description(binding)
+    } else {
+        binding.description()
+    };
+    let description = match description.strip_prefix("show ") {
         Some(description) => description,
-        None => binding.description(),
+        None => description,
     };
     format!("{} {description}", binding.preferred_label())
 }
@@ -426,6 +507,7 @@ fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "NORMAL",
         Mode::Insert => "INSERT",
+        Mode::Search => "SEARCH",
         Mode::Help => "HELP",
     }
 }
@@ -467,6 +549,7 @@ mod tests {
                 match id.mode() {
                     crate::app::Mode::Normal => "normal",
                     crate::app::Mode::Insert => "insert",
+                    crate::app::Mode::Search => "insert",
                     crate::app::Mode::Help => "help",
                 },
                 id.config_name().unwrap()
@@ -640,10 +723,10 @@ mod tests {
         let header = buffer_row(&buffer, 80, 0);
         assert!(header.contains("shtodo focus"));
         assert!(header.contains("1 open · 1 done"));
-        assert_eq!(buffer[(2, 1)].symbol(), "○");
-        assert_eq!(buffer[(2, 2)].symbol(), "✓");
-        assert!(buffer[(4, 2)].modifier.contains(Modifier::DIM));
-        assert_eq!(buffer[(0, 1)].bg, Color::DarkGray);
+        assert_eq!(buffer[(2, 2)].symbol(), "○");
+        assert_eq!(buffer[(2, 3)].symbol(), "✓");
+        assert!(buffer[(4, 3)].modifier.contains(Modifier::DIM));
+        assert_eq!(buffer[(0, 2)].bg, Color::DarkGray);
     }
 
     #[test]
@@ -676,7 +759,7 @@ mod tests {
 
         terminal.draw(|frame| render(frame, &app, &keymap)).unwrap();
 
-        terminal.backend_mut().assert_cursor_position((12, 1));
+        terminal.backend_mut().assert_cursor_position((12, 2));
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("new task"));
         assert!(text.contains("INSERT"));
@@ -694,9 +777,9 @@ mod tests {
 
         terminal.draw(|frame| render(frame, &app, &keymap)).unwrap();
 
-        assert_eq!(terminal.backend().buffer()[(4, 1)].symbol(), "d");
-        assert_eq!(terminal.backend().buffer()[(8, 1)].symbol(), "t");
-        terminal.backend_mut().assert_cursor_position((9, 1));
+        assert_eq!(terminal.backend().buffer()[(4, 2)].symbol(), "d");
+        assert_eq!(terminal.backend().buffer()[(8, 2)].symbol(), "t");
+        terminal.backend_mut().assert_cursor_position((9, 2));
     }
 
     #[test]
@@ -742,6 +825,11 @@ mod tests {
             "u restore latest",
             "? show help",
             "q / Ctrl-C quit",
+            "/ search",
+            "f cycle All/Open/Done",
+            "Esc clear search",
+            "Enter apply search",
+            "Esc cancel search",
             "Insert",
             "Left move cursor left",
             "Right move cursor right",
@@ -825,5 +913,122 @@ mod tests {
 
         assert_eq!(visible, "6789");
         assert_eq!(cursor_column, 4);
+    }
+
+    fn search_for(app: &mut App, query: &str) {
+        app.apply(Action::StartSearch).unwrap();
+        for character in query.chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+        app.apply(Action::CommitEdit).unwrap();
+    }
+
+    #[test]
+    fn search_view_should_render_only_matches_with_global_totals_and_matching_count() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("needle open").unwrap();
+        let done = list.add("needle done").unwrap();
+        list.add("hidden work").unwrap();
+        list.toggle_complete(done).unwrap();
+        let mut app = App::new(list);
+        search_for(&mut app, "NEEDLE");
+        app.apply(Action::CycleView).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        assert!(buffer_row(&buffer, 80, 0).contains("2 open · 1 done"));
+        assert!(buffer_row(&buffer, 80, 1).contains("View: Open · 1 matches · /NEEDLE"));
+        let text = buffer_text(&buffer);
+        assert!(text.contains("needle open"));
+        assert!(!text.contains("needle done"));
+        assert!(!text.contains("hidden work"));
+        assert!(buffer[(0, 2)].bg == Color::DarkGray);
+    }
+
+    #[test]
+    fn no_matches_should_be_distinct_from_empty_storage_and_use_configured_recovery_keys() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("existing").unwrap();
+        let mut app = App::new(list);
+        search_for(&mut app, "absent");
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::ClearSearch, &["ctrl-g"]),
+            override_for(BindingId::CycleView, &["v"]),
+        ])
+        .unwrap();
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 12));
+        assert!(text.contains("No matching tasks"));
+        assert!(!text.contains("No tasks yet"));
+        assert!(text.contains("Ctrl-g clear search · v cycle view"));
+        assert!(!text.contains("existing"));
+        assert!(text.contains("0 matches"));
+    }
+
+    #[test]
+    fn search_editor_should_keep_long_unicode_query_cursor_visible_at_minimum_width() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::StartSearch).unwrap();
+        for character in "long query café 界界 tail".chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        let keymap = Keymap::defaults();
+        terminal.draw(|frame| render(frame, &app, &keymap)).unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor.y, 1);
+        assert!(cursor.x < 40);
+        let buffer = terminal.backend().buffer();
+        assert!(buffer_row(buffer, 40, 1).contains("tail"));
+        assert!(buffer_row(buffer, 40, 7).contains("SEARCH  Enter apply search"));
+        assert!(buffer_text(buffer).contains("No tasks yet"));
+        assert!(!buffer_text(buffer).contains("Press i to add"));
+    }
+
+    #[test]
+    fn custom_keys_should_drive_search_footer_and_help_without_stale_defaults() {
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::StartSearch, &["s", "/"]),
+            override_for(BindingId::CycleView, &["v"]),
+            override_for(BindingId::CommitEdit, &["ctrl-s"]),
+            override_for(BindingId::CancelEdit, &["ctrl-g"]),
+        ])
+        .unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        let normal = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+        assert!(normal.contains("s search"));
+        assert!(normal.contains("v cycle All/Open/Done"));
+        app.apply(Action::StartSearch).unwrap();
+        let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+        assert!(footer.contains("Ctrl-s apply search · Ctrl-g cancel search"));
+        assert!(!footer.contains("save edit"));
+        app.apply(Action::CancelEdit).unwrap();
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+        assert!(help.contains("s / / search"));
+        assert!(help.contains("v cycle All/Open/Done"));
+        assert!(help.contains("Ctrl-s apply search (Insert keys)"));
+        assert!(help.contains("Ctrl-g cancel search"));
+    }
+
+    #[test]
+    fn filtered_navigation_and_rendering_should_highlight_the_same_task_when_scrolling() {
+        let mut list = TaskList::new(ListScope::Global);
+        for index in 0..20 {
+            list.add(&format!(
+                "{} task {index}",
+                if index % 2 == 0 { "match" } else { "hidden" }
+            ))
+            .unwrap();
+        }
+        let mut app = App::new(list);
+        search_for(&mut app, "match");
+        for _ in 0..9 {
+            app.apply(Action::MoveDown).unwrap();
+        }
+        assert_eq!(app.selected_task().unwrap().text(), "match task 18");
+        let buffer = render_app(&app, 40, 8);
+        let text = buffer_text(&buffer);
+        assert!(text.contains("match task 18"));
+        assert!(!text.contains("hidden task"));
+        assert!(!text.contains("match task 0"));
+        assert!(buffer_row(&buffer, 40, 6).contains("› ○ match task 18"));
     }
 }
