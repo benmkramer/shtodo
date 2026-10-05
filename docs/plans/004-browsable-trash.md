@@ -26,6 +26,11 @@ commands, search, permanent deletion, bulk restoration, or automatic purging.
   restarts.
 - `[keybindings.normal].open_trash` and the independent `[keybindings.trash]`
   actions drive input, contextual help, and footer hints. Ctrl-C remains fixed.
+- For upgrade compatibility, an implicit Normal `open_trash` uses `Ctrl-t`
+  when an existing action owns `t`. If both are taken, that opening binding is
+  omitted and Doctor explains how to configure it. Explicit overrides still
+  undergo normal conflict validation. This exception applies only to the new
+  implicit opening action, preserving previous validation for all other keys.
 
 ## Shared restoration contract
 
@@ -75,7 +80,7 @@ All required gates passed:
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features --locked -- -D warnings`
-- `cargo test --locked`: 142 unit tests and 24 CLI tests, including 17 new
+- `cargo test --locked`: 146 unit tests and 25 CLI tests, including 22 new
   behavior/regression tests over the 125-unit/24-CLI baseline.
 - `cargo build --release --locked`
 - `git diff --check`
@@ -86,6 +91,14 @@ completion preservation, newest-first trash rows, inactive normal mutation
 keys, selective durable restoration, contextual help, quit/relaunch with Normal
 `u`, unchanged plain-text shell listing, absence of sibling temporary snapshots,
 custom Trash bindings, and global/parent/child scope isolation.
+
+Upgrade regressions additionally cover an existing `toggle_complete = ["t"]`
+config, preserving both legacy task bindings, explicit `open_trash` conflicts,
+the resolved fallback in footer/help/empty-state hints, and Doctor accepting
+these existing configs without creating task storage. Ten additional
+release-binary upgrade smoke checks passed in a temporary home: both existing
+configs start, legacy keys still complete tasks, the `Ctrl-t` fallback opens
+trash and allows restoration, and Doctor explains the fully occupied case.
 
 No standalone feature decisions remain open. The filtered-selection integration
 case above must be resolved when combining this branch with search/filtering.

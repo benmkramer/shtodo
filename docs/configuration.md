@@ -3,7 +3,7 @@
 The optional configuration file is `~/.shtodo/config.toml`; shtodo does not
 create it. When the file is missing, shtodo uses its compiled defaults.
 Configuring an action replaces that action's defaults; omitted actions retain
-their defaults.
+their defaults, with the trash compatibility exception described below.
 
 ```toml
 [keybindings.normal]
@@ -40,6 +40,26 @@ casing used in the config file.
 `Ctrl-C` is fixed in all modes and cannot be configured. Invalid config stops
 interactive startup and points to `shtodo doctor`. `shtodo doctor` checks the
 same parser and validator without opening task storage or the TUI.
+
+### Existing bindings and the new trash default
+
+Existing Normal bindings take priority over the new implicit `open_trash`
+default. If your config already assigns `t` to another Normal action, trash
+opens with `Ctrl-t`; the footer, Help, and empty-list hint show that fallback.
+For example, this existing config continues to load and keeps `t` completing
+tasks:
+
+```toml
+[keybindings.normal]
+toggle_complete = ["t"]
+```
+
+If both `t` and `Ctrl-t` are already assigned, the config still loads and the
+implicit trash opening binding is omitted. `shtodo doctor` reports that trash
+needs an opening key. Set `open_trash = ["b"]` (or another unused Normal key)
+to enable it. An explicit `open_trash` override still participates in ordinary
+conflict validation. Other binding conflicts and reserved-key errors remain
+invalid. Trash `close_trash` remains independent and defaults to `t` and Esc.
 
 ## Default actions
 

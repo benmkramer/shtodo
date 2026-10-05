@@ -126,7 +126,11 @@ the view and selection from which it was opened.
 ### Trash mode
 
 Press `t` from the normal list to browse deleted tasks in the current global
-or exact-directory scope. The header and footer label this view `TRASH`.
+or exact-directory scope. If an existing config uses Normal `t` for another
+action, the implicit opening key falls back to `Ctrl-t`. When both are taken,
+configure `open_trash` with an unused Normal key; `shtodo doctor` reports the
+missing opening binding. See [Configuring keybindings] for the details.
+The header and footer label this view `TRASH`.
 Rows show each task's stable scope-local ID, `open` or `done` completion
 state, and text, including tasks deleted with the shell `delete` command.
 Trash is ordered by persisted `deletion_sequence`, most recently deleted

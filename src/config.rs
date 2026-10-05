@@ -115,7 +115,17 @@ impl LoadedKeymap {
                 self.keymap().active_binding_count()
             ),
         };
-        format!("Config: {}\n{result}\n", self.path().display())
+        let mut report = format!("Config: {}\n{result}\n", self.path().display());
+        if !self
+            .keymap()
+            .bindings_for(Mode::Normal)
+            .any(|binding| binding.id() == BindingId::OpenTrash)
+        {
+            report.push_str(
+                "Note: Trash has no opening key; configure keybindings.normal.open_trash\n",
+            );
+        }
+        report
     }
 }
 
@@ -415,6 +425,75 @@ move_down = ["x", "ctrl-n"]
             labels_for(loaded.keymap(), BindingId::MoveUp),
             vec!["k", "Up"]
         );
+    }
+
+    #[test]
+    fn existing_normal_t_binding_should_load_with_a_trash_fallback() {
+        use crate::{action::Action, app::Mode};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let home = configured_home("[keybindings.normal]\ntoggle_complete = [\"t\"]\n");
+        let loaded = load(home.path()).unwrap();
+
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::ToggleComplete),
+            vec!["t"]
+        );
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::OpenTrash),
+            vec!["Ctrl-t"]
+        );
+        assert_eq!(
+            loaded.keymap().map_key(
+                Mode::Normal,
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)
+            ),
+            Some(Action::ToggleComplete)
+        );
+        assert_eq!(
+            loaded.keymap().map_key(
+                Mode::Normal,
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::OpenTrash)
+        );
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::CloseTrash),
+            vec!["t", "Esc"]
+        );
+    }
+
+    #[test]
+    fn existing_config_should_load_and_report_when_both_trash_default_keys_are_taken() {
+        let home = configured_home("[keybindings.normal]\ntoggle_complete = [\"t\", \"CTRL-T\"]\n");
+        let loaded = load(home.path()).unwrap();
+
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::ToggleComplete),
+            vec!["t", "Ctrl-t"]
+        );
+        assert!(
+            !loaded
+                .keymap()
+                .bindings_for(crate::app::Mode::Normal)
+                .any(|binding| binding.id() == BindingId::OpenTrash)
+        );
+        assert!(
+            loaded
+                .doctor_report()
+                .contains("Trash has no opening key; configure keybindings.normal.open_trash")
+        );
+    }
+
+    #[test]
+    fn explicit_open_trash_binding_should_still_report_configured_conflicts() {
+        let home = configured_home(
+            "[keybindings.normal]\ntoggle_complete = [\"t\"]\nopen_trash = [\"t\"]\n",
+        );
+        let error = load(home.path()).unwrap_err();
+
+        assert!(error.to_string().contains("keybindings.normal.open_trash"));
+        assert!(error.to_string().contains("conflicts with toggle_complete"));
     }
 
     #[test]

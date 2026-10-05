@@ -178,6 +178,27 @@ fn doctor_should_summarize_valid_effective_keymap_without_task_storage() {
 }
 
 #[test]
+fn doctor_should_accept_existing_t_bindings_without_creating_task_storage() {
+    for keys in ["\"t\"", "\"t\", \"ctrl-t\""] {
+        let home = tempfile::tempdir().unwrap();
+        write_config(
+            home.path(),
+            &format!("[keybindings.normal]\ntoggle_complete = [{keys}]\n"),
+        );
+        let output = run_with_home(home.path(), &["doctor"]);
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("OK:"));
+        assert!(!home.path().join(".shtodo/global").exists());
+        assert!(!home.path().join(".shtodo/projects").exists());
+    }
+}
+
+#[test]
 fn doctor_should_report_all_available_invalid_config_issues() {
     let home = tempfile::tempdir().unwrap();
     write_config(

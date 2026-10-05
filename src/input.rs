@@ -725,6 +725,7 @@ impl Keymap {
             keys[index] = parsed;
             sources[index] = Some((override_.order, override_.path.clone()));
         }
+        resolve_open_trash_default(&mut keys, overrides);
         let mut seen = Vec::<(KeyChord, usize)>::new();
         for (index, definition) in DEFINITIONS.iter().enumerate() {
             for chord in keys[index].iter().chain(definition.fixed) {
@@ -808,6 +809,41 @@ impl Keymap {
             .map(|binding| binding.chords.len())
             .sum()
     }
+}
+
+fn resolve_open_trash_default(keys: &mut [Vec<KeyChord>], overrides: &[BindingOverride]) {
+    if overrides
+        .iter()
+        .any(|override_| override_.id == BindingId::OpenTrash)
+    {
+        return;
+    }
+    let Some(index) = DEFINITIONS
+        .iter()
+        .position(|definition| definition.id == BindingId::OpenTrash)
+    else {
+        return;
+    };
+    // This new Normal action must not invalidate bindings from earlier releases.
+    let opening_key = DEFINITIONS[index]
+        .defaults
+        .iter()
+        .copied()
+        .chain(std::iter::once(chord(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        )))
+        .find(|candidate| {
+            !DEFINITIONS.iter().enumerate().any(|(other, definition)| {
+                other != index
+                    && definition.id.mode() == Mode::Normal
+                    && keys[other]
+                        .iter()
+                        .chain(definition.fixed)
+                        .any(|key| key == candidate)
+            })
+        });
+    keys[index] = opening_key.into_iter().collect();
 }
 
 fn resolved(definition: Definition, mut chords: Vec<KeyChord>) -> Option<ResolvedBinding> {

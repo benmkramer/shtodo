@@ -12,6 +12,13 @@ All notable changes to shtodo are documented in this file.
 - Homebrew installation through `benmkramer/tap/shtodo`, with automatic formula
   updates from the release workflow.
 
+### Fixed
+
+- Existing Normal `t` bindings continue to load when upgrading to the trash
+  feature. Implicit `open_trash` falls back to `Ctrl-t`; if both keys are taken,
+  it stays unbound and `shtodo doctor` explains how to configure an opening key.
+  Explicit `open_trash` conflicts still fail validation.
+
 ## [0.1.0-beta.2] - 2026-09-05
 
 ### Added

@@ -556,6 +556,21 @@ mod tests {
     }
 
     #[test]
+    fn trash_fallback_should_drive_normal_empty_state_footer_and_help() {
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::ToggleComplete, &["t"])]).unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        let normal = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 12));
+
+        assert!(normal.contains("Press Ctrl-t to browse trash"));
+        assert!(normal.contains("Ctrl-t trash"));
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+        assert!(help.contains("Ctrl-t show trash"));
+        assert!(help.contains("t toggle complete"));
+    }
+
+    #[test]
     fn trash_should_render_label_scope_ids_states_and_newest_first() {
         let mut tasks = TaskList::new(ListScope::Global);
         let oldest = tasks.add("same text").unwrap();
