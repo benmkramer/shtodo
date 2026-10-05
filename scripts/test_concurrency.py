@@ -389,16 +389,34 @@ class ConcurrentUsage(unittest.TestCase):
             return cli(self.home, "add", f"burst {index}")
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(add, range(8)))
-        rows = cli(self.home, "list").stdout
+        listed = cli(self.home, "list")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        successful = set()
         for index, result in enumerate(results):
             if result.returncode == 0:
-                self.assertIn(f"burst {index}".encode(), rows)
+                successful.add(f"burst {index}")
+                self.assertIn(f"burst {index}".encode(), listed.stdout)
             else:
                 self.assertEqual(result.stdout, b"")
-                self.assertIn(b"lock wait timed out", result.stderr)
-        self.assertTrue(all(result.returncode == 0 for result in results))
-        tasks = json.loads((self.home / ".shtodo/global/tasks.json").read_text())["tasks"]
-        self.assertEqual(len({task["id"] for task in tasks}), 8)
+                self.assertIn(b"lock wait timed out", result.stderr, result.stderr)
+                self.assertNotIn(f"burst {index}".encode(), listed.stdout)
+        self.assertTrue(successful, "at least one writer must acquire the initially free lock")
+        path = self.home / ".shtodo/global/tasks.json"
+        snapshot = json.loads(path.read_text())
+        tasks = snapshot["tasks"]
+        self.assertEqual({task["text"] for task in tasks}, successful)
+        self.assertEqual(sorted(task["id"] for task in tasks), list(range(1, len(successful) + 1)))
+        self.assertEqual(snapshot["next_task_id"], len(successful) + 1)
+
+        # Bounded waits may expire on slow filesystems; Busy has not committed a write.
+        for index, result in enumerate(results):
+            if result.returncode != 0:
+                retried = cli(self.home, "add", f"burst {index}")
+                self.assertEqual(retried.returncode, 0, retried.stderr)
+        snapshot = json.loads(path.read_text())
+        self.assertEqual({task["text"] for task in snapshot["tasks"]}, {f"burst {index}" for index in range(8)})
+        self.assertEqual(sorted(task["id"] for task in snapshot["tasks"]), list(range(1, 9)))
+        self.assertEqual(snapshot["next_task_id"], 9)
 
     def test_mixed_legacy_lock_allows_reads_but_returns_bounded_busy(self):
         self.seed()

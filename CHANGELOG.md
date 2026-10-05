@@ -4,12 +4,26 @@ All notable changes to shtodo are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-10-05
+
 ### Added
 
 - Concurrent shell commands and TUIs for the same list, with short writer
   transactions, one-second refresh, and preserved drafts on conflicts or errors.
 - Bounded lock waits and synchronization recovery that does not repeat a
   change after an uncertain save.
+
+### Changed
+
+- Refresh benchmark tables and charts with measurements from the concurrent
+  CLI/TUI implementation, including its idle cost and interaction latency.
+
+### Fixed
+
+- Recreate absent lock files for writes and synchronization recovery while
+  still requiring initialized task data to exist.
+- Concurrent-writer regressions now verify bounded lock timeouts leave no
+  task or consumed ID behind, and retries preserve every successful addition.
 
 ## [0.1.0-beta.3] - 2026-10-05
 
@@ -63,7 +77,8 @@ All notable changes to shtodo are documented in this file.
 - User-configured keybindings from `~/.shtodo/config.toml`, reflected in input, footer hints, empty-state guidance, and keyboard help.
 - `shtodo doctor` for validating keybinding syntax, reserved keys, and conflicts without opening task storage or the terminal UI.
 
-[Unreleased]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.3...HEAD
+[Unreleased]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.4...HEAD
+[0.1.0-beta.4]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.3...v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.2...v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/benmkramer/shtodo/releases/tag/v0.1.0-beta.1
