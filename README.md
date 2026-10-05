@@ -55,6 +55,11 @@ shtodo list
 shtodo --local list
 shtodo delete 3
 shtodo --local delete 3
+shtodo done 3
+shtodo reopen 3
+shtodo edit 3 "Fix the remaining bug"
+shtodo restore 3
+shtodo add --print-id "Capture a task for a script"
 shtodo doctor
 ```
 
@@ -62,22 +67,42 @@ Running `shtodo` opens the default global list. Running `shtodo --local` opens
 a list for the exact directory from which it is run.
 
 `shtodo list` prints each non-deleted task's scope-local ID, state, and text.
-`shtodo delete <ID>` recoverably deletes one task from the selected scope, so
-the TUI's `u` action can restore it.
+Use `done`, `reopen`, `edit`, `delete`, and `restore` with one scope-local ID
+to manage a task from the shell. Deleted tasks retain their text and state;
+restore them by ID, with the TUI's `u` action for the latest deletion, or with
+`t` to browse trash and restore a specific task. Add `--local` before the
+command to select the exact current-directory list. `add --print-id` prints
+only the saved ID for scripts.
 
 The essentials are:
 
 ```text
-i add · e edit · Space complete · d delete · u restore
+i add · e edit · Space complete · d delete · u restore latest · t trash
 / search · Tab / Shift-Tab views · ? help · q quit
 ```
 
 See [Usage and keyboard controls] for the full interaction guide.
 
+## Agent skill
+
+An optional [shtodo skill](./skills/shtodo/SKILL.md) helps LLM-based agents
+use the CLI with the right scope, task IDs, and verification. With Node.js
+and npm available, install it for your agent:
+
+```sh
+npx skills add benmkramer/shtodo --skill shtodo --global
+```
+
+The installer supports Codex, Claude Code, Cursor, and other compatible
+agents. Install the shtodo binary separately using the instructions above.
+See [Agent skill installation and usage] for manual installation and
+example prompts.
+
 ## Documentation
 
 - [Usage and keyboard controls]
 - [Configuring keybindings]
+- [Agent skill installation and usage]
 - [Release process]
 - [Benchmarks and CLI comparison]: results, methodology, feature differences,
   and rerun instructions. Also see the [benchmark harness] and [recorded samples].
@@ -104,6 +129,7 @@ This project is licensed under the MIT license ([LICENSE] or
 [GitHub Release]: https://github.com/benmkramer/shtodo/releases
 [Usage and keyboard controls]: ./docs/usage.md
 [Configuring keybindings]: ./docs/configuration.md
+[Agent skill installation and usage]: ./docs/agent-skill.md
 [Release process]: ./docs/releasing.md
 [Benchmarks and CLI comparison]: ./docs/benchmarks.md
 [benchmark harness]: ./scripts/benchmark.py

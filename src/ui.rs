@@ -65,14 +65,16 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
 
     let regions = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(u16::from(!app.is_trash_view())),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
     .split(frame.area());
 
     render_header(frame, regions[0], app);
-    render_view(frame, regions[1], app);
+    if !app.is_trash_view() {
+        render_view(frame, regions[1], app);
+    }
     render_content(frame, regions[2], app, keymap);
     render_footer(frame, regions[3], app, keymap);
     if app.mode() == Mode::Help {
@@ -82,7 +84,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
             regions[1].width,
             regions[1].height + regions[2].height,
         );
-        render_help(frame, help_area, keymap);
+        render_help(frame, help_area, keymap, app.is_trash_view());
     }
 }
 
@@ -172,7 +174,11 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
         .filter(|task| !task.completed())
         .count();
     let done_count = visible_tasks.len() - open_count;
-    let counts = format!("{open_count} open · {done_count} done");
+    let counts = if app.is_trash_view() {
+        format!("{} deleted", app.tasks().deleted_tasks().len())
+    } else {
+        format!("{open_count} open · {done_count} done")
+    };
     let columns = Layout::horizontal([
         Constraint::Min(1),
         Constraint::Length(counts.chars().count() as u16),
@@ -187,7 +193,11 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(" {scope}")),
+        Span::raw(if app.is_trash_view() {
+            format!(" TRASH · {scope} · newest first")
+        } else {
+            format!(" {scope}")
+        }),
     ]);
 
     frame.render_widget(Paragraph::new(title), columns[0]);
@@ -251,6 +261,10 @@ fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, keymap: &Keymap) {
+    if app.is_trash_view() {
+        render_trash_content(frame, area, app, keymap);
+        return;
+    }
     let visible_tasks = app.visible_tasks().collect::<Vec<_>>();
     let editor = app
         .editor()
@@ -286,6 +300,11 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
             if !hints.is_empty() {
                 text.push_str(&format!("\n{}", hints.join(" · ")));
             }
+        }
+        if app.mode() == Mode::Normal
+            && let Some(trash) = binding_label(keymap, Mode::Normal, BindingId::OpenTrash)
+        {
+            text.push_str(&format!("\nPress {trash} to browse trash"));
         }
         frame.render_widget(Paragraph::new(text), area);
         return;
@@ -332,6 +351,33 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
     }
 }
 
+fn render_trash_content(frame: &mut Frame<'_>, area: Rect, app: &App, keymap: &Keymap) {
+    let deleted = app.tasks().deleted_tasks();
+    if deleted.is_empty() {
+        let mut text = "Trash is empty".to_owned();
+        if let Some(close) = binding_label(keymap, Mode::Trash, BindingId::CloseTrash) {
+            text.push_str(&format!("\nPress {close} to return to the list"));
+        }
+        frame.render_widget(Paragraph::new(text), area);
+        return;
+    }
+    let selected = deleted
+        .iter()
+        .position(|task| Some(task.id()) == app.selected());
+    let items = deleted
+        .iter()
+        .map(|task| {
+            let state = if task.completed() { "done" } else { "open" };
+            ListItem::new(format!("{}  {state}  {}", task.id().get(), task.text()))
+        })
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .highlight_symbol("› ")
+        .highlight_style(Style::default().bg(Color::DarkGray));
+    let mut state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
 fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, keymap: &Keymap) {
     let mut bindings = keymap
         .bindings_for(app.mode())
@@ -353,32 +399,43 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
     frame.render_widget(Paragraph::new(text), area);
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap) {
-    let block = Block::bordered().title("Keyboard help");
+fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) {
+    let block = Block::bordered().title(if trash {
+        "Keyboard help: Trash"
+    } else {
+        "Keyboard help"
+    });
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let mut normal = help_lines(keymap, Mode::Normal);
-    normal.push(Line::default());
-    for id in [BindingId::CommitEdit, BindingId::CancelEdit] {
-        if let Some(binding) = keymap
-            .bindings_for(Mode::Search)
-            .find(|binding| binding.id() == id)
-        {
-            normal.push(Line::from(format!(
-                "{} {}",
-                binding.labels().collect::<Vec<_>>().join(" / "),
-                if id == BindingId::CommitEdit {
-                    "apply search (Insert keys)"
-                } else {
-                    search_description(binding)
-                },
-            )));
+    let mut normal = help_lines(keymap, if trash { Mode::Trash } else { Mode::Normal });
+    if !trash {
+        for id in [BindingId::CommitEdit, BindingId::CancelEdit] {
+            if let Some(binding) = keymap
+                .bindings_for(Mode::Search)
+                .find(|binding| binding.id() == id)
+            {
+                normal.push(Line::from(format!(
+                    "{} {}",
+                    binding.labels().collect::<Vec<_>>().join(" / "),
+                    if id == BindingId::CommitEdit {
+                        "apply search (Insert keys)"
+                    } else {
+                        search_description(binding)
+                    },
+                )));
+            }
         }
     }
-    let mut insert_and_help = help_lines(keymap, Mode::Insert);
-    insert_and_help.push(Line::default());
+    let mut insert_and_help = if trash {
+        Vec::new()
+    } else {
+        help_lines(keymap, Mode::Insert)
+    };
+    if !trash {
+        insert_and_help.push(Line::default());
+    }
     insert_and_help.extend(help_lines(keymap, Mode::Help));
     if let Some(normal_width) = help_column_width(&normal, &insert_and_help, inner) {
         let columns =
@@ -482,6 +539,7 @@ fn mode_name(mode: Mode) -> &'static str {
         Mode::Insert => "Insert",
         Mode::Search => "Search",
         Mode::Help => "Help",
+        Mode::Trash => "Trash",
     }
 }
 
@@ -550,6 +608,7 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Insert => "INSERT",
         Mode::Search => "SEARCH",
         Mode::Help => "HELP",
+        Mode::Trash => "TRASH",
     }
 }
 
@@ -592,6 +651,7 @@ mod tests {
                     crate::app::Mode::Insert => "insert",
                     crate::app::Mode::Search => "insert",
                     crate::app::Mode::Help => "help",
+                    crate::app::Mode::Trash => "trash",
                 },
                 id.config_name().unwrap()
             ),
@@ -621,6 +681,113 @@ mod tests {
         assert!(text.contains("i add"));
         assert!(text.contains("? help"));
         assert!(text.contains("NORMAL"));
+        assert!(text.contains("Press t to browse trash"));
+    }
+
+    #[test]
+    fn trash_fallback_should_drive_normal_empty_state_footer_and_help() {
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::ToggleComplete, &["t"])]).unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        let normal = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 12));
+
+        assert!(normal.contains("Press Ctrl-t to browse trash"));
+        assert!(normal.contains("Ctrl-t trash"));
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+        assert!(help.contains("Ctrl-t show trash"));
+        assert!(help.contains("t toggle complete"));
+    }
+
+    #[test]
+    fn trash_should_render_label_scope_ids_states_and_newest_first() {
+        let mut tasks = TaskList::new(ListScope::Global);
+        let oldest = tasks.add("same text").unwrap();
+        let newest = tasks.add("same text").unwrap();
+        tasks.add("live task").unwrap();
+        tasks.toggle_complete(newest).unwrap();
+        tasks.delete(oldest).unwrap();
+        tasks.delete(newest).unwrap();
+        let mut app = App::new(tasks);
+        app.apply(Action::OpenTrash).unwrap();
+
+        let buffer = render_app(&app, 80, 12);
+        assert!(buffer_row(&buffer, 80, 0).contains("TRASH · global · newest first"));
+        assert!(buffer_row(&buffer, 80, 0).contains("2 deleted"));
+        assert!(buffer_row(&buffer, 80, 1).contains("› 2  done  same text"));
+        assert!(buffer_row(&buffer, 80, 2).contains("1  open  same text"));
+        assert!(!buffer_text(&buffer).contains("live task"));
+        assert_eq!(buffer[(0, 1)].bg, ratatui::style::Color::DarkGray);
+    }
+
+    #[test]
+    fn empty_trash_should_use_custom_close_hint_and_prioritize_restore_and_return() {
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::CloseTrash, &["b", "esc"]),
+            override_for(BindingId::RestoreSelected, &["x"]),
+        ])
+        .unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenTrash).unwrap();
+        let buffer = render_app_with_keymap(&app, &keymap, 40, 8);
+
+        assert!(buffer_text(&buffer).contains("Trash is empty"));
+        assert!(buffer_text(&buffer).contains("Press b to return to the list"));
+        let footer = buffer_row(&buffer, 40, 7);
+        assert!(footer.contains("TRASH  x restore task · b close trash"));
+        assert!(!buffer_text(&buffer).contains("add task"));
+    }
+
+    #[test]
+    fn trash_help_should_use_its_keymap_and_exclude_normal_mutation_hints() {
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::RestoreSelected, &["enter", "x"]),
+            override_for(BindingId::CloseTrash, &["b", "esc"]),
+            override_for(BindingId::TrashMoveDown, &["n", "down"]),
+        ])
+        .unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenTrash).unwrap();
+        app.apply(Action::OpenHelp).unwrap();
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+
+        for hint in [
+            "Keyboard help: Trash",
+            "Enter / x restore task",
+            "b / Esc close trash",
+            "n / Down move down",
+            "q / Ctrl-C quit",
+            "? / Esc close help",
+        ] {
+            assert!(text.contains(hint), "missing help hint: {hint}");
+        }
+        for hint in [
+            "add task",
+            "edit task",
+            "toggle complete",
+            "delete task",
+            "move task down",
+            "restore latest",
+        ] {
+            assert!(!text.contains(hint), "inactive trash hint: {hint}");
+        }
+    }
+
+    #[test]
+    fn selected_trash_row_should_stay_visible_when_scrolling() {
+        let mut tasks = TaskList::new(ListScope::Global);
+        for index in 0..20 {
+            let id = tasks.add(&format!("deleted {index}")).unwrap();
+            tasks.delete(id).unwrap();
+        }
+        let mut app = App::new(tasks);
+        app.apply(Action::OpenTrash).unwrap();
+        for _ in 0..19 {
+            app.apply(Action::MoveDown).unwrap();
+        }
+        let text = buffer_text(&render_app(&app, 40, 8));
+        assert!(text.contains("› 1  open  deleted 0"));
+        assert!(!text.contains("20  open  deleted 19"));
     }
 
     #[test]
@@ -677,6 +844,9 @@ mod tests {
             assert!(text.contains(alias), "missing active Help alias: {alias}");
         }
         assert_eq!(text.matches("Ctrl-C").count(), 3);
+        assert!(text.contains("t show trash"));
+        assert!(text.contains("Tab next view"));
+        assert!(text.contains("Shift-Tab previous view"));
         assert!(buffer_row(&buffer, 80, 0).contains("shtodo global"));
         assert!(buffer_row(&buffer, 80, 23).contains("HELP  x close help"));
     }
@@ -864,6 +1034,7 @@ mod tests {
             "Space toggle complete",
             "d delete task",
             "u restore latest",
+            "t show trash",
             "? show help",
             "q / Ctrl-C quit",
             "/ search",
@@ -1022,6 +1193,7 @@ mod tests {
         assert!(buffer_row(buffer, 40, 7).contains("SEARCH  Enter apply search"));
         assert!(buffer_text(buffer).contains("No tasks yet"));
         assert!(!buffer_text(buffer).contains("Press i to add"));
+        assert!(!buffer_text(buffer).contains("browse trash"));
     }
 
     #[test]
@@ -1035,7 +1207,7 @@ mod tests {
         ])
         .unwrap();
         let mut app = App::new(TaskList::new(ListScope::Global));
-        let normal = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+        let normal = buffer_row(&render_app_with_keymap(&app, &keymap, 200, 12), 200, 11);
         assert!(normal.contains("s search"));
         assert!(normal.contains("v next view"));
         assert!(normal.contains("Ctrl-v previous view"));
@@ -1157,5 +1329,33 @@ mod tests {
         assert!(help.contains("Shift-Tab previous view"));
         assert!(help.contains("Enter apply search"));
         assert!(help.contains("Esc cancel search"));
+    }
+
+    #[test]
+    fn trash_should_show_all_tombstones_and_return_to_the_filtered_tab_and_query() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("live unrelated").unwrap();
+        let matching = list.add("needle deleted").unwrap();
+        let other = list.add("other deleted").unwrap();
+        list.toggle_complete(other).unwrap();
+        list.delete(matching).unwrap();
+        list.delete(other).unwrap();
+        let mut app = App::new(list);
+        search_for(&mut app, "needle");
+        app.apply(Action::PreviousView).unwrap();
+        app.apply(Action::OpenTrash).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        let text = buffer_text(&buffer);
+        assert!(text.contains("2 deleted"));
+        assert!(text.contains("needle deleted"));
+        assert!(text.contains("other deleted"));
+        assert!(!text.contains("live unrelated"));
+        assert!(!text.contains("/needle"));
+        assert!(!text.contains("[Done]"));
+        assert!(buffer_row(&buffer, 80, 11).contains("TRASH"));
+        app.apply(Action::CloseTrash).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        assert!(buffer_row(&buffer, 80, 1).contains("[Done] · 0 matches · /needle"));
+        assert!(buffer_text(&buffer).contains("No matching tasks"));
     }
 }

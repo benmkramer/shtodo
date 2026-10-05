@@ -19,6 +19,13 @@ pub(crate) enum BindingId {
     CycleView,
     PreviousView,
     ClearSearch,
+    OpenTrash,
+    TrashMoveDown,
+    TrashMoveUp,
+    RestoreSelected,
+    CloseTrash,
+    TrashOpenHelp,
+    TrashQuit,
     OpenHelp,
     NormalQuit,
     MoveCursorLeft,
@@ -63,6 +70,13 @@ impl BindingId {
             (Mode::Normal, "cycle_view") => Self::CycleView,
             (Mode::Normal, "previous_view") => Self::PreviousView,
             (Mode::Normal, "clear_search") => Self::ClearSearch,
+            (Mode::Normal, "open_trash") => Self::OpenTrash,
+            (Mode::Trash, "move_down") => Self::TrashMoveDown,
+            (Mode::Trash, "move_up") => Self::TrashMoveUp,
+            (Mode::Trash, "restore_selected") => Self::RestoreSelected,
+            (Mode::Trash, "close_trash") => Self::CloseTrash,
+            (Mode::Trash, "open_help") => Self::TrashOpenHelp,
+            (Mode::Trash, "quit") => Self::TrashQuit,
             (Mode::Normal, "open_help") => Self::OpenHelp,
             (Mode::Normal, "quit") => Self::NormalQuit,
             (Mode::Insert, "move_cursor_left") => Self::MoveCursorLeft,
@@ -97,6 +111,13 @@ impl BindingId {
             Self::CycleView => Some("cycle_view"),
             Self::PreviousView => Some("previous_view"),
             Self::ClearSearch => Some("clear_search"),
+            Self::OpenTrash => Some("open_trash"),
+            Self::TrashMoveDown => Some("move_down"),
+            Self::TrashMoveUp => Some("move_up"),
+            Self::RestoreSelected => Some("restore_selected"),
+            Self::CloseTrash => Some("close_trash"),
+            Self::TrashOpenHelp => Some("open_help"),
+            Self::TrashQuit => Some("quit"),
             Self::OpenHelp => Some("open_help"),
             Self::NormalQuit => Some("quit"),
             Self::MoveCursorLeft => Some("move_cursor_left"),
@@ -131,6 +152,7 @@ impl BindingId {
             | Self::CycleView
             | Self::PreviousView
             | Self::ClearSearch
+            | Self::OpenTrash
             | Self::OpenHelp
             | Self::NormalQuit => Mode::Normal,
             Self::MoveCursorLeft
@@ -147,6 +169,12 @@ impl BindingId {
             | Self::CancelEdit
             | Self::InsertEmergencyQuit => Mode::Insert,
             Self::CloseHelp | Self::HelpEmergencyQuit => Mode::Help,
+            Self::TrashMoveDown
+            | Self::TrashMoveUp
+            | Self::RestoreSelected
+            | Self::CloseTrash
+            | Self::TrashOpenHelp
+            | Self::TrashQuit => Mode::Trash,
         }
     }
 }
@@ -454,6 +482,14 @@ static DEFINITIONS: &[Definition] = &[
         fixed: &[],
     },
     Definition {
+        id: BindingId::OpenTrash,
+        action: Action::OpenTrash,
+        description: "show trash",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Char('t'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
         id: BindingId::OpenHelp,
         action: Action::OpenHelp,
         description: "show help",
@@ -463,6 +499,63 @@ static DEFINITIONS: &[Definition] = &[
     },
     Definition {
         id: BindingId::NormalQuit,
+        action: Action::Quit,
+        description: "quit",
+        footer_priority: Some(2),
+        defaults: &[chord(KeyCode::Char('q'), KeyModifiers::NONE)],
+        fixed: &[chord(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+    },
+    Definition {
+        id: BindingId::TrashMoveDown,
+        action: Action::MoveDown,
+        description: "move down",
+        footer_priority: Some(2),
+        defaults: &[
+            chord(KeyCode::Char('j'), KeyModifiers::NONE),
+            chord(KeyCode::Down, KeyModifiers::NONE),
+        ],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::TrashMoveUp,
+        action: Action::MoveUp,
+        description: "move up",
+        footer_priority: Some(2),
+        defaults: &[
+            chord(KeyCode::Char('k'), KeyModifiers::NONE),
+            chord(KeyCode::Up, KeyModifiers::NONE),
+        ],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::RestoreSelected,
+        action: Action::RestoreSelected,
+        description: "restore task",
+        footer_priority: Some(0),
+        defaults: &[chord(KeyCode::Char('r'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::CloseTrash,
+        action: Action::CloseTrash,
+        description: "close trash",
+        footer_priority: Some(0),
+        defaults: &[
+            chord(KeyCode::Char('t'), KeyModifiers::NONE),
+            chord(KeyCode::Esc, KeyModifiers::NONE),
+        ],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::TrashOpenHelp,
+        action: Action::OpenHelp,
+        description: "show help",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Char('?'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::TrashQuit,
         action: Action::Quit,
         description: "quit",
         footer_priority: Some(2),
@@ -655,7 +748,13 @@ impl Keymap {
         let mut sources = vec![None::<(usize, String)>; DEFINITIONS.len()];
         let mut issues = Vec::new();
         for override_ in ordered {
-            let index = definition_index(override_.id);
+            let Some(index) = DEFINITIONS
+                .iter()
+                .position(|definition| definition.id == override_.id)
+            else {
+                issues.push(issue(override_, "unknown action"));
+                continue;
+            };
             if override_.keys.is_empty() {
                 issues.push(issue(override_, "must contain at least one key"));
                 keys[index].clear();
@@ -709,6 +808,7 @@ impl Keymap {
                     .retain(|chord| !explicit_keys.contains(&(definition.id.mode(), *chord)));
             }
         }
+        resolve_open_trash_default(&mut keys, overrides);
         let mut seen = Vec::<(KeyChord, usize)>::new();
         for (index, definition) in DEFINITIONS.iter().enumerate() {
             for chord in keys[index].iter().chain(definition.fixed) {
@@ -811,6 +911,41 @@ impl Keymap {
     }
 }
 
+fn resolve_open_trash_default(keys: &mut [Vec<KeyChord>], overrides: &[BindingOverride]) {
+    if overrides
+        .iter()
+        .any(|override_| override_.id == BindingId::OpenTrash)
+    {
+        return;
+    }
+    let Some(index) = DEFINITIONS
+        .iter()
+        .position(|definition| definition.id == BindingId::OpenTrash)
+    else {
+        return;
+    };
+    // This new Normal action must not invalidate bindings from earlier releases.
+    let opening_key = DEFINITIONS[index]
+        .defaults
+        .iter()
+        .copied()
+        .chain(std::iter::once(chord(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        )))
+        .find(|candidate| {
+            !DEFINITIONS.iter().enumerate().any(|(other, definition)| {
+                other != index
+                    && definition.id.mode() == Mode::Normal
+                    && keys[other]
+                        .iter()
+                        .chain(definition.fixed)
+                        .any(|key| key == candidate)
+            })
+        });
+    keys[index] = opening_key.into_iter().collect();
+}
+
 fn resolved(definition: Definition, mut chords: Vec<KeyChord>) -> Option<ResolvedBinding> {
     chords.extend_from_slice(definition.fixed);
     let labels = BindingLabels::from_chords(&chords)?;
@@ -823,40 +958,6 @@ fn resolved(definition: Definition, mut chords: Vec<KeyChord>) -> Option<Resolve
         chords,
         labels,
     })
-}
-fn definition_index(id: BindingId) -> usize {
-    match id {
-        BindingId::MoveDown => 0,
-        BindingId::MoveUp => 1,
-        BindingId::MoveTaskDown => 2,
-        BindingId::MoveTaskUp => 3,
-        BindingId::StartAdd => 4,
-        BindingId::StartEdit => 5,
-        BindingId::ToggleComplete => 6,
-        BindingId::Delete => 7,
-        BindingId::RestoreLatest => 8,
-        BindingId::OpenHelp => 9,
-        BindingId::NormalQuit => 10,
-        BindingId::MoveCursorLeft => 11,
-        BindingId::MoveCursorRight => 12,
-        BindingId::MoveCursorStart => 13,
-        BindingId::MoveCursorEnd => 14,
-        BindingId::MoveWordLeft => 15,
-        BindingId::MoveWordRight => 16,
-        BindingId::DeleteBeforeCursor => 17,
-        BindingId::DeleteAtCursor => 18,
-        BindingId::DeleteWordBeforeCursor => 19,
-        BindingId::DeleteWordAtCursor => 20,
-        BindingId::CommitEdit => 21,
-        BindingId::CancelEdit => 22,
-        BindingId::InsertEmergencyQuit => 23,
-        BindingId::CloseHelp => 24,
-        BindingId::HelpEmergencyQuit => 25,
-        BindingId::StartSearch => 26,
-        BindingId::CycleView => 27,
-        BindingId::ClearSearch => 28,
-        BindingId::PreviousView => 29,
-    }
 }
 fn issue(override_: &BindingOverride, message: impl Into<String>) -> KeymapIssue {
     KeymapIssue {
@@ -875,6 +976,49 @@ mod tests {
 
     fn pressed(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new_with_kind(code, modifiers, KeyEventKind::Press)
+    }
+
+    #[test]
+    fn trash_defaults_should_map_controls_and_ignore_normal_mutation_keys() {
+        let keymap = Keymap::defaults();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('t'), KeyModifiers::NONE)
+            ),
+            Some(Action::OpenTrash)
+        );
+        for (code, action) in [
+            (KeyCode::Char('j'), Action::MoveDown),
+            (KeyCode::Down, Action::MoveDown),
+            (KeyCode::Char('k'), Action::MoveUp),
+            (KeyCode::Up, Action::MoveUp),
+            (KeyCode::Char('r'), Action::RestoreSelected),
+            (KeyCode::Char('t'), Action::CloseTrash),
+            (KeyCode::Esc, Action::CloseTrash),
+            (KeyCode::Char('?'), Action::OpenHelp),
+            (KeyCode::Char('q'), Action::Quit),
+        ] {
+            assert_eq!(
+                keymap.map_key(Mode::Trash, pressed(code, KeyModifiers::NONE)),
+                Some(action)
+            );
+        }
+        for key in ['i', 'e', ' ', 'd', 'J', 'K', 'u', '/', 'f'] {
+            assert_eq!(
+                keymap.map_key(Mode::Trash, pressed(KeyCode::Char(key), KeyModifiers::NONE)),
+                None
+            );
+        }
+        for key in ['r', 'f'] {
+            assert_eq!(
+                keymap.map_key(
+                    Mode::Normal,
+                    pressed(KeyCode::Char(key), KeyModifiers::NONE)
+                ),
+                None
+            );
+        }
     }
 
     #[test]
@@ -1173,7 +1317,7 @@ mod tests {
                 Some(action)
             );
         }
-        for mode in [Mode::Normal, Mode::Insert, Mode::Help] {
+        for mode in [Mode::Normal, Mode::Insert, Mode::Help, Mode::Trash] {
             assert_eq!(
                 keymap.map_key(
                     mode,
@@ -1226,7 +1370,7 @@ mod tests {
     #[test]
     fn control_c_should_have_one_group_in_each_mode_and_normal_should_describe_help_and_reorder() {
         let keymap = Keymap::defaults();
-        for mode in [Mode::Normal, Mode::Insert, Mode::Help] {
+        for mode in [Mode::Normal, Mode::Insert, Mode::Help, Mode::Trash] {
             assert_eq!(
                 keymap
                     .bindings_for(mode)
@@ -1246,8 +1390,8 @@ mod tests {
     #[test]
     fn keymap_should_expose_configurable_and_active_binding_counts() {
         let keymap = Keymap::defaults();
-        assert_eq!(keymap.configurable_action_count(), 28);
-        assert_eq!(keymap.active_binding_count(), 37);
+        assert_eq!(keymap.configurable_action_count(), 35);
+        assert_eq!(keymap.active_binding_count(), 48);
         assert_eq!(
             BindingId::from_config(Mode::Normal, "move_down"),
             Some(BindingId::MoveDown)
@@ -1287,28 +1431,31 @@ mod tests {
     }
 
     #[test]
-    fn search_view_and_clear_defaults_should_leave_trash_keys_available() {
+    fn search_view_and_clear_defaults_should_coexist_with_trash_controls() {
         let keymap = Keymap::defaults();
         for (code, action) in [
             (KeyCode::Char('/'), Action::StartSearch),
             (KeyCode::Tab, Action::CycleView),
             (KeyCode::BackTab, Action::PreviousView),
             (KeyCode::Esc, Action::ClearSearch),
+            (KeyCode::Char('t'), Action::OpenTrash),
         ] {
             assert_eq!(
                 keymap.map_key(Mode::Normal, pressed(code, KeyModifiers::NONE)),
                 Some(action)
             );
         }
-        for character in ['t', 'r'] {
-            assert_eq!(
-                keymap.map_key(
-                    Mode::Normal,
-                    pressed(KeyCode::Char(character), KeyModifiers::NONE)
-                ),
-                None
-            );
-        }
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('r'), KeyModifiers::NONE)
+            ),
+            None
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Trash, pressed(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Some(Action::RestoreSelected)
+        );
     }
 
     #[test]
@@ -1457,8 +1604,8 @@ mod tests {
                 BindingId::PreviousView,
             ]
         );
-        assert_eq!(keymap.configurable_action_count(), 28);
-        assert_eq!(keymap.active_binding_count(), 35);
+        assert_eq!(keymap.configurable_action_count(), 35);
+        assert_eq!(keymap.active_binding_count(), 46);
         assert!(keymap.unbound_actions_for(Mode::Insert).next().is_none());
         for mode in [Mode::Normal, Mode::Insert, Mode::Search, Mode::Help] {
             assert_eq!(
@@ -1499,11 +1646,11 @@ mod tests {
                 keymap.map_key(Mode::Normal, pressed(code, modifiers)),
                 Some(Action::PreviousView)
             );
-            for mode in [Mode::Insert, Mode::Search, Mode::Help] {
+            for mode in [Mode::Insert, Mode::Search, Mode::Help, Mode::Trash] {
                 assert_eq!(keymap.map_key(mode, pressed(code, modifiers)), None);
             }
         }
-        for mode in [Mode::Insert, Mode::Search, Mode::Help] {
+        for mode in [Mode::Insert, Mode::Search, Mode::Help, Mode::Trash] {
             assert_eq!(
                 keymap.map_key(mode, pressed(KeyCode::Tab, KeyModifiers::NONE)),
                 None
@@ -1547,6 +1694,53 @@ mod tests {
         }])
         .unwrap_err();
         assert_eq!(issues[0].message, "duplicate key \"Shift-Tab\"");
+    }
+
+    #[test]
+    fn search_and_trash_upgrade_defaults_should_resolve_each_others_explicit_keys() {
+        let search_override = BindingOverride {
+            order: 0,
+            path: "keybindings.normal.start_search".into(),
+            id: BindingId::StartSearch,
+            keys: vec!["t".into()],
+        };
+        let keymap = Keymap::with_overrides(std::slice::from_ref(&search_override)).unwrap();
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('t'), KeyModifiers::NONE)
+            ),
+            Some(Action::StartSearch)
+        );
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('t'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::OpenTrash)
+        );
+        let keymap = Keymap::with_overrides(&[
+            search_override,
+            BindingOverride {
+                order: 1,
+                path: "keybindings.normal.open_trash".into(),
+                id: BindingId::OpenTrash,
+                keys: vec!["tab".into()],
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            keymap.map_key(Mode::Normal, pressed(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Action::OpenTrash)
+        );
+        assert_eq!(
+            keymap.unbound_actions_for(Mode::Normal).collect::<Vec<_>>(),
+            vec![BindingId::CycleView]
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Trash, pressed(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Some(Action::CloseTrash)
+        );
     }
 
     #[test]

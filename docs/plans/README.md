@@ -9,6 +9,8 @@ specified verification gates, and update its status only after completion.
 | Plan | Title | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- | --- |
 | [001](./001-agent-shell-interface.md) | Add an agent-friendly list and soft-delete shell interface | P1 | M | none | DONE |
+| [004](./004-browsable-trash.md) | Add browsable TUI trash and selective restoration | P1 | M | 001 | DONE |
+| [Concurrent usage](./concurrent-usage.md) | Short storage transactions and safe TUI refresh | P1 | L | Contract review; see integration order | TODO |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a short reason, or REJECTED
 with a short rationale.
@@ -16,11 +18,32 @@ with a short rationale.
 ## Dependency notes
 
 - Plan 001 has no dependencies.
+- Feature 004 uses the existing persisted tombstones and scope-local IDs. Its
+  record includes the shared restoration contract and parallel integration notes.
+- Concurrent usage is a proposed design awaiting review before runtime work.
+  Coordinate its mutation and projected-view contracts with the parallel shell
+  lifecycle, search/filter, and trash branches. Its plan defines integration
+  order without authorizing implementation of those features.
 
 ## Completed historical plans
 
 - [Shtodo version-one implementation](./2026-09-01-shtodo-v1.md)
 - [User-configured keybindings](./2026-09-01-user-configured-keybindings.md)
+
+## Parallel integration notes
+
+- The shell lifecycle and browsable-trash branches share
+  `pub(crate) fn restore(&mut self, id: TaskId) -> Result<bool, ListError>` in
+  `src/task.rs`. Keep one implementation when combining them: clear only
+  `deletion_sequence`, return `true` for a restored tombstone, `false` for an
+  already-live task, and `TaskNotFound` for an unknown ID. Preserve text,
+  completion, ID, canonical position, and existing `restore_latest` behavior.
+- Shell lifecycle adds `set_completed` and changes `TaskList::edit` to return
+  whether the live task changed. Existing TUI callers may discard the return
+  value. Shell handlers save only changes and keep the current lock architecture.
+- Reconcile command dispatch, usage text, CLI tests, and shared documentation
+  with the search/filtering and trash branches during integration. Benchmark
+  timings remain historical; the added shell lifecycle commands are not timed.
 
 ## Findings considered and rejected
 

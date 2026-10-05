@@ -3,6 +3,9 @@
 Release preparation happens in a normal pull request. Update the version in
 `Cargo.toml`, refresh `Cargo.lock`, move the completed notes from `Unreleased`
 into a versioned `CHANGELOG.md` section, and merge only after CI passes.
+If shell commands, output formats, or default keybindings changed, update
+[`skills/shtodo/SKILL.md`](../skills/shtodo/SKILL.md) and the version it
+names.
 
 To rehearse a release, open the `Release` workflow in GitHub Actions, select
 `main`, leave the tag as `dry-run`, and run the workflow. To publish, run the
@@ -54,5 +57,14 @@ dist plan
 See the [cargo-dist Homebrew guide] for the publishing configuration and the
 [GitHub token guide] for credential setup.
 
+## Agent skill publishing
+
+The skills installer reads `skills/shtodo/`, including its `agents/`
+subdirectory, directly from this repository's public `main` branch.
+Distributing the skill requires no npm package or shtodo binary release;
+merging changes to `main` publishes them. Share the [README's Agent skill
+section] as the landing page.
+
 [cargo-dist Homebrew guide]: https://axodotdev.github.io/cargo-dist/book/installers/homebrew.html
 [GitHub token guide]: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+[README's Agent skill section]: https://github.com/benmkramer/shtodo#agent-skill

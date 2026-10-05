@@ -137,6 +137,72 @@ mod tests {
     use crate::app::Mode;
 
     #[test]
+    fn trash_restore_should_persist_and_leave_latest_restore_available_after_restarting() {
+        use crate::task::{ListScope, TaskList};
+
+        let home = tempfile::tempdir().unwrap();
+        let mut tasks = TaskList::new(ListScope::Global);
+        let older = tasks.add("completed older").unwrap();
+        let newest = tasks.add("newest").unwrap();
+        tasks.toggle_complete(older).unwrap();
+        tasks.delete(older).unwrap();
+        tasks.delete(newest).unwrap();
+        let store = Store::open(home.path(), ListScope::Global).unwrap();
+        store.save(&tasks).unwrap();
+        drop(store);
+
+        let store = Store::open(home.path(), ListScope::Global).unwrap();
+        let keymap = Keymap::defaults();
+        let mut app = App::new(store.load().unwrap());
+        let before = std::fs::read(&store.paths().data_file).unwrap();
+        for (key, transition) in [
+            ('t', Transition::Transient),
+            ('j', Transition::Transient),
+            ('r', Transition::Persisted),
+        ] {
+            let action = action_for_event(
+                &keymap,
+                app.mode(),
+                Event::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)),
+            )
+            .unwrap();
+            assert_eq!(app.apply(action).unwrap(), transition);
+            if transition == Transition::Persisted {
+                store.save(app.tasks()).unwrap();
+            } else {
+                assert_eq!(std::fs::read(&store.paths().data_file).unwrap(), before);
+            }
+        }
+        assert!(!store.paths().temp_file.exists());
+        drop(store);
+
+        let store = Store::open(home.path(), ListScope::Global).unwrap();
+        let mut app = App::new(store.load().unwrap());
+        let restored = app.tasks().task(older).unwrap();
+        assert_eq!(restored.text(), "completed older");
+        assert!(restored.completed());
+        assert!(!restored.is_deleted());
+        let action = action_for_event(
+            &keymap,
+            app.mode(),
+            Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
+        )
+        .unwrap();
+        assert_eq!(app.apply(action).unwrap(), Transition::Persisted);
+        assert_eq!(app.selected(), Some(newest));
+        store.save(app.tasks()).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(
+            loaded
+                .visible_tasks()
+                .map(|task| task.id())
+                .collect::<Vec<_>>(),
+            vec![older, newest]
+        );
+        assert!(loaded.deleted_tasks().is_empty());
+    }
+
+    #[test]
     fn action_for_event_should_ignore_resize_and_key_release() {
         let keymap = Keymap::defaults();
         assert_eq!(

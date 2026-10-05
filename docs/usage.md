@@ -11,6 +11,11 @@ shtodo list
 shtodo --local list
 shtodo delete 3
 shtodo --local delete 3
+shtodo [--local] done 3
+shtodo [--local] reopen 3
+shtodo [--local] edit 3 "New text"
+shtodo [--local] restore 3
+shtodo [--local] add --print-id "Fix the bug"
 shtodo doctor
 shtodo --help
 shtodo --version
@@ -21,7 +26,29 @@ a list for the exact directory from which it is run. `--local` does not search
 parent directories or use a repository root. Use `--help` (or `-h`) for usage
 and `--version` (or `-V`) for the installed version.
 
-### Shell listing and deletion
+In command syntax, `[--local]` means an optional flag before the command;
+do not type the brackets.
+
+### Adding from the shell
+
+`shtodo [--local] add "Task text"` adds one trimmed, non-empty, single-line
+task. Omitting the text reads one task from standard input, including an
+optional trailing newline. Multiple input lines are rejected, and missing or
+blank input produces an error with usage examples. By default, success prints
+`Added: Task text` after the task has been saved.
+
+For scripts, use exactly `shtodo [--local] add --print-id [<TASK>]`. Place
+`--print-id` immediately after `add`, before optional text. This mode prints
+only the persisted positive decimal ID and a newline after a successful save.
+It uses the same text validation and single-task stdin behavior:
+
+```sh
+task_id=$(shtodo add --print-id "Fix the bug")
+shtodo done "$task_id"
+printf 'Run the tests\n' | shtodo --local add --print-id
+```
+
+### Shell listing and task lifecycle
 
 `shtodo list` prints every non-deleted global task in canonical order. Use
 `shtodo --local list` for the exact current-directory scope. Each task occupies
@@ -57,15 +84,43 @@ snapshot:
 Already deleted 3: Fix the bug
 ```
 
-Deleted tasks retain their tombstones and can be restored with `u` in the TUI.
+Deleted tasks retain their tombstones and can be restored by ID from the
+shell, with `u` in the TUI, or individually in the trash view opened with `t`.
 An unknown ID fails with `task 3 was not found`. Missing, zero, signed,
 nonnumeric, and extra IDs are usage errors. Deletion uses the selected scope's
 writer lock and atomic save path, so it fails if another writer holds that
-lock. Invalid keybinding configuration does not block either shell command.
+lock.
 
-The interface has Normal, Insert, Search, and Help modes. Add or edit tasks in
-Insert mode, then press Enter to save. Task text is trimmed, must be non-empty and
-single-line, and Escape cancels an uncommitted add or edit. A terminal smaller
+The rest of the shell lifecycle accepts the same positive scope-local IDs:
+
+| Command | Behavior | Changed-task success | Unchanged-task success |
+| --- | --- | --- | --- |
+| `shtodo [--local] done <ID>` | Set a live task complete | `Completed 3: Fix the bug` | `Already done 3: Fix the bug` |
+| `shtodo [--local] reopen <ID>` | Set a live task incomplete | `Reopened 3: Fix the bug` | `Already open 3: Fix the bug` |
+| `shtodo [--local] edit <ID> "New text"` | Replace a live task's text | `Edited 3: New text` | `Unchanged 3: New text` |
+| `shtodo [--local] restore <ID>` | Clear a task's tombstone | `Restored 3: Fix the bug` | `Already live 3: Fix the bug` |
+
+`done` and `reopen` set explicit states, so retries never toggle a task.
+Unchanged edits compare the trimmed, validated text. These no-op successes,
+including restoring an already-live task, do not rewrite the snapshot.
+Editing requires exactly one text argument; it does not read stdin. Blank or
+multiline text fails with usage help. Completion and editing preserve IDs and
+canonical ordering. Restoration preserves the original text, completion, ID,
+and canonical position, and does not change how TUI `u` selects the latest
+remaining tombstone.
+
+`done`, `reopen`, and `edit` reject deleted IDs and point to the scoped
+`restore` command to run first. Unknown IDs fail. All shell mutations use the
+selected scope's existing writer lock, save changes atomically, and report
+success only after persistence succeeds. Even no-op mutations fail while
+another writer holds that lock. Invalid keybinding configuration does not
+block `add`, `list`, `delete`, `done`, `reopen`, `edit`, or `restore`.
+
+### Interactive editing
+
+The interface has Normal, Insert, Search, Help, and Trash modes. Add or edit
+tasks in Insert mode, then press Enter to save. Task text is trimmed, must be non-empty
+and single-line, and Escape cancels an uncommitted add or edit. A terminal smaller
 than 40 columns by 8 rows displays a resize message until it is large enough.
 Pressing Enter with blank or all-whitespace text keeps the editor in Insert
 mode, saves nothing, and shows `Task text cannot be empty`.
@@ -89,6 +144,7 @@ mode, saves nothing, and shows `Task text cannot be empty`.
 | Tab           | Move to the next All, Open, or Done tab          |
 | Shift-Tab     | Move to the previous view tab                    |
 | Esc           | Clear the accepted search, keeping the view     |
+| `t`           | Open trash for the current scope                |
 | `?`           | Open keyboard help                              |
 | `q` or Ctrl-C | Quit                                            |
 
@@ -116,10 +172,57 @@ Alt-b and Alt-f aliases above.
 
 ### Help mode
 
+Help shows the current view's bindings. From the normal list it also shows
+Insert controls; from trash it shows Trash controls. Closing help returns to
+the view and selection from which it was opened.
+
 | Key        | Action              |
 | ---------- | ------------------- |
 | `?` or Esc | Close keyboard help |
 | Ctrl-C     | Quit                |
+
+### Trash mode
+
+Press `t` from the normal list to browse deleted tasks in the current global
+or exact-directory scope. If an existing config uses Normal `t` for another
+action, the implicit opening key falls back to `Ctrl-t`. When both are taken,
+configure `open_trash` with an unused Normal key; `shtodo doctor` reports the
+missing opening binding. See [Configuring keybindings] for the details.
+The header and footer label this view `TRASH`.
+Rows show each task's stable scope-local ID, `open` or `done` completion
+state, and text, including tasks deleted with the shell `delete` command.
+Trash is ordered by persisted `deletion_sequence`, most recently deleted
+first, and opens with the newest deletion selected. No timestamps are added.
+
+| Key           | Action                         |
+| ------------- | ------------------------------ |
+| `j` or Down   | Select the next older deletion |
+| `k` or Up     | Select the next newer deletion |
+| `r`           | Restore the selected task      |
+| `t` or Esc    | Return to the normal list      |
+| `?`           | Open trash keyboard help       |
+| `q` or Ctrl-C | Quit                           |
+
+Restoration saves immediately and leaves trash open. Selection moves to the
+next older deletion, or to the preceding newer deletion if there is no older
+one. Restoring the final tombstone clears selection and shows `Trash is empty`.
+Pressing `r` in empty trash shows `Nothing to restore` without saving.
+Navigation stops at either end of the list.
+
+Trash lists every tombstone, independently of the live view and search query.
+Opening and closing trash preserves that view and query. Returning to the
+normal list selects the most recent restored task that matches them. If no
+restored task matches, it preserves the prior matching selection; an empty
+live view has no selection. Restoring a hidden task shows an explanatory message.
+Reopening trash starts again at the newest remaining deletion. Restoration
+only clears the deletion marker; text, completion, ID, and canonical position
+are preserved. The normal list's `u` still restores the latest remaining
+deletion, including after a restart.
+
+Normal mutation and search keys (`i`, `e`, Space, `d`, `J`, `K`, `u`, `/`,
+Tab, and Shift-Tab) are inactive in trash. Tombstones cannot be edited,
+completed, reordered, or permanently
+removed from this view. Browse and help actions never save the snapshot.
 
 To change these controls, see [Configuring keybindings].
 
@@ -128,11 +231,11 @@ To change these controls, see [Configuring keybindings].
 Each TUI session starts in All with an empty search. The tab strip highlights
 and brackets the active view, such as `[All]`. Tab moves through All, Open,
 Done, then All again; Shift-Tab moves backward, wrapping from All to Done.
-These controls work in Normal mode;
-accept or cancel an edit before switching views. Press `/` to edit the current
-query. Matches update as you type and combine with the active view. Search uses
-a literal substring of task text after Unicode lowercasing; spaces and punctuation are literal,
-and there are no regular expressions, accent normalization, or tags.
+These controls work in Normal mode; accept or cancel an edit before switching
+views. Press `/` to edit the current query. Matches update as you type and
+combine with the active view. Search uses a literal substring of task text
+after Unicode lowercasing; spaces and punctuation are literal, and there are
+no regular expressions, accent normalization, or tags.
 
 Search mode uses the same text editing bindings as Insert mode. Enter accepts
 the query and returns to the list, including an empty query. Escape cancels
@@ -143,8 +246,8 @@ these keys follow the configured bindings described in [Configuring keybindings]
 
 The tab strip and status line show the active view, matching count, and
 `/query`, including an empty query. The header's open/done counts cover all
-non-deleted tasks in the scope. An empty list shows `No tasks yet`; a populated list whose current
-view/search matches nothing shows `No matching tasks`. Search and view changes
+non-deleted tasks in the scope. An empty list shows `No tasks yet`; a populated
+list whose current view/search matches nothing shows `No matching tasks`. Search and view changes
 are transient, do not save anything, and do not affect `shtodo list` output.
 
 Matching tasks retain their manual, canonical order. Navigation and task
@@ -176,8 +279,9 @@ Changes are saved immediately after a successful add, edit, completion toggle,
 reorder, deletion, or restoration. Snapshots are written through a temporary
 file and atomically replace the previous canonical snapshot. Deletions are
 tombstones rather than immediate erasure, so `u` restores the latest deleted
-task even after quitting and relaunching. If no tombstone is available, `u`
-shows `Nothing to restore` and leaves the snapshot unchanged.
+task and `t` lists deletions for selective restoration, even after quitting
+and relaunching. If no tombstone is available, `u` shows `Nothing to restore`
+and leaves the snapshot unchanged.
 
 Each list scope has its own process lock. A second `shtodo` process for the
 same global or local list is rejected while the first holds the lock; a global
@@ -191,14 +295,14 @@ different local-list identity, even if its name is unchanged. The read-only
 Version one is intentionally local and narrow. It does not include accounts,
 synchronization, network access, sharing or collaboration, recurring tasks,
 reminders, notifications, dates or due dates, priorities, tags, or multiple
-named lists. It has no trash view, sidebar, mouse interaction, Git-root
+named lists. It has no sidebar, mouse interaction, Git-root
 discovery for local scope, runtime plugins or extensions, custom themes,
 shell search or filters, import, export, structured JSON output, bulk commands,
-permanent deletion, or additional task-management modes.
+permanent deletion, or bulk restoration.
 
-The following work is explicitly deferred: a trash view that lists, restores,
-and permanently removes tombstones; a sidebar for global, project, trash, and
-later views. Editing is scalar-value-based, so grapheme-cluster-aware editing
+The following work is explicitly deferred: permanent deletion and automatic
+purging of tombstones; a sidebar for global, project, trash, and later views.
+Editing is scalar-value-based, so grapheme-cluster-aware editing
 is deferred if it becomes necessary. Homebrew and other package-manager
 distribution, plus broader Windows runtime testing and support, are also
 deferred. Windows is kept build-compatible where practical, but full Windows
