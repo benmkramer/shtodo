@@ -12,7 +12,7 @@ requested or covered by an established shtodo workflow.
 
 Run `shtodo --version` and `shtodo --help` before first use in a session.
 Treat the installed help as authoritative for available commands; this skill
-describes shtodo 0.1.0-beta.3, and newer versions may add commands. If the
+describes shtodo 0.1.0-beta.4, and newer versions may add commands. If the
 binary is missing, report that prerequisite and point to the
 [installation instructions](https://github.com/benmkramer/shtodo#installation).
 
