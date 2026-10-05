@@ -4,6 +4,8 @@ All notable changes to shtodo are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-10-05
+
 ### Added
 
 - Transient TUI text search with `/` and All/Open/Done tabs with Tab and
@@ -19,6 +21,9 @@ All notable changes to shtodo are documented in this file.
 - Optional `add --print-id` output for scripts, including single-task stdin.
 - Homebrew installation through `benmkramer/tap/shtodo`, with automatic formula
   updates from the release workflow.
+- An installable agent skill for scoped task management, updated for the full
+  shell task lifecycle and script-friendly task ID output.
+- A reproducible CLI benchmark harness and documented comparison results.
 
 ### Fixed
 
@@ -51,6 +56,7 @@ All notable changes to shtodo are documented in this file.
 - User-configured keybindings from `~/.shtodo/config.toml`, reflected in input, footer hints, empty-state guidance, and keyboard help.
 - `shtodo doctor` for validating keybinding syntax, reserved keys, and conflicts without opening task storage or the terminal UI.
 
-[Unreleased]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.2...HEAD
+[Unreleased]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.3...HEAD
+[0.1.0-beta.3]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.2...v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/benmkramer/shtodo/releases/tag/v0.1.0-beta.1

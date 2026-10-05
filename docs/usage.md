@@ -303,10 +303,10 @@ permanent deletion, or bulk restoration.
 The following work is explicitly deferred: permanent deletion and automatic
 purging of tombstones; a sidebar for global, project, trash, and later views.
 Editing is scalar-value-based, so grapheme-cluster-aware editing
-is deferred if it becomes necessary. Homebrew and other package-manager
-distribution, plus broader Windows runtime testing and support, are also
-deferred. Windows is kept build-compatible where practical, but full Windows
-runtime support is not a version-one promise.
+is deferred if it becomes necessary. Distribution through package managers
+other than Homebrew, plus broader Windows runtime testing and support, are
+also deferred. Windows is kept build-compatible where practical, but full
+Windows runtime support is not a version-one promise.
 
 Version one also does not promise cross-device conflict resolution or
 compatibility with task-manager formats.
