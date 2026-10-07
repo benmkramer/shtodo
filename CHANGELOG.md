@@ -4,6 +4,13 @@ All notable changes to shtodo are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `--json` output for listing and all shell task mutations, with a
+  versioned schema, explicit scope, saved task data, and mutation change status.
+- Structured JSON errors with stable codes, including lock contention and
+  visible changes whose durability is unconfirmed.
+
 ## [0.1.0-beta.4] - 2026-10-05
 
 ### Added

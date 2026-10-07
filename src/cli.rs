@@ -6,6 +6,12 @@ pub(crate) enum ScopeChoice {
     Local,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutputFormat {
+    Text,
+    Json,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Command {
     Run(ScopeChoice),
@@ -27,6 +33,9 @@ pub(crate) enum CliError {
     MissingTaskId,
     MissingTaskText,
     InvalidTaskId { value: OsString },
+    DuplicateJsonFlag,
+    JsonWithPrintId,
+    JsonRequiresTaskCommand,
 }
 
 impl fmt::Display for CliError {
@@ -43,12 +52,83 @@ impl fmt::Display for CliError {
                     "invalid task ID {value:?}; expected a positive integer"
                 )?;
             }
+            Self::DuplicateJsonFlag => formatter.write_str("--json may only be specified once")?,
+            Self::JsonWithPrintId => {
+                formatter.write_str("--json and --print-id cannot be combined")?;
+            }
+            Self::JsonRequiresTaskCommand => {
+                formatter.write_str(
+                    "--json requires add, list, delete, done, reopen, edit, or restore",
+                )?;
+            }
         }
         write!(formatter, "\n\n{}", usage())
     }
 }
 
 impl Error for CliError {}
+
+// Retain the output format even when parsing fails, so usage errors are JSON too.
+pub(crate) fn parse_invocation<I>(args: I) -> (OutputFormat, Result<Command, CliError>)
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut values: Vec<OsString> = args.into_iter().collect();
+    let mut json_flags = 0;
+    let mut index = 0;
+    while index < values.len() && (values[index] == "--local" || values[index] == "--json") {
+        if values[index] == "--json" {
+            values.remove(index);
+            json_flags += 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    let command_index = index;
+    if let Some(command) = values.get(command_index).and_then(|value| value.to_str()) {
+        let positional_count = match command {
+            "add" | "delete" | "done" | "reopen" | "restore" => 1,
+            "edit" => 2,
+            // Unsupported commands still need structured rejection of --json.
+            _ => 0,
+        };
+        index += 1;
+        while index < values.len() {
+            if values[index] == "--json" {
+                values.remove(index);
+                json_flags += 1;
+            } else if values[command_index] == "add" && values[index] == "--print-id" {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+        // A final flag is unambiguous only after all task positional arguments.
+        while values.len() > index + positional_count
+            && values.last().is_some_and(|value| value == "--json")
+        {
+            values.pop();
+            json_flags += 1;
+        }
+    }
+
+    if json_flags == 0 {
+        return (OutputFormat::Text, parse_args(values));
+    }
+    let command = if json_flags > 1 {
+        Err(CliError::DuplicateJsonFlag)
+    } else {
+        parse_args(values).and_then(|command| match command {
+            Command::Add(_, _, true) => Err(CliError::JsonWithPrintId),
+            Command::Run(_) | Command::Doctor | Command::Help | Command::Version => {
+                Err(CliError::JsonRequiresTaskCommand)
+            }
+            _ => Ok(command),
+        })
+    };
+    (OutputFormat::Json, command)
+}
 
 pub(crate) fn parse_args<I>(args: I) -> Result<Command, CliError>
 where
@@ -184,6 +264,7 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo [--local] reopen <ID>\n",
         "  shtodo [--local] edit <ID> <TASK>\n",
         "  shtodo [--local] restore <ID>\n",
+        "  shtodo [--local] --json <COMMAND> [<ARGS>]\n",
         "  shtodo doctor\n",
         "  shtodo --help\n",
         "  shtodo --version\n",
@@ -204,6 +285,9 @@ pub(crate) fn usage() -> &'static str {
         "Options:\n",
         "  --local     Use the list for the current directory instead of the global list.\n",
         "  --print-id  Put immediately after add; print only the saved task ID.\n",
+        "  --json      Output JSON for shell task commands, including errors.\n",
+        "              Put before/after the command or after its arguments.\n",
+        "              Cannot be combined with --print-id.\n",
         "  -h, --help  Show this help text.\n",
         "  -V, --version\n",
         "              Show the installed version.\n",
@@ -216,6 +300,8 @@ pub(crate) fn usage() -> &'static str {
         "  printf 'Fix the bug\\n' | shtodo --local add\n",
         "  shtodo list\n",
         "  shtodo --local list\n",
+        "  shtodo list --json\n",
+        "  shtodo --local --json add \"Run the tests\"\n",
         "  shtodo delete 3\n",
         "  shtodo --local delete 3\n",
         "  shtodo done 3\n",

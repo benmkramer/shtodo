@@ -3,6 +3,7 @@ mod app;
 mod cli;
 mod config;
 mod input;
+mod json;
 mod mutation;
 mod projection;
 mod session;
@@ -14,18 +15,36 @@ mod ui;
 use std::{
     ffi::OsString,
     io::{IsTerminal as _, Read as _, Write as _},
+    process::ExitCode,
 };
 
 use color_eyre::eyre::{Result, WrapErr as _, eyre};
 
 /// Runs shtodo using process arguments and local environment state.
 ///
+/// JSON command failures are reported on stderr and return a failure exit code.
+///
 /// # Errors
 ///
-/// Returns an error when arguments, storage, terminal setup, input, rendering,
-/// persistence, or terminal restoration fails.
-pub fn run() -> Result<()> {
-    match cli::parse_args(std::env::args_os().skip(1))? {
+/// Returns an error when a text-mode command fails, or when JSON error output
+/// cannot be written.
+pub fn run() -> Result<ExitCode> {
+    let (format, command) = cli::parse_invocation(std::env::args_os().skip(1));
+    match command
+        .map_err(Into::into)
+        .and_then(|command| execute(command, format))
+    {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(error) if format == cli::OutputFormat::Json => {
+            json::write_error(&error)?;
+            Ok(ExitCode::FAILURE)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn execute(command: cli::Command, format: cli::OutputFormat) -> Result<()> {
+    match command {
         cli::Command::Help => {
             std::io::stdout()
                 .lock()
@@ -39,26 +58,26 @@ pub fn run() -> Result<()> {
             )?;
         }
         cli::Command::Add(choice, argument, print_id) => {
-            add_task(choice, argument, print_id)?;
+            add_task(choice, argument, print_id, format)?;
         }
         cli::Command::List(choice) => {
-            list_tasks(choice)?;
+            list_tasks(choice, format)?;
         }
         cli::Command::Delete(choice, id) => {
-            delete_task(choice, id)?;
+            delete_task(choice, id, format)?;
         }
         cli::Command::Done(choice, id) => {
-            mutate_task(choice, id, TaskMutation::SetCompleted(true))?;
+            mutate_task(choice, id, TaskMutation::SetCompleted(true), format)?;
         }
         cli::Command::Reopen(choice, id) => {
-            mutate_task(choice, id, TaskMutation::SetCompleted(false))?;
+            mutate_task(choice, id, TaskMutation::SetCompleted(false), format)?;
         }
         cli::Command::Edit(choice, id, argument) => {
             let text = task_text_from_argument(argument)?;
-            mutate_task(choice, id, TaskMutation::Edit(&text))?;
+            mutate_task(choice, id, TaskMutation::Edit(&text), format)?;
         }
         cli::Command::Restore(choice, id) => {
-            mutate_task(choice, id, TaskMutation::Restore)?;
+            mutate_task(choice, id, TaskMutation::Restore, format)?;
         }
         cli::Command::Doctor => {
             let home = storage::home_from_environment()?;
@@ -83,7 +102,12 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn add_task(choice: cli::ScopeChoice, argument: Option<OsString>, print_id: bool) -> Result<()> {
+fn add_task(
+    choice: cli::ScopeChoice,
+    argument: Option<OsString>,
+    print_id: bool,
+    format: cli::OutputFormat,
+) -> Result<()> {
     let text = match argument {
         Some(value) => task_text_from_argument(value)?,
         None => read_task_from_stdin()?,
@@ -100,7 +124,10 @@ fn add_task(choice: cli::ScopeChoice, argument: Option<OsString>, print_id: bool
         storage::ScopePresence::AllowMissing,
         storage::SHELL_LOCK_BUDGET,
     )?;
-    let (id, tasks, _) = shell_result(reply)?;
+    let (id, tasks, changed) = shell_result(reply)?;
+    if format == cli::OutputFormat::Json {
+        return json::write_mutation("add", &tasks, id, changed);
+    }
     let text = tasks
         .task(id)
         .ok_or(task::ListError::TaskNotFound(id))?
@@ -115,17 +142,20 @@ fn add_task(choice: cli::ScopeChoice, argument: Option<OsString>, print_id: bool
 
 fn task_text_from_argument(value: OsString) -> Result<String> {
     value.into_string().map_err(|value| {
-        eyre!(
+        color_eyre::Report::from(task::ListError::InvalidText).wrap_err(format!(
             "task text is not valid UTF-8: {value:?}\n\n{}",
             cli::usage()
-        )
+        ))
     })
 }
 
-fn list_tasks(choice: cli::ScopeChoice) -> Result<()> {
+fn list_tasks(choice: cli::ScopeChoice, format: cli::OutputFormat) -> Result<()> {
     let home = storage::home_from_environment()?;
     let scope = storage::scope_from_environment(choice)?;
     let tasks = storage::load_read_only(&home, &scope)?;
+    if format == cli::OutputFormat::Json {
+        return json::write_list(&tasks);
+    }
     let mut stdout = std::io::stdout().lock();
     for task in tasks.visible_tasks() {
         let state = if task.completed() { "done" } else { "open" };
@@ -134,13 +164,20 @@ fn list_tasks(choice: cli::ScopeChoice) -> Result<()> {
     Ok(())
 }
 
-fn delete_task(choice: cli::ScopeChoice, raw_id: u64) -> Result<()> {
+fn delete_task(choice: cli::ScopeChoice, raw_id: u64, format: cli::OutputFormat) -> Result<()> {
     let home = storage::home_from_environment()?;
     let scope = storage::scope_from_environment(choice)?;
     let store = storage::Store::open(&home, scope)?;
-    let (id, text, already_deleted) = delete_task_in_store(&store, raw_id)?;
+    let (id, tasks, changed) = delete_task_in_store(&store, raw_id)?;
+    if format == cli::OutputFormat::Json {
+        return json::write_mutation("delete", &tasks, id, changed);
+    }
+    let text = tasks
+        .task(id)
+        .ok_or(task::ListError::TaskNotFound(id))?
+        .text();
 
-    let prefix = if already_deleted {
+    let prefix = if !changed {
         "Already deleted"
     } else {
         "Deleted"
@@ -152,7 +189,7 @@ fn delete_task(choice: cli::ScopeChoice, raw_id: u64) -> Result<()> {
 fn delete_task_in_store(
     store: &storage::Store,
     raw_id: u64,
-) -> Result<(task::TaskId, String, bool)> {
+) -> Result<(task::TaskId, task::TaskList, bool)> {
     let id = task::TaskId::from_shell_integer(raw_id)
         .ok_or_else(|| eyre!("task ID must be a positive integer"))?;
     let reply = store.mutate(
@@ -160,13 +197,7 @@ fn delete_task_in_store(
         storage::ScopePresence::AllowMissing,
         storage::SHELL_LOCK_BUDGET,
     )?;
-    let (id, tasks, changed) = shell_result(reply)?;
-    let text = tasks
-        .task(id)
-        .ok_or(task::ListError::TaskNotFound(id))?
-        .text()
-        .to_owned();
-    Ok((id, text, !changed))
+    shell_result(reply)
 }
 
 fn shell_result(reply: storage::MutationReply) -> Result<(task::TaskId, task::TaskList, bool)> {
@@ -189,11 +220,29 @@ enum TaskMutation<'a> {
     Restore,
 }
 
-fn mutate_task(choice: cli::ScopeChoice, raw_id: u64, mutation: TaskMutation<'_>) -> Result<()> {
+fn mutate_task(
+    choice: cli::ScopeChoice,
+    raw_id: u64,
+    mutation: TaskMutation<'_>,
+    format: cli::OutputFormat,
+) -> Result<()> {
     let home = storage::home_from_environment()?;
     let scope = storage::scope_from_environment(choice)?;
     let store = storage::Store::open(&home, scope)?;
-    let (id, text, changed) = mutate_task_in_store(&store, raw_id, mutation)?;
+    let (id, tasks, changed) = mutate_task_in_store(&store, raw_id, mutation)?;
+    if format == cli::OutputFormat::Json {
+        let command = match mutation {
+            TaskMutation::SetCompleted(true) => "done",
+            TaskMutation::SetCompleted(false) => "reopen",
+            TaskMutation::Edit(_) => "edit",
+            TaskMutation::Restore => "restore",
+        };
+        return json::write_mutation(command, &tasks, id, changed);
+    }
+    let text = tasks
+        .task(id)
+        .ok_or(task::ListError::TaskNotFound(id))?
+        .text();
     let prefix = match (mutation, changed) {
         (TaskMutation::SetCompleted(true), true) => "Completed",
         (TaskMutation::SetCompleted(true), false) => "Already done",
@@ -212,7 +261,7 @@ fn mutate_task_in_store(
     store: &storage::Store,
     raw_id: u64,
     mutation: TaskMutation<'_>,
-) -> Result<(task::TaskId, String, bool)> {
+) -> Result<(task::TaskId, task::TaskList, bool)> {
     let id = task::TaskId::from_shell_integer(raw_id)
         .ok_or_else(|| eyre!("task ID must be a positive integer"))?;
     let request = match mutation {
@@ -229,7 +278,7 @@ fn mutate_task_in_store(
         storage::ScopePresence::AllowMissing,
         storage::SHELL_LOCK_BUDGET,
     );
-    let (id, tasks, changed) = reply
+    reply
         .map_err(|error| match error {
             storage::TransactionError::Failed(error) => error,
             other => other.into(),
@@ -241,20 +290,18 @@ fn mutate_task_in_store(
                     task::ListScope::Global => "",
                     task::ListScope::Project { .. } => " --local",
                 };
-                eyre!(
+                let message = format!(
                     "{error}; run `shtodo{scope_option} restore {}` first",
                     id.get()
-                )
+                );
+                error.wrap_err(message)
             }
-            Some(task::ListError::InvalidText) => eyre!("{error}\n\n{}", cli::usage()),
+            Some(task::ListError::InvalidText) => {
+                let message = format!("{error}\n\n{}", cli::usage());
+                error.wrap_err(message)
+            }
             _ => error,
-        })?;
-    let text = tasks
-        .task(id)
-        .ok_or(task::ListError::TaskNotFound(id))?
-        .text()
-        .to_owned();
-    Ok((id, text, changed))
+        })
 }
 
 fn read_task_from_stdin() -> Result<String> {
@@ -272,7 +319,8 @@ fn read_task_from_stdin() -> Result<String> {
 }
 
 fn missing_task_text() -> color_eyre::Report {
-    eyre!("task text is required\n\n{}", cli::usage())
+    color_eyre::Report::from(task::ListError::InvalidText)
+        .wrap_err(format!("task text is required\n\n{}", cli::usage()))
 }
 
 #[cfg(test)]
@@ -308,7 +356,9 @@ mod tests {
         let result = mutate_task_in_store(&store, first.get(), TaskMutation::Restore).unwrap();
         let mut loaded = store.load().unwrap();
 
-        assert_eq!(result, (first, "first".into(), true));
+        assert_eq!(result.0, first);
+        assert_eq!(result.1.task(first).unwrap().text(), "first");
+        assert!(result.2);
         assert_eq!(loaded.tasks()[0].id(), first);
         assert!(loaded.task(first).unwrap().completed());
         assert!(!loaded.task(first).unwrap().is_deleted());
