@@ -16,6 +16,8 @@ shtodo [--local] reopen 3
 shtodo [--local] edit 3 "New text"
 shtodo [--local] restore 3
 shtodo [--local] add --print-id "Fix the bug"
+shtodo list --json
+shtodo --local --json add "Fix the bug"
 shtodo doctor
 shtodo --help
 shtodo --version
@@ -116,6 +118,78 @@ selected scope's existing writer lock, save changes atomically, and report
 success only after persistence succeeds. Even no-op mutations fail while
 another writer holds that lock. Invalid keybinding configuration does not
 block `add`, `list`, `delete`, `done`, `reopen`, `edit`, or `restore`.
+
+### JSON output for agents
+
+Use `--json` with `add`, `list`, `delete`, `done`, `reopen`, `edit`, or
+`restore`. Put it before the command, immediately after the command, or after
+all its positional arguments. `--local` still goes before the command:
+
+```sh
+shtodo list --json
+shtodo --local --json add 'Fix the bug'
+shtodo --local done --json 3
+shtodo --local edit 3 'Updated text' --json
+printf '%s\n' 'Run the tests' | shtodo --local add --json
+```
+
+Success writes one compact JSON object and a newline to stdout, with empty
+stderr and exit status 0. Listing an empty or never-created scope returns an
+empty `tasks` array and creates no storage. JSON listing has the same saved
+order, inclusion of open and done tasks, and omission of tombstones as text
+listing:
+
+```json
+{"schema_version":1,"command":"list","scope":{"kind":"global"},"tasks":[{"id":1,"text":"Fix the bug","state":"open","deleted":false}]}
+```
+
+Mutation results contain the task from the saved transaction and a `changed`
+boolean. Repeated state-setting commands, unchanged edits, repeated deletion,
+and restoration of live tasks return `changed: false` without rewriting the
+snapshot. An add always creates a new task:
+
+```json
+{"schema_version":1,"command":"done","scope":{"kind":"global"},"task":{"id":1,"text":"Fix the bug","state":"done","deleted":false},"changed":true}
+```
+
+The output schema is independent of the on-disk snapshot schema. Its fields
+are:
+
+| Field | Contract |
+| --- | --- |
+| `schema_version` | Output schema version, currently `1`. |
+| `command` | The shell command that produced the successful result. |
+| `scope` | `{"kind":"global"}` or `{"kind":"project","path":"<canonical absolute directory>"}`. |
+| `tasks` | Array of non-deleted tasks for `list`, in saved order. |
+| `task` | Resulting task for a mutation, including deleted tasks after `delete`. |
+| `changed` | Whether the mutation changed the saved task list. |
+
+Each task has a positive numeric `id`, literal `text`, `state` (`open` or
+`done`), and boolean `deleted`. Deleting a task preserves its completion
+state. Retain scope alongside IDs. Task text is data, including quotes,
+backslashes, Unicode, and tabs; parse it with a JSON library. Clients should
+check `schema_version` and tolerate additional fields within that version.
+
+Failures write one JSON object and a newline to stderr, leave stdout empty,
+and exit nonzero. Error messages are for people; branch on `error.code`:
+
+```json
+{"schema_version":1,"error":{"code":"task_not_found","message":"task 42 was not found","task_id":42}}
+```
+
+Codes are `invalid_arguments`, `invalid_task_text`, `task_not_found`,
+`task_deleted`, `busy`, `durability_unconfirmed`, and `command_failed` for
+other storage, environment, or I/O failures. `task_id` is included when an
+error identifies a task. `durability_unconfirmed` means the change is already
+visible but synchronization failed; inspect the same scope before retrying,
+especially for adds. A lost response can also leave an add's outcome
+uncertain, so JSON does not make repeated adds idempotent.
+
+`--json` cannot be combined with `--print-id`, repeated, or used with the
+TUI, `doctor`, help, or version commands. Immediately after `add`, `--json`
+selects JSON mode; to add a task whose entire text is `--json`, pass the text
+through stdin. After `edit <ID>`, a sole `--json` argument is literal task
+text; select JSON mode before the command when editing to that text.
 
 ### Interactive editing
 
@@ -351,7 +425,7 @@ synchronization, network access, sharing or collaboration, recurring tasks,
 reminders, notifications, dates or due dates, priorities, tags, or multiple
 named lists. It has no sidebar, mouse interaction, Git-root
 discovery for local scope, runtime plugins or extensions, custom themes,
-shell search or filters, import, export, structured JSON output, bulk commands,
+shell search or filters, import, export, bulk commands,
 permanent deletion, or bulk restoration.
 
 The following work is explicitly deferred: permanent deletion and automatic

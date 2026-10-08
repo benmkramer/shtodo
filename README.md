@@ -53,6 +53,8 @@ shtodo add "Fix the bug"
 shtodo --local add "Run the tests"
 shtodo list
 shtodo --local list
+shtodo list --json
+shtodo --local --json add "Capture a task for an agent"
 shtodo delete 3
 shtodo --local delete 3
 shtodo done 3
@@ -73,6 +75,11 @@ restore them by ID, with the TUI's `u` action for the latest deletion, or with
 `t` to browse trash and restore a specific task. Add `--local` before the
 command to select the exact current-directory list. `add --print-id` prints
 only the saved ID for scripts.
+
+For agents and other programs, `--json` returns a versioned object with the
+scope and task data. It supports `list` and every shell task mutation;
+mutation results include the saved task and whether it changed. Errors are
+JSON on stderr with a nonzero exit status. See the [JSON output contract](./docs/usage.md#json-output-for-agents).
 
 In this checkout, shell commands and multiple TUIs can share a list. Open TUIs
 refresh once per second and retain drafts when another writer changes a task.

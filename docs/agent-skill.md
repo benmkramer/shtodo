@@ -2,8 +2,9 @@
 
 The optional [shtodo skill] teaches an LLM-based agent to use the installed
 CLI, select the right list, preserve task IDs, and verify changes. It also
-explains which actions currently require the TUI. The skill supplements
-`shtodo --help` and works without a checkout of shtodo's source code.
+explains which actions currently require the TUI. The skill assumes JSON
+support and uses `--json` directly for task commands, without a help or
+version check before use. It works without a checkout of shtodo's source code.
 
 Install the [shtodo binary] separately. The agent needs shell access to that
 binary and to your local task storage; installing the skill does not sync
