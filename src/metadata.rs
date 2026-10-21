@@ -4,10 +4,6 @@
 pub(crate) struct Priority(u8);
 
 impl Priority {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "JSON task fields use it in Stage 2")
-    )]
     pub(crate) fn letter(self) -> char {
         char::from(self.0)
     }
@@ -27,10 +23,6 @@ pub(crate) fn tags(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Derived tags in text order, keeping the first of each exact duplicate.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "JSON task fields use it in Stage 2")
-)]
 pub(crate) fn distinct_tags(text: &str) -> Vec<&str> {
     let mut distinct = Vec::new();
     for tag in tags(text) {
@@ -68,10 +60,6 @@ impl PrioritySet {
 }
 
 /// One space-free token of the shared filter grammar.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "shell list filters use it in Stage 2")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FilterToken<'a> {
     /// A normalized `+project` or `@context` tag.
@@ -79,10 +67,6 @@ pub(crate) enum FilterToken<'a> {
     Priorities(PrioritySet),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "shell list filters use it in Stage 2")
-)]
 pub(crate) fn parse_filter_token(token: &str) -> Option<FilterToken<'_>> {
     if token.contains(char::is_whitespace) {
         return None;
@@ -114,10 +98,6 @@ impl TaskFilter {
         self.tags.is_empty() && self.priorities.is_empty()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "shell list filters use it in Stage 2")
-    )]
     pub(crate) fn add(&mut self, token: FilterToken<'_>) {
         match token {
             FilterToken::Tag(tag) => {

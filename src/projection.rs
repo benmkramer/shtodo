@@ -1,6 +1,6 @@
 //! Shared transient projection for rendering and latest-snapshot reorder checks.
 use crate::{
-    metadata::TaskFilter,
+    metadata::{self, TaskFilter},
     task::{MoveDirection, Task, TaskId, TaskList},
 };
 
@@ -113,6 +113,22 @@ pub(crate) fn adjacent(
     None
 }
 
+/// Display order for a projection. Storage and reorder guards never need it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TaskOrder {
+    #[default]
+    Manual,
+    Priority,
+}
+
+/// Stable: `A` to `Z`, then no priority; equal keys keep canonical order.
+pub(crate) fn sort_by_priority(tasks: &mut [&Task]) {
+    tasks.sort_by_key(|task| {
+        let priority = metadata::priority(task.text());
+        (priority.is_none(), priority)
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +218,36 @@ mod tests {
             Projection::default().adjacent(&list, first, MoveDirection::Down),
             Some(hidden)
         );
+    }
+
+    #[test]
+    fn sort_by_priority_should_be_stable_with_unprioritized_rows_last() {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "plain first",
+            "(B) b first",
+            "(a) lowercase is plain",
+            "(A) a first",
+            "(A)",
+            "(B) b second",
+            "(A) a second",
+            "plain last",
+        ] {
+            list.add(text).unwrap();
+        }
+        let sorted = |list: &TaskList| {
+            let mut tasks: Vec<&Task> = list.visible_tasks().collect();
+            sort_by_priority(&mut tasks);
+            ids(tasks.into_iter())
+        };
+
+        assert_eq!(sorted(&list), [4, 7, 2, 6, 1, 3, 5, 8]);
+        let mut ordered = TaskList::new(ListScope::Global);
+        for text in ["(A) x", "(C) y", "z"] {
+            ordered.add(text).unwrap();
+        }
+        assert_eq!(sorted(&ordered), [1, 2, 3]);
+        sort_by_priority(&mut []);
+        assert_eq!(TaskOrder::default(), TaskOrder::Manual);
     }
 }

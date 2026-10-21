@@ -640,6 +640,9 @@ Acceptance: every row of the exit/error table, including the `--sort` rows,
 has a CLI test in text and JSON mode; `--sort priority` order tests pass in
 both modes; no-storage-created holds for usage errors; existing exact list
 output holds.
+Status: DONE in PR 1. `parse_invocation` strips `--json` only from `list`
+flag positions (a value after `--tag`, `--priority`, `--search`, or `--sort` is
+skipped), then `parse_args` routes the rest to `parse_list_args`.
 
 ### Stage 3a: Styled rows
 

@@ -18,6 +18,11 @@ fn help_should_exit_successfully_without_starting_tui() {
     assert!(stdout.contains("shtodo add <TASK>"));
     assert!(stdout.contains("shtodo list"));
     assert!(stdout.contains("shtodo --local list"));
+    assert!(stdout.contains(
+        "shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]...\n"
+    ));
+    assert!(stdout.contains("[--search <TEXT>] [--sort priority]"));
+    assert!(stdout.contains("shtodo list --open --tag +work --sort priority"));
     assert!(stdout.contains("shtodo delete <ID>"));
     assert!(stdout.contains("shtodo --local delete <ID>"));
     for command in ["done", "reopen", "restore"] {
@@ -384,6 +389,273 @@ fn list_should_ignore_invalid_interactive_config() {
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         "1  open  repair config later\n"
+    );
+}
+
+/// Seven tasks: 3 is done, 6 is deleted, and 7 has a lowercase (non-)priority.
+fn seed_tagged_tasks(home: &std::path::Path) {
+    for text in [
+        "(B) Write docs +shtodo",
+        "Plain errand @home",
+        "(A) Fix the bug +shtodo @laptop.",
+        "(A) Ship release +shtodo",
+        "(C) Call bob @home",
+        "(A) deleted +shtodo",
+        "(b) lowercase +shtodo",
+    ] {
+        assert!(run_with_home(home, &["add", text]).status.success());
+    }
+    assert!(run_with_home(home, &["done", "3"]).status.success());
+    assert!(run_with_home(home, &["delete", "6"]).status.success());
+}
+
+const TAGGED_ROWS: [&str; 7] = [
+    "1  open  (B) Write docs +shtodo\n",
+    "2  open  Plain errand @home\n",
+    "3  done  (A) Fix the bug +shtodo @laptop.\n",
+    "4  open  (A) Ship release +shtodo\n",
+    "5  open  (C) Call bob @home\n",
+    "",
+    "7  open  (b) lowercase +shtodo\n",
+];
+
+fn tagged_rows(ids: &[usize]) -> String {
+    ids.iter().map(|id| TAGGED_ROWS[id - 1]).collect()
+}
+
+#[test]
+fn list_filters_should_compose_in_canonical_order_with_exact_rows() {
+    let home = tempfile::tempdir().unwrap();
+    seed_tagged_tasks(home.path());
+
+    for (filters, ids) in [
+        (vec![], vec![1, 2, 3, 4, 5, 7]),
+        (vec!["--open"], vec![1, 2, 4, 5, 7]),
+        (vec!["--done"], vec![3]),
+        (vec!["--tag", "+shtodo"], vec![1, 3, 4, 7]),
+        (vec!["--tag", "+shtodo."], vec![1, 3, 4, 7]),
+        (vec!["--open", "--tag", "+shtodo"], vec![1, 4, 7]),
+        (vec!["--tag", "@laptop"], vec![3]),
+        (vec!["--tag", "+shtodo", "--tag", "@laptop"], vec![3]),
+        (vec!["--tag", "+SHTODO"], vec![]),
+        (vec!["--tag", "+shto"], vec![]),
+        (vec!["--priority", "A"], vec![3, 4]),
+        (
+            vec!["--priority", "a-b", "--priority", "none"],
+            vec![1, 2, 3, 4, 7],
+        ),
+        (vec!["--priority", "NONE"], vec![2, 7]),
+        (vec!["--search", "SHIP"], vec![4]),
+        (vec!["--search", "(a)"], vec![3, 4]),
+        (vec!["--tag", "@home", "--priority", "C"], vec![5]),
+        (
+            vec![
+                "--priority",
+                "C",
+                "--tag",
+                "@home",
+                "--open",
+                "--search",
+                "bob",
+            ],
+            vec![5],
+        ),
+        (vec!["--done", "--priority", "B-Z"], vec![]),
+    ] {
+        let mut arguments = vec!["list"];
+        arguments.extend(&filters);
+        let output = run_with_home(home.path(), &arguments);
+
+        assert_eq!(output.status.code(), Some(0), "{filters:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            tagged_rows(&ids),
+            "{filters:?}"
+        );
+        assert!(output.stderr.is_empty(), "{filters:?}");
+    }
+}
+
+#[test]
+fn list_sort_priority_should_order_only_the_filtered_rows_with_canonical_ties() {
+    let home = tempfile::tempdir().unwrap();
+    seed_tagged_tasks(home.path());
+
+    for (filters, ids) in [
+        (vec!["--sort", "priority"], vec![3, 4, 1, 5, 2, 7]),
+        (
+            vec!["--open", "--sort", "priority", "--tag", "+shtodo"],
+            vec![4, 1, 7],
+        ),
+        (vec!["--sort", "priority", "--done"], vec![3]),
+        (
+            vec![
+                "--priority",
+                "none",
+                "--priority",
+                "C",
+                "--sort",
+                "priority",
+            ],
+            vec![5, 2, 7],
+        ),
+        (vec!["--sort", "priority", "--search", "CA"], vec![5, 7]),
+        (vec!["--tag", "+missing", "--sort", "priority"], vec![]),
+    ] {
+        let mut arguments = vec!["list"];
+        arguments.extend(&filters);
+        let output = run_with_home(home.path(), &arguments);
+
+        assert_eq!(output.status.code(), Some(0), "{filters:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            tagged_rows(&ids),
+            "{filters:?}"
+        );
+    }
+    let output = run_with_home(home.path(), &["--local", "list", "--sort", "priority"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn list_filter_usage_errors_should_exit_one_with_usage_and_create_no_storage() {
+    let home = tempfile::tempdir().unwrap();
+    for (arguments, message) in [
+        (
+            vec!["list", "extra"],
+            r#"unsupported shtodo arguments: "extra""#,
+        ),
+        (
+            vec!["list", "--wat"],
+            r#"unsupported shtodo arguments: "--wat""#,
+        ),
+        (
+            vec!["list", "--tag=+x"],
+            r#"unsupported shtodo arguments: "--tag=+x""#,
+        ),
+        (vec!["list", "--tag"], "--tag requires a value"),
+        (vec!["list", "--priority"], "--priority requires a value"),
+        (vec!["list", "--search"], "--search requires a value"),
+        (
+            vec!["list", "--tag", "work"],
+            r#"invalid --tag "work"; expected +project or @context"#,
+        ),
+        (vec!["list", "--tag", "+"], r#"invalid --tag "+""#),
+        (vec!["list", "--tag", "+."], r#"invalid --tag "+.""#),
+        (vec!["list", "--tag", "+a b"], r#"invalid --tag "+a b""#),
+        (
+            vec!["list", "--priority", "AA"],
+            r#"invalid --priority "AA"; expected a letter A-Z, a range such as A-C, or none"#,
+        ),
+        (
+            vec!["list", "--priority", "C-A"],
+            r#"invalid --priority "C-A""#,
+        ),
+        (vec!["list", "--priority", ""], r#"invalid --priority """#),
+        (
+            vec!["list", "--search", ""],
+            "--search requires non-empty single-line text",
+        ),
+        (
+            vec!["list", "--search", "  "],
+            "--search requires non-empty single-line text",
+        ),
+        (
+            vec!["list", "--search", "a\nb"],
+            "--search requires non-empty single-line text",
+        ),
+        (
+            vec!["list", "--open", "--done"],
+            "--open and --done cannot be combined",
+        ),
+        (
+            vec!["list", "--sort"],
+            "--sort requires a value; expected priority",
+        ),
+        (
+            vec!["list", "--sort", "manual"],
+            r#"invalid --sort "manual"; expected priority"#,
+        ),
+        (
+            vec!["list", "--sort", "x"],
+            r#"invalid --sort "x"; expected priority"#,
+        ),
+        (
+            vec!["list", "--sort", "--json"],
+            r#"invalid --sort "--json"; expected priority"#,
+        ),
+        (
+            vec!["list", "--sort", ""],
+            r#"invalid --sort ""; expected priority"#,
+        ),
+        (
+            vec!["list", "--open", "--open"],
+            "--open may only be specified once",
+        ),
+        (
+            vec!["list", "--done", "--done"],
+            "--done may only be specified once",
+        ),
+        (
+            vec!["list", "--search", "a", "--search", "b"],
+            "--search may only be specified once",
+        ),
+        (
+            vec!["list", "--sort", "priority", "--sort", "priority"],
+            "--sort may only be specified once",
+        ),
+        (
+            vec!["--local", "list", "--sort", "manual"],
+            r#"invalid --sort "manual""#,
+        ),
+    ] {
+        let output = run_with_home(home.path(), &arguments);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        assert!(stderr.contains(message), "{arguments:?}: {stderr}");
+        assert!(stderr.contains("Usage:"), "{arguments:?}");
+        assert!(!home.path().join(".shtodo").exists(), "{arguments:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn list_should_reject_non_utf8_filter_values_before_creating_storage() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_shtodo"))
+        .args(["list", "--tag"])
+        .arg(std::ffi::OsString::from_vec(vec![b'+', 0xff]))
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid --tag value; expected UTF-8")
+    );
+    assert!(!home.path().join(".shtodo").exists());
+}
+
+#[test]
+fn list_filters_should_ignore_invalid_interactive_config() {
+    let home = tempfile::tempdir().unwrap();
+    seed_tagged_tasks(home.path());
+    write_config(home.path(), "[keybindings.normal]\nmove_down = [\"dn\"]\n");
+
+    let output = run_with_home(
+        home.path(),
+        &["list", "--open", "--tag", "+shtodo", "--sort", "priority"],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        tagged_rows(&[4, 1, 7])
     );
 }
 
