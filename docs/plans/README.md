@@ -11,6 +11,7 @@ specified verification gates, and update its status only after completion.
 | [001](./001-agent-shell-interface.md) | Add an agent-friendly list and soft-delete shell interface | P1 | M | none | DONE |
 | [004](./004-browsable-trash.md) | Add browsable TUI trash and selective restoration | P1 | M | 001 | DONE |
 | [Concurrent usage](./concurrent-usage.md) | Short storage transactions and safe TUI refresh | P1 | L | Plan 001; see integration order | DONE |
+| [Tags and priority](./2026-10-21-tags-and-priority.md) | Derived todo.txt priority and tags with TUI and shell list filtering | P1 | M | Concurrent usage; JSON output | IN PROGRESS |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a short reason, or REJECTED
 with a short rationale.
