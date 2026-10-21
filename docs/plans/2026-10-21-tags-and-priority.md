@@ -50,7 +50,8 @@ deferred.
 ## Decisions before Stage 0 exits
 
 A question gates a PR if its answer changes that PR's contracts or scope. The
-owner answered all eleven on October 21, 2026.
+owner answered questions 1 to 11 on October 21, 2026. Question 12 came from
+the PR 1 benchmark review and is pending.
 
 | # | Question | Default | Gates | Decided |
 | --- | --- | --- | --- | --- |
@@ -65,6 +66,7 @@ owner answered all eleven on October 21, 2026.
 | 9 | Filter editor key to cycle ambiguous matches | Deferred (Enter completion makes it mostly moot) | PR 2 | Deferred |
 | 10 | Read-only `shtodo tags [--json]` command | Deferred; would be its own follow-up PR | None | Deferred |
 | 11 | Config key for the default sort order | Not in this slice | PR 2 | Not in this slice |
+| 12 | Tagged-fixture `list --json` +15.2% (over 10% relative, inside 1.5 ms absolute) | Accept; cost is the approved always-present fields | PR 1 | Pending owner |
 
 The mapping matches the reviewer's reading. Question 8 gates PR 1 only
 through the reserved-name text in usage.md's schema policy. With question 4
@@ -980,7 +982,9 @@ PR 1 implementation, October 21, 2026, on `feat/tags-and-priority` from
   `metadata.rs`, then compile errors for `projection.rs`) before the code.
   Deviation: `App` holds one `Projection` in place of its `view` and
   `lowercase_query` fields, so it can call the shared predicate without
-  cloning; TUI behavior is unchanged and every existing test passed unchanged.
+  cloning; TUI behavior is unchanged, and every existing test passed with the
+  `Projection` construction updated (the `mutation.rs` projected-reorder test
+  gained `filter: TaskFilter::default()`).
   Items used only from Stage 2 carried a temporary `expect(dead_code)`,
   removed in Stage 2.
 - Stage 2 (`a2b15b6`): `ListFilter`, the four `CliError` variants,
@@ -1015,3 +1019,16 @@ PR 1 implementation, October 21, 2026, on `feat/tags-and-priority` from
 - Verified: the check command, `cargo build --release --locked`, and
   `git diff --check` pass; a release-binary smoke ran with a temporary home
   and an exact temporary working directory.
+
+PR 1 review fixes, October 21, 2026 (PR 21, independent review):
+- `TaskFilter::matches` scans the text's tags once and marks required tags in
+  a bitmask, as Performance promises; more than 64 required tags falls back
+  to one scan per tag.
+- `Mutation::MoveAdjacent` uses `Projection::is_unfiltered()` for its fast
+  path, the same check as the shell and adjacency code.
+- `tests/json.rs` now covers every error-table row in JSON mode, including a
+  non-UTF-8 value for each value flag.
+- `docs/benchmarks.md` states that the tagged-fixture `list --json` result is
+  over the relative bound and inside the absolute one; question 12 records it
+  as pending owner. usage.md notes that `--sort` values are case-sensitive and
+  `--priority` values are ASCII case-insensitive.

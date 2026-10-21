@@ -131,11 +131,16 @@ and [raw samples and metadata](./benchmarks/2026-10-05-repaired-expanded-10000.j
 
 The [paired shell comparison](./benchmarks/2026-10-21-tags-and-priority-cli-comparison.md)
 measures the derived priority and tags change against `1f2421c`. At 10,000
-records, plain-fixture `list` medians are 11.55 to 11.43 ms and `list --json`
-medians are 5.65 to 6.15 ms (+8.7%), within the plan's gates. On a fixture
-where half the tasks carry tokens, `list --json` is 6.10 to 7.03 ms (+15.2%),
-because every task object now carries `priority` and `tags`. Text listing does
-no token work. Filtered and sorted cases are recorded for information.
+records, plain-fixture `list` medians are 11.55 to 11.43 ms (-1.0%) and
+`list --json` medians are 5.65 to 6.15 ms (+8.7%). Both are within the plan's
+gates on the plain and mixed fixtures. On a fixture where half the tasks carry
+tokens, `list --json` is 6.10 to 7.03 ms (+15.2%, +0.93 ms). That is over the
+10% relative bound and inside the 1.5 ms absolute bound. The cost is output
+size: every task object now carries the always-present `priority` and `tags`
+fields. The owner's decision on accepting it is recorded as question 12 in the
+[plan's decisions table](./plans/2026-10-21-tags-and-priority.md#decisions-before-stage-0-exits).
+Text listing does no token work. Filtered and sorted cases are recorded for
+information.
 
 ## Concurrency change: October 5, 2026
 

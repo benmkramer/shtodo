@@ -112,9 +112,9 @@ AND across kinds:
 | --- | --- |
 | `--open` or `--done` | Only open or only done tasks; at most one of them |
 | `--tag <TAG>` | Tasks with that exact `+project` or `@context` tag. Repeat to require every listed tag |
-| `--priority <P>` | Tasks whose priority is the letter `A` to `Z`, in the inclusive range `A-C`, or `none` for no priority. Case-insensitive. Repeat to accept any of them |
+| `--priority <P>` | Tasks whose priority is the letter `A` to `Z`, in the inclusive range `A-C`, or `none` for no priority. ASCII case-insensitive (`a-c`, `NONE`). Repeat to accept any of them |
 | `--search <TEXT>` | Tasks whose full text contains TEXT, ignoring case, like TUI `/` search. At most once |
-| `--sort priority` | All matching tasks ordered `A` to `Z`, then tasks without a priority. At most once |
+| `--sort priority` | All matching tasks ordered `A` to `Z`, then tasks without a priority. The value is case-sensitive: only `priority` is accepted. At most once |
 
 ```sh
 shtodo list --open --tag +shtodo
