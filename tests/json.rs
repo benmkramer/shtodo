@@ -629,6 +629,38 @@ fn json_list_filter_errors_should_be_invalid_arguments_without_storage() {
             vec!["list", "--json", "--sort", "priority", "--sort", "priority"],
             "--sort may only be specified once",
         ),
+        (
+            vec!["--json", "list", "--done", "--done"],
+            "--done may only be specified once",
+        ),
+        (
+            vec!["--json", "list", "--tag", "+"],
+            r#"invalid --tag \"+\"; expected +project or @context"#,
+        ),
+        (
+            vec!["--json", "list", "--tag", "+a b"],
+            r#"invalid --tag \"+a b\"; expected +project or @context"#,
+        ),
+        (
+            vec!["--json", "list", "--priority", "AA"],
+            r#"invalid --priority \"AA\"; expected a letter A-Z, a range such as A-C, or none"#,
+        ),
+        (
+            vec!["--json", "list", "--priority", ""],
+            r#"invalid --priority \"\"; expected a letter A-Z"#,
+        ),
+        (
+            vec!["--json", "list", "--search", " \t "],
+            "--search requires non-empty single-line text",
+        ),
+        (
+            vec!["--json", "list", "--search", "a\nb"],
+            "--search requires non-empty single-line text",
+        ),
+        (
+            vec!["--json", "list", "--search", "a\rb"],
+            "--search requires non-empty single-line text",
+        ),
     ] {
         let output = run(home.path(), home.path(), &args);
         assert_eq!(output.status.code(), Some(1), "{args:?}");
@@ -636,6 +668,33 @@ fn json_list_filter_errors_should_be_invalid_arguments_without_storage() {
         let error = serde_json::to_string(&value["error"]["message"]).unwrap();
         assert!(error.contains(message), "{args:?}: {error}");
         assert!(!home.path().join(".shtodo").exists(), "{args:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn json_list_should_reject_non_utf8_filter_values_without_storage() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let home = tempfile::tempdir().unwrap();
+    for flag in ["--tag", "--priority", "--search", "--sort"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_shtodo"))
+            .args(["--json", "list", flag])
+            .arg(std::ffi::OsString::from_vec(vec![b'+', 0xff]))
+            .env("HOME", home.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{flag}");
+        let value = failure(&output, "invalid_arguments");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("invalid {flag} value; expected UTF-8")),
+            "{value}"
+        );
+        assert!(!home.path().join(".shtodo").exists(), "{flag}");
     }
 }
 
