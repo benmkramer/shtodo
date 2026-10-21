@@ -1,9 +1,11 @@
 # Tags and priority: derived todo.txt tokens with TUI and shell filtering
 
-Status: READY FOR OWNER DECISION. Planning is complete after three review
-cycles; no runtime code has changed. Implementation waits on the owner's
-answers in [Decisions before Stage 0 exits](#decisions-before-stage-0-exits).
-The plan index row stays IN PROGRESS until implementation is done.
+Status: APPROVED FOR IMPLEMENTATION, PR 1 PENDING START. The owner decided
+every question in [Decisions before Stage 0 exits](#decisions-before-stage-0-exits)
+on October 21, 2026: every default was accepted except question 4, which adds
+shell `list --sort priority` to PR 1. No runtime code has changed, and
+implementation starts only when the owner says so. The plan index row stays
+IN PROGRESS until implementation is done.
 Date: October 21, 2026. Inspected baseline: `1f2421c` (feat: add JSON output
 for shell task commands, #16) on branch `feat/tags-and-priority`.
 Priority: P1. Estimated effort: L, in stages and two PRs (see Review
@@ -11,9 +13,8 @@ boundaries). Depends on: concurrent usage (DONE) and the Unreleased JSON
 output contract.
 
 This plan is self-contained; a separate spec would duplicate its contracts.
-Implementation begins only after the owner answers or accepts the defaults in
-the decisions table below. The full text of each question is under Open
-questions for the owner.
+The owner's answers are recorded in the decisions table below. The full text
+of each question is under Open questions for the owner.
 
 ## Recommendation
 
@@ -28,8 +29,8 @@ cheap because the text already uses todo.txt syntax.
 
 Add one shared, allocation-free token module and one shared filter predicate.
 `shtodo list` and the TUI both use them. Shell `list` gains composable
-`--open`, `--done`, `--tag`, `--priority`, and `--search` filters, honored
-identically by `--json`. JSON task objects gain two always-present additive
+`--open`, `--done`, `--tag`, `--priority`, and `--search` filters and an
+optional `--sort priority`, all honored identically by `--json`. JSON task objects gain two always-present additive
 fields, `priority` and `tags`. `schema_version` stays `1`: the documented v1
 contract already tells clients to tolerate additional fields. Later due dates
 and parent IDs fit the same additive rule, so the planned slices need no
@@ -47,25 +48,27 @@ deferred.
 
 ## Decisions before Stage 0 exits
 
-Answer by number in one message; "defaults" accepts every default. A question
-gates a PR if its answer changes that PR's contracts or scope.
+A question gates a PR if its answer changes that PR's contracts or scope. The
+owner answered all eleven on October 21, 2026.
 
-| # | Question | Default | Gates |
-| --- | --- | --- | --- |
-| 1 | Tag grammar: strip trailing `.,;:!?`; priority strictly `(X) ` at start | Yes | PR 1 |
-| 2 | Tag matching case | Case-sensitive, exact | PR 1 |
-| 3 | `--priority` forms | Letters, `A-C` ranges, `none`; repeatable as union | PR 1 |
-| 4 | Shell `list --sort priority` | Not now; canonical order only | PR 1 |
-| 5 | Echo the applied filter in JSON list replies | No | PR 1 |
-| 6 | TUI keys `s` sort, `f` filter, layered Esc | Yes | PR 2 |
-| 7 | `J`/`K` while sorted by priority | Disabled with a message | PR 2 |
-| 8 | Parent IDs may later need a stored field and migration | Accept; PR 1 only reserves the `parent_id` name in the schema policy | PR 1 |
-| 9 | Filter editor key to cycle ambiguous matches | Deferred (Enter completion makes it mostly moot) | PR 2 |
-| 10 | Read-only `shtodo tags [--json]` command | Deferred; would be its own follow-up PR | None |
-| 11 | Config key for the default sort order | Not in this slice | PR 2 |
+| # | Question | Default | Gates | Decided |
+| --- | --- | --- | --- | --- |
+| 1 | Tag grammar: strip trailing `.,;:!?`; priority strictly `(X) ` at start | Yes | PR 1 | Yes |
+| 2 | Tag matching case | Case-sensitive, exact | PR 1 | Case-sensitive, exact |
+| 3 | `--priority` forms | Letters, `A-C` ranges, `none`; repeatable as union | PR 1 | Yes: letters, ranges, `none`, repeatable |
+| 4 | Shell `list --sort priority` | Not now; canonical order only | PR 1 | **Yes: add `list --sort priority` in PR 1** (overrides the default; see Shell `list` filters) |
+| 5 | Echo the applied filter in JSON list replies | No | PR 1 | No |
+| 6 | TUI keys `s` sort, `f` filter, layered Esc | Yes | PR 2 | Yes: `s`, `f`, layered Esc |
+| 7 | `J`/`K` while sorted by priority | Disabled with a message | PR 2 | Disabled with a message |
+| 8 | Parent IDs may later need a stored field and migration | Accept; PR 1 only reserves the `parent_id` name in the schema policy | PR 1 | Accept |
+| 9 | Filter editor key to cycle ambiguous matches | Deferred (Enter completion makes it mostly moot) | PR 2 | Deferred |
+| 10 | Read-only `shtodo tags [--json]` command | Deferred; would be its own follow-up PR | None | Deferred |
+| 11 | Config key for the default sort order | Not in this slice | PR 2 | Not in this slice |
 
 The mapping matches the reviewer's reading. Question 8 gates PR 1 only
-through the reserved-name text in usage.md's schema policy.
+through the reserved-name text in usage.md's schema policy. With question 4
+decided yes, PR 1 also ships the shared `TaskOrder` type and the priority
+sort helper that the TUI reuses in Stage 3b.
 
 ## Evidence from the inspected baseline
 
@@ -214,7 +217,7 @@ containing whitespace.
 ### Shell `list` filters
 
 ```text
-shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]... [--search <TEXT>] [--json]
+shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]... [--search <TEXT>] [--sort priority] [--json]
 ```
 
 - Flags follow `list` in any order. Each value is the next argument taken
@@ -230,8 +233,25 @@ shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]... [--
   Categories combine with AND.
 - `--search` appears at most once. It is a literal substring match after
   Unicode lowercasing, the same as TUI `/`.
-- Output order stays canonical; filtering never reorders. Text rows keep
-  exactly `ID  open|done  text`. Tombstones are always omitted.
+- Without `--sort`, output order stays canonical; filtering never reorders.
+  Text rows keep exactly `ID  open|done  text`. Tombstones are always omitted.
+- `--sort priority` (owner decision 4) sorts the filtered rows `A` to `Z`, then
+  rows with no priority, with canonical order breaking ties. This is the same
+  order as the TUI's Priority order, and both call one shared helper. It
+  combines with `--open`/`--done`/`--tag`/`--priority`/`--search`: filter
+  first, then sort. Text rows and `--json` task objects are unchanged; only
+  their order differs, and `--json` emits the same objects in sorted order.
+- The `--sort` value is required, and `priority` is the only accepted value
+  for now. `--sort` with no value, `--sort manual`, and `--sort x` fail with
+  `invalid_arguments`, and the message names the accepted value. A repeated
+  `--sort` fails like a repeated `--search`. Like the other value flags,
+  `--sort --json` takes `--json` as its value, so it fails as an invalid
+  `--sort` value. Put `--json` first to avoid this.
+- The sort is a stable sort over the already-filtered iterator. With
+  `--sort priority`, `list_tasks` collects the filtered `&Task`s into a `Vec`
+  and sorts it with `projection::sort_by_priority`. Without `--sort`, text and
+  JSON output stream the filtered iterator as before, so unsorted `list` and
+  `list --json` do no new work.
 - A filter that matches nothing is success: empty stdout, or `"tasks":[]`,
   exit status 0. Reads remain side-effect free: no directories, lock, or
   config. Every argument error is detected before storage is touched.
@@ -247,7 +267,9 @@ Exit statuses and JSON error codes (no new codes are introduced):
 | `--priority AA`, `--priority C-A`, `--priority ""` | 1 | `invalid_arguments` | `invalid --priority "AA"; expected a letter A-Z, a range such as A-C, or none` |
 | `--search ""`, whitespace-only, or multiline | 1 | `invalid_arguments` | `--search requires non-empty single-line text` |
 | `--open` with `--done` | 1 | `invalid_arguments` | `--open and --done cannot be combined` |
-| A repeated `--open`, `--done`, or `--search` | 1 | `invalid_arguments` | `--search may only be specified once` |
+| `--sort` as the last argument | 1 | `invalid_arguments` | `--sort requires a value; expected priority` |
+| `--sort manual`, `--sort x`, `--sort --json`, `--sort ""` | 1 | `invalid_arguments` | `invalid --sort "manual"; expected priority` |
+| A repeated `--open`, `--done`, `--search`, or `--sort` | 1 | `invalid_arguments` | `--search may only be specified once` (names the repeated flag) |
 | A repeated `--json` | 1 | `invalid_arguments` | existing `--json may only be specified once` |
 | Non-UTF-8 filter value | 1 | `invalid_arguments` | `invalid --tag value; expected UTF-8` |
 | Snapshot read or validation failure | 1 | `command_failed` | existing storage message |
@@ -256,11 +278,37 @@ Rejecting empty search and tag values is deliberate: a shell variable that is
 unset must not quietly become "match everything" for an agent. New
 `CliError` variants: `MissingFilterValue { flag }`, `InvalidFilterValue {
 flag, value }`, `ConflictingStateFilters`, and `DuplicateListFlag { flag }`.
+For `--sort`, `MissingFilterValue` and `InvalidFilterValue` render the
+`expected priority` suffix shown in the table. Every `--sort` failure is a
+usage error raised before storage is read.
 Because they are `CliError`s, `json::error_details` already maps them to
 `invalid_arguments`, and `Display` already appends usage.
 
 `cli::Command::List(ScopeChoice)` becomes `List(ScopeChoice, ListFilter)`,
-where `ListFilter { view: TaskView, filter: TaskFilter, search: Option<String> }`.
+where `ListFilter { view: TaskView, filter: TaskFilter, search: Option<String>, order: TaskOrder }`.
+`TaskOrder` and the sort helper live in `src/projection.rs`, beside the
+shared predicate. They are not part of `Projection`, because storage and
+`MoveAdjacent` never need an order:
+
+```rust
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TaskOrder {
+    #[default]
+    Manual,
+    Priority,
+}
+
+/// Stable: `A` to `Z`, then no priority; equal keys keep canonical order.
+pub(crate) fn sort_by_priority(tasks: &mut [&Task]) {
+    tasks.sort_by_key(|task| {
+        let priority = metadata::priority(task.text());
+        (priority.is_none(), priority)
+    });
+}
+```
+
+`json::write_list` takes the scope and an iterator of `&Task`, so the sorted
+`Vec` and the streamed filtered iterator use the same writer.
 `parse_invocation` hands everything after `list` to a dedicated
 `parse_list_args` that consumes flag/value pairs and counts `--json` only in
 flag positions. The generic trailing-`--json` loop must not run for `list`,
@@ -305,9 +353,11 @@ keep today's dim/strikethrough on every span. No columns or reformatting, so
 row width and the editor's byte cursor mapping do not change. Trash rows get
 the same styling.
 
-**Sort.** `TaskOrder { Manual, Priority }` is transient App state, starting at
-Manual every session (like the view and query). Priority order is stable: `A`
-to `Z`, then no priority, with canonical order breaking ties. Done and open
+**Sort.** The App holds a `TaskOrder` (the shared type from PR 1) as transient
+state, starting at Manual every session, like the view and query. Priority
+order uses the same `projection::sort_by_priority` as shell `--sort priority`,
+so it is stable: `A` to `Z`, then no priority, with canonical order breaking
+ties. Done and open
 tasks are not separated; the Open tab already does that.
 - `j`/`k` follow the displayed order. Selection keeps the task's identity when
   sort is toggled.
@@ -316,8 +366,8 @@ tasks are not separated; the Open tab already does that.
   keymap. Manual order is the canonical vector, and a priority-sorted swap has
   no clear meaning. This keeps `Mutation::MoveAdjacent` and its storage guard
   unchanged except for the filter field.
-- The `TaskOrder` lives on `App`, not `Projection`, because storage never needs
-  it.
+- The `TaskOrder` value lives on `App`, not `Projection`, because storage
+  never needs it.
 
 **Filter.** `f` opens `Mode::Filter`. It uses the shared text editor exactly as
 Search does: `Keymap::bindings_for` maps Filter to Insert bindings and
@@ -497,7 +547,7 @@ view, search, or filter").
 | Concurrent refresh | Unchanged byte-token skip; no parsing on unchanged bytes. Metadata is not computed during refresh, only when rendering or matching. Filtered `MoveAdjacent` carries the filter, so latest-snapshot adjacency guards match the displayed rows |
 | Mixed versions | beta.4 and new binaries share snapshots both ways. An old binary given filter flags returns `invalid_arguments` |
 | Celebration | Unchanged; still counts every open task, including ones hidden by a filter |
-| Agent skill | Use `--json list` with filter flags instead of filtering on the client; parse `priority`/`tags`; set priority or tags by editing text; on `invalid_arguments` from an older binary, fall back to an unfiltered list and filter client-side |
+| Agent skill | Use `--json list` with filter flags, and `--sort priority` for priority order, instead of filtering or sorting on the client; parse `priority`/`tags`; set priority or tags by editing text; on `invalid_arguments` from an older binary, fall back to an unfiltered list and filter client-side |
 
 ### Performance
 
@@ -510,8 +560,11 @@ view, search, or filter").
   copy, as today).
 - No load-time cache and no stored fields, so storage parsing and refresh cost
   stay the same.
-- TUI Priority order: collect the visible IDs, then stable-sort by
-  `(priority.is_none(), priority)`. Cache this `Vec<TaskId>` on `App` and
+- Shell `--sort priority`: one `Vec<&Task>` of the filtered rows and one
+  stable sort keyed by a constant-time `priority` check. Only that flag pays
+  this cost.
+- TUI Priority order: collect the visible tasks, then sort them with the same
+  `projection::sort_by_priority`. Cache this `Vec<TaskId>` on `App` and
   invalidate it on `reconcile`, filter, view, query, or sort changes, so
   navigation and rendering do not re-sort every keypress.
 - Filter mode adds the preview predicate and the hint line's tag scan per
@@ -526,8 +579,9 @@ Gates (release build, paired against `1f2421c` with
 - 10,000-task plain `list` median within 5% of control and within 0.5 ms
   absolute. `list --json` (add it as a case) within 10% and 1.5 ms.
 - New cases for information only: `list --tag +x`, `list --priority A-C`, and
-  `list --search x` at 1,000 and 10,000 tasks, with a fixture where about half
-  the tasks carry tokens.
+  `list --search x` at 1,000 and 10,000 tasks, plus `list --sort priority` and
+  `list --json --sort priority` at 10,000 tasks. All use a fixture where about
+  half the tasks carry tokens.
 - TUI completion-to-frame at 10,000 tasks within 5% in Manual order; measure
   Priority order and report it. Measure and report Filter-mode
   keystroke-to-frame at 10,000 tasks; it must stay within 5% of `/` search
@@ -546,7 +600,7 @@ reviewable and releasable on its own:
 
 | PR | Stages | Ships | Documentation checklist items |
 | --- | --- | --- | --- |
-| PR 1: shell and JSON | 1, 2, plus a shell-only Stage 4 subset (`list` and `list --json` gates and the filtered-list cases) | Derived tokens, shell `list` filters, JSON `priority`/`tags`. The agent-facing gain, usable without any TUI change | README Quick start and Scope; usage.md grammar, list filters and error table, the `--json`-as-value note, JSON fields and schema policy, Version-one limits for priorities, tags, and shell filters; agent-skill.md; SKILL.md; CHANGELOG entries for tokens, filters, and JSON; plans README rejected-findings bullet; benchmarks.md "Shell listing remains unfiltered" and a link to the shell paired report; `cli::usage()` |
+| PR 1: shell and JSON | 1, 2, plus a shell-only Stage 4 subset (`list` and `list --json` gates and the filtered and sorted list cases) | Derived tokens, shell `list` filters and `--sort priority`, the shared `TaskOrder` and sort helper, JSON `priority`/`tags`. The agent-facing gain, usable without any TUI change | README Quick start and Scope; usage.md grammar, list filters, `--sort priority`, and error table, the `--json`-as-value note, JSON fields and schema policy, Version-one limits for priorities, tags, and shell filters; agent-skill.md; SKILL.md; CHANGELOG entries for tokens, filters, and JSON; plans README rejected-findings bullet; benchmarks.md "Shell listing remains unfiltered" and a link to the shell paired report; `cli::usage()` |
 | PR 2: TUI | 3a, 3b, 3c, then the TUI Stage 4 subset (completion-to-frame, idle refresh) | Row styling, priority sort, filter editor, tag discovery | README essentials line; usage.md Normal-mode keys, Filter mode, search-and-views composition, layered Esc, sorted reorder; configuration.md example, defaults, and upgrade rules for `s`/`f`; CHANGELOG TUI entries; benchmarks.md link to the TUI paired report; this plan to DONE and the index row |
 
 PR 2 is branched from and rebased onto PR 1, and is reviewed only after PR 1
@@ -577,10 +631,13 @@ Clippy strict.
 ### Stage 2: Shell filters and JSON fields
 
 Add `parse_list_args`, the `CliError` variants, `Command::List(_, ListFilter)`,
-filtered `list_tasks`, and the JSON `priority`/`tags` fields. Update `usage()`.
-Acceptance: every row of the exit/error table has a CLI test in text and JSON
-mode; no-storage-created holds for usage errors; existing exact list output
-holds.
+the shared `TaskOrder` and `projection::sort_by_priority`, filtered and
+optionally sorted `list_tasks`, and the JSON `priority`/`tags` fields. Update
+`usage()`.
+Acceptance: every row of the exit/error table, including the `--sort` rows,
+has a CLI test in text and JSON mode; `--sort priority` order tests pass in
+both modes; no-storage-created holds for usage errors; existing exact list
+output holds.
 
 ### Stage 3a: Styled rows
 
@@ -597,8 +654,8 @@ tree stays green.
 Register `BindingId::ToggleSort` and `Action::ToggleSort`: the `DEFINITIONS`
 entry with default `s`, config name `toggle_sort`,
 `defaults_yield_to_overrides` membership, and the Help and footer
-description. Add `TaskOrder`, the cached sorted `Vec<TaskId>` and when it is
-invalidated, `j`/`k` in displayed order, selection identity across toggles,
+description. Add the App's `TaskOrder` state (using the PR 1 type and sort
+helper), the cached sorted `Vec<TaskId>` and when it is invalidated, `j`/`k` in displayed order, selection identity across toggles,
 reconcile and selection fallback in displayed order, the `by priority` status
 segment, and `J`/`K` disabled with a keymap-derived message under Priority
 order.
@@ -660,12 +717,12 @@ end of PR 2, once the behavior and evidence are present.
 | File | Stage | Cases |
 | --- | --- | --- |
 | `src/metadata.rs` (unit) | 1 | Priority: `(A) x` yes; `(Z) x` yes; `(A)` alone, `(a) x`, `(AA) x`, `x (A) y`, `(A)x` no. Tags: `+p`, `@c`, `+` and `@` alone ignored, `C++` and `a@b.c` ignored, `ship it +shtodo.` gives `+shtodo`, each of `.,;:!?` and runs like `+x?!` stripped, `+.` no tag, inner punctuation `+a.b` kept, other trailing characters such as `)` kept, Unicode tags (`+東京!` gives `+東京`), tabs and other Unicode whitespace as separators, dedupe after normalization keeps first (`+x +x.` gives one tag). `--tag +shtodo.` normalizes to `+shtodo`. Filter tokens: letters (both cases), ranges, reversed range rejected, `none`, bare words rejected. `PrioritySet` membership including `none`; empty set matches any. `TaskFilter` AND over tags, OR over priorities |
-| `src/projection.rs` (unit) | 1 | `matches` order and composition of view, filter, and search; `adjacent` skips filtered-out rows; hidden and tombstone slots keep their positions under filtered reorder |
+| `src/projection.rs` (unit) | 1; sort helper in 2 | `sort_by_priority`: `A` before `B` before no priority, equal priorities and no-priority rows keep canonical order, `(a) x` and `(A)` sort as no priority, already-sorted input unchanged, empty input; `matches` order and composition of view, filter, and search; `adjacent` skips filtered-out rows; hidden and tombstone slots keep their positions under filtered reorder |
 | `src/mutation.rs` (unit) | 1 (guard), 3c (acceptance) | `MoveAdjacent` with a filter: a neighbor that leaves the filter conflicts; a newly matching row between the pair conflicts; unrelated changes coexist |
-| `src/cli.rs` (unit) | 2 | `parse_list_args`: every flag, any order, repeats, `--search --json` taken as a value, `--json` in flag positions in front/middle/end, every row of the error table, both scopes; `parse_invocation` keeps the format for list usage errors |
+| `src/cli.rs` (unit) | 2 | `parse_list_args`: every flag, any order, repeats, `--sort priority` sets `TaskOrder::Priority` and its absence leaves `Manual`; `--sort`, `--sort manual`, `--sort x`, and `--sort ""` rejected with a message containing `expected priority`; a repeated `--sort` rejected; `--sort --json` takes `--json` as the value and fails; `--search --json` taken as a value, `--json` in flag positions in front/middle/end, every row of the error table, both scopes; `parse_invocation` keeps the format for list usage errors |
 | `src/json.rs` (unit) | 2 | Task object includes `priority` serialized exactly as `"A"` or `null` (a one-character string, not a number or `"(A)"`) and `tags` (`[]` or normalized values) for live and deleted tasks |
-| `tests/cli.rs` | 2; doctor counts in 3b and 3c | Text `list` with each filter and combinations; canonical order kept; empty match exits 0 with empty stdout; usage errors exit 1 with usage text and create no storage; filters ignore invalid keybinding config; doctor counts for the `move_down` fixture are 36 and 48 after Stage 3b, then 37 and 49 after Stage 3c; the `toggle_complete = ["f"]` fixture still loads; exact unfiltered output unchanged |
-| `tests/json.rs` | 2 | `list --json` with filters; new fields on list and on add/edit/done/reopen/delete/restore replies; every error-table row returns `invalid_arguments`, empty stdout, exit 1; missing scope returns `[]` without creating storage; a filter read works while a writer holds the lock |
+| `tests/cli.rs` | 2; doctor counts in 3b and 3c | Text `list` with each filter and combinations; canonical order kept without `--sort`; `list --sort priority` prints `A` to `Z`, then no priority, with canonical ties, in exact `ID  state  text` rows; `--sort priority` combined with `--open`, `--tag`, `--priority`, and `--search` sorts only the filtered rows; every `--sort` error row exits 1 with usage text and creates no storage; empty match exits 0 with empty stdout; usage errors exit 1 with usage text and create no storage; filters ignore invalid keybinding config; doctor counts for the `move_down` fixture are 36 and 48 after Stage 3b, then 37 and 49 after Stage 3c; the `toggle_complete = ["f"]` fixture still loads; exact unfiltered output unchanged |
+| `tests/json.rs` | 2 | `list --json` with filters; `list --json --sort priority` returns the same task objects as unsorted `list --json` with the same filters, in sorted order, and the same IDs as text `--sort priority`; every `--sort` error row returns `invalid_arguments` with `expected priority` in `error.message`, empty stdout, exit 1; new fields on list and on add/edit/done/reopen/delete/restore replies; every error-table row returns `invalid_arguments`, empty stdout, exit 1; missing scope returns `[]` without creating storage; a filter read works while a writer holds the lock |
 | `src/input.rs` (unit) | 3b (`s`), 3c (`f`, Filter mode) | Defaults map `s`/`f` in Normal only; explicit `toggle_sort`/`edit_filter` conflicts and `ctrl-c` are rejected; Filter mode uses Insert bindings and treats `q`, `f`, `s`, `/`, Space as text. Existing tests pass unchanged, with added assertions: `search_actions_should_support_overrides_and_detect_existing_key_conflicts` and `existing_explicit_bindings_should_claim_all_new_search_defaults` report `EditFilter` in `unbound_actions_for(Mode::Normal)` because `f` is claimed; `explicit_search_and_legacy_bindings_should_still_conflict_in_either_source_order` still returns exactly one issue |
 | `src/config.rs` (unit) | 3b (`toggle_sort`), 3c (`edit_filter`) | `toggle_sort`/`edit_filter` parse under `[keybindings.normal]` and are unknown in other modes; doctor report counts. `load_should_resolve_search_and_view_actions_and_shared_editor_keys` (`start_search = ["s"]`) still loads with `StartSearch` on `s` and `ToggleSort` reported unbound. `load_should_preserve_existing_normal_bindings_that_claim_new_search_defaults` still loads for every key; for `f` it reports `EditFilter` unbound and `ToggleComplete` on `f` |
 | `src/app.rs` (unit) | 3b (sort), 3c (filter) | `filter_editor_should_preview_trailing_tag_by_prefix_and_accept_exactly`: tasks with `+shtodo`, `+shell`, `+other`. Typing `+`, `+s`, `+sh`, through `+shtodo` never leaves the `+shtodo` task out of the preview; `+sh` previews both `+shtodo` and `+shell`; `+shtodo.` (trailing punctuation) normalizes to the prefix `+shtodo` and previews the `+shtodo` task, and Enter on it accepts `+shtodo`; `+.` previews no tag constraint; `+sh ` (trailing space) is exact and previews none; `@x +sh` keeps `@x` exact; the preview is a `FilterPreview` with `exact` holding only `@x` and `trailing_prefix` `+sh`; after Enter, `App` holds only a plain `TaskFilter`, and a following `J`/`K` builds its `Projection` from it. `filter_editor_enter_should_complete_unique_prefix_refuse_ambiguous_and_accept_unknown`: with `+shtodo` and `+shell` present, Enter on `+sh` stays in the editor with the buffer and cursor kept and the message `Finish the tag: +shtodo, +shell`; Enter on `+sht` completes to `+shtodo` and accepts; Enter on `+shtodo` (exact and present) accepts unchanged; Enter on `+zzz` (no match) accepts `+zzz` exactly and the list is empty; Enter on `+` alone is invalid; `@x +sht` completes only the trailing token, and only among tags in rows that also match `@x`, the view, and the search; a priority token is never completed. Also: the hint line lists matching tags with counts in the specified order; an invalid completed token keeps the last valid preview; an in-progress `A-` is left out of the preview without an error; Enter rejects an invalid buffer; Escape restores filter and selection; layered Esc clear; sort toggle keeps selection identity; `j`/`k` follow sorted order; `J`/`K` under Priority order submit nothing and show message; hidden-by-filter messages for add/edit/restore/complete; filter and sort survive Trash/Help round trips |
@@ -681,9 +738,11 @@ end of PR 2, once the behavior and evidence are present.
   (PR 2).
 - [ ] `docs/usage.md`, PR 1: new "Priority and tags" section (grammar, examples,
   trailing-punctuation stripping and how it differs from strict todo.txt,
-  edge cases); list filter syntax, composition, exit/error table. State that
-  for `list`, an `--json` placed right after `--tag`, `--priority`, or
-  `--search` is taken as that flag's value (`list --search --json` searches for
+  edge cases); list filter syntax, composition, exit/error table;
+  `--sort priority` order, composition with filters, JSON ordering, and that
+  `priority` is the only accepted value. State that for `list`, an `--json`
+  placed right after `--tag`, `--priority`, `--search`, or `--sort` is taken
+  as that flag's value (`list --search --json` searches for
   `--json`), and that the way to avoid this is to put `--json` first
   (`shtodo --json list --search …`), as the agent skill already does. Also:
   JSON fields and schema policy with reserved `due`/`parent_id`; Version-one
@@ -698,11 +757,12 @@ end of PR 2, once the behavior and evidence are present.
   `s`/`f`.
 - [ ] `docs/agent-skill.md` (PR 1): example prompt for filtered open tasks.
 - [ ] `skills/shtodo/SKILL.md` (PR 1): the "no filter flag" and "do not offer search
-  or filters" text is replaced with filter flags; task fields include
+  or filters" text is replaced with filter flags and `--sort priority`
+  (reordering stays TUI-only); task fields include
   `priority` and `tags`; priority and tags are set by editing text; older-binary
   fallback on `invalid_arguments`.
 - [ ] `CHANGELOG.md` Unreleased `### Added`: derived priority and tags, shell
-  list filters with JSON (PR 1); TUI highlighting, sort, filter, tag
+  list filters and `list --sort priority`, with JSON (PR 1); TUI highlighting, sort, filter, tag
   discovery, and the new configurable actions (PR 2).
 - [ ] `docs/plans/README.md`: update the rejected-findings bullet on shell
   filters to note this plan supersedes it (PR 1); status DONE (end of PR 2).
@@ -740,6 +800,9 @@ Stop and report to the owner instead of continuing when:
 
 ## Open questions for the owner
 
+All eleven were decided by the owner on October 21, 2026; see the Decided
+column of the decisions table. The question text is kept for the record.
+
 1. **Grammar strictness.** Priority follows todo.txt exactly (`(X) ` with a
    trailing space at byte 0). Tags strip trailing ASCII `.,;:!?` for both
    reporting and matching, so `ship it +shtodo.` matches `--tag +shtodo`.
@@ -752,7 +815,9 @@ Stop and report to the owner instead of continuing when:
 3. **`--priority` forms.** Letters, ranges `A-C`, and `none`, repeatable as
    union? Default: yes. A smaller option is single letters only.
 4. **Shell sort.** Add `list --sort priority` now, or keep shell output in
-   canonical order only? Default: canonical only, sort deferred.
+   canonical order only? Default: canonical only, sort deferred. **Decided
+   October 21, 2026: yes, in PR 1.** The contract is under Shell `list`
+   filters.
 5. **Filter echo.** Include a `filter` object in the JSON list reply so agents
    can confirm which filter applied? Default: no; an older binary already fails
    closed.
@@ -863,3 +928,34 @@ Review cycle 3, October 21, 2026:
   recompiled, unit-tested, and checked with `rustfmt --check` in the scratch
   directory. `git diff --check`, local Markdown links, and the no-em-dash check
   pass.
+
+Owner decisions, October 21, 2026:
+- Recorded all eleven answers in a new Decided column. Every default was
+  accepted except question 4, which was decided yes: shell `list --sort
+  priority` is in PR 1.
+- Specified the `--sort` contract:
+  - It filters first, then stable-sorts `A` to `Z`, then no priority, with
+    canonical ties, the same order as the TUI's.
+  - It combines with every filter.
+  - `--json` emits the same objects in sorted order.
+  - The value is required, and only `priority` is accepted.
+  - Missing, invalid, repeated, and `--sort --json` all fail with
+    `invalid_arguments`, and the message names `priority`.
+  - Unsorted paths stream the filtered iterator, so they do no new work.
+- Moved `TaskOrder` and `projection::sort_by_priority` into PR 1 as shared
+  types used by both the shell and Stage 3b.
+- Updated the following for the new flag:
+  - the usage line and the exit/error table;
+  - the Stage 2 and 3b text and the PR table;
+  - the `projection.rs`, `cli.rs`, `tests/cli.rs`, and `tests/json.rs` test
+    rows;
+  - the usage.md, SKILL.md, and CHANGELOG checklist items;
+  - the agent-skill effect row;
+  - the information-only 10,000-task sorted list benchmark cases.
+- Status set to APPROVED FOR IMPLEMENTATION, PR 1 PENDING START; the index row
+  stays IN PROGRESS.
+- Verified: the `TaskOrder`/`sort_by_priority` snippet was compiled with stub
+  `Task` and `metadata::priority`, unit-tested for stable `A`, `B`, then
+  no-priority order with canonical ties, and checked with `rustfmt --check`
+  in the scratch directory. `git diff --check`, local Markdown links, and the
+  no-em-dash check pass.
