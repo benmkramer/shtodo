@@ -183,7 +183,7 @@ impl Mutation {
                         kind: ConflictKind::OrderChanged,
                     });
                 }
-                let moved = if projection == &Projection::default() {
+                let moved = if projection.is_unfiltered() {
                     list.move_visible(*id, *direction)?
                 } else if let Some(neighbor) = neighbor {
                     list.swap_visible(*id, *neighbor)?
