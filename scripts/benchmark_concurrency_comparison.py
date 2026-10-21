@@ -29,12 +29,69 @@ def plain_fixture(size):
                     deletion_sequence=None) for index in range(1, size + 1)])
 
 
+def tagged_text(index):
+    # Every other task carries todo.txt tokens: a priority marker and two tags.
+    if index % 2:
+        return benchmark.task_text(index)
+    return f"({'ABCD'[index // 2 % 4]}) {benchmark.task_text(index)} +proj{index % 5} @ctx{index % 3}"
+
+
+def tagged_fixture(size):
+    return dict(schema_version=1, scope=dict(kind="global"), next_task_id=size + 1,
+                next_deletion_sequence=1, tasks=[dict(
+                    id=index, text=tagged_text(index), completed=index % 4 == 0,
+                    deletion_sequence=None) for index in range(1, size + 1)])
+
+
+# Read-only operations; the info cases need filter flags, so they run for the current binary only.
+READ_OPERATIONS = {
+    "list": ["list"], "list_json": ["list", "--json"],
+    "list_tag": ["list", "--tag", "+proj1"], "list_priority": ["list", "--priority", "A-C"],
+    "list_search": ["list", "--search", "x"], "list_sort": ["list", "--sort", "priority"],
+    "list_json_sort": ["list", "--json", "--sort", "priority"],
+}
+INFO_OPERATIONS = {"list_tag": (1000, 10000), "list_priority": (1000, 10000),
+                   "list_search": (1000, 10000), "list_sort": (10000,),
+                   "list_json_sort": (10000,)}
+
+
+def expected_rows(value, operation):
+    """Python model of the derived-token list contract for the benchmark fixtures."""
+    tasks = [task for task in value["tasks"] if task["deletion_sequence"] is None]
+
+    def priority(text):
+        return text[1] if len(text) > 3 and text[0] == "(" and text[2:4] == ") " and "A" <= text[1] <= "Z" else None
+
+    def tags(text):
+        found = []
+        for token in text.split():
+            tag = token.rstrip(".,;:!?")
+            if token[0] in "+@" and len(tag) > 1 and tag not in found:
+                found.append(tag)
+        return found
+
+    if operation == "list_tag":
+        tasks = [task for task in tasks if "+proj1" in tags(task["text"])]
+    elif operation == "list_priority":
+        tasks = [task for task in tasks if priority(task["text"]) in ("A", "B", "C")]
+    elif operation == "list_search":
+        tasks = [task for task in tasks if "x" in task["text"].lower()]
+    elif operation in ("list_sort", "list_json_sort"):
+        tasks = sorted(tasks, key=lambda task: (priority(task["text"]) is None, priority(task["text"]) or ""))
+    if operation.startswith("list_json"):
+        return [dict(id=task["id"], text=task["text"], state="done" if task["completed"] else "open",
+                     deleted=False, priority=priority(task["text"]), tags=tags(task["text"]))
+                for task in tasks]
+    return "".join(f"{task['id']}  {'done' if task['completed'] else 'open'}  {task['text']}\n"
+                   for task in tasks)
+
+
 def cli_case(value, kind, operation):
     expected = copy.deepcopy(value)
     tasks = expected["tasks"]
     active_id = 1 if kind == "plain" else 2
-    commands = {
-        "list": ["list"], "add": ["add", benchmark.ADDED_TASK],
+    commands = READ_OPERATIONS | {
+        "add": ["add", benchmark.ADDED_TASK],
         "delete": ["delete", str(active_id)], "done": ["done", "2"],
         "reopen": ["reopen", "3"], "edit": ["edit", "2", "Changed café 東京"],
         "restore": ["restore", "1"], "noop_done": ["done", "3"],
@@ -76,17 +133,24 @@ def measure_cli(args, binaries, rng):
             path = home / ".shtodo/global/tasks.json"
             path.parent.mkdir(parents=True)
             for size in args.sizes:
-                for kind in ("plain", "mixed"):
+                for kind in args.kinds:
                     if kind == "plain":
                         value = plain_fixture(size)
+                    elif kind == "tagged":
+                        value = tagged_fixture(size)
                     else:
                         value = fixtures[size]
                     data = (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode()
-                    operations = ["list", "add"]
+                    operations = ["list", "list_json", "add"]
                     if size and (kind == "plain" or size >= 2):
                         operations.append("delete")
                     if kind == "mixed" and size >= 3:
                         operations += ["done", "reopen", "edit", "restore", "noop_done", "noop_delete"]
+                    if kind == "tagged" and label == "current":
+                        operations += [operation for operation, sizes in INFO_OPERATIONS.items()
+                                       if size in sizes]
+                    if args.operations:
+                        operations = [operation for operation in operations if operation in args.operations]
                     for operation in operations:
                         command, expected = cli_case(value, kind, operation)
                         cases.append(dict(label=label, binary=binary, home=home, env=env,
@@ -94,6 +158,8 @@ def measure_cli(args, binaries, rng):
                                           operation=operation, kind=kind, records=size,
                                           command=[binary, *command], samples=[]))
             value = plain_fixture(0)
+            if args.operations and "version" not in args.operations:
+                continue
             cases.append(dict(label=label, binary=binary, home=home, env=env, path=path,
                               fixture=(json.dumps(value) + "\n").encode(), expected=value,
                               operation="version", kind="plain", records=0,
@@ -106,7 +172,8 @@ def measure_cli(args, binaries, rng):
 
         def verify(case, before):
             operation = case["operation"]
-            if operation in ("list", "version"):
+            if operation in READ_OPERATIONS or operation == "version":
+                assert case["path"].read_bytes() == case["fixture"]
                 return
             actual = json.loads(case["path"].read_text())
             assert actual == case["expected"], (case["label"], case["kind"], operation, case["records"])
@@ -117,10 +184,15 @@ def measure_cli(args, binaries, rng):
         for case in cases:
             before = reset(case)
             output = benchmark.capture(case["command"], case["env"], case["home"])
-            if case["operation"] == "list":
-                expected = "".join(f"{task['id']}  {'done' if task['completed'] else 'open'}  {task['text']}\n"
-                                   for task in case["expected"]["tasks"] if task["deletion_sequence"] is None)
-                assert output == expected, (case["label"], case["kind"], case["records"])
+            if case["operation"] in READ_OPERATIONS:
+                expected = expected_rows(case["expected"], case["operation"])
+                if case["operation"].startswith("list_json"):
+                    output = json.loads(output)["tasks"]
+                    if case["label"] == "baseline":
+                        # The control predates the derived priority and tags fields.
+                        expected = [{key: value for key, value in task.items()
+                                     if key not in ("priority", "tags")} for task in expected]
+                assert output == expected, (case["label"], case["kind"], case["operation"], case["records"])
             verify(case, before)
         print(f"Preflight passed for {len(cases)} paired CLI cases", flush=True)
         with open(os.devnull, "r+b") as null, tempfile.TemporaryFile() as errors:
@@ -246,6 +318,10 @@ def main():
     parser.add_argument("--current", default=str(ROOT / "target/release/shtodo"))
     parser.add_argument("--mode", choices=("cli", "tui", "idle"), required=True)
     parser.add_argument("--sizes", type=int, nargs="+", default=[0, 100, 1000, 10000])
+    parser.add_argument("--kinds", nargs="+", choices=("plain", "mixed", "tagged"),
+                        default=["plain", "mixed"])
+    parser.add_argument("--operations", nargs="+",
+                        help="CLI operations to time (default: all for each fixture)")
     parser.add_argument("--runs", type=int, default=50)
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--seed", type=int, default=20261005)

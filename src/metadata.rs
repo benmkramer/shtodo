@@ -19,6 +19,9 @@ pub(crate) fn priority(text: &str) -> Option<Priority> {
 const TRAILING_PUNCTUATION: [char; 6] = ['.', ',', ';', ':', '!', '?'];
 
 pub(crate) fn tags(text: &str) -> impl Iterator<Item = &str> {
+    // Most texts have no sigil; one byte scan is cheaper than splitting on Unicode whitespace.
+    let candidate = text.bytes().any(|byte| matches!(byte, b'+' | b'@'));
+    let text = if candidate { text } else { "" };
     text.split_whitespace().filter_map(normalized_tag)
 }
 
@@ -34,8 +37,11 @@ pub(crate) fn distinct_tags(text: &str) -> Vec<&str> {
 }
 
 fn normalized_tag(token: &str) -> Option<&str> {
+    if !token.starts_with(['+', '@']) {
+        return None;
+    }
     let tag = token.trim_end_matches(TRAILING_PUNCTUATION);
-    (token.starts_with(['+', '@']) && tag.len() > 1).then_some(tag)
+    (tag.len() > 1).then_some(tag)
 }
 
 const NO_PRIORITY: u32 = 1 << 26;
