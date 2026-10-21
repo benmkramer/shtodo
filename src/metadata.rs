@@ -117,11 +117,32 @@ impl TaskFilter {
 
     /// Tags are an AND, priorities an OR; the empty filter does not scan the text.
     pub(crate) fn matches(&self, text: &str) -> bool {
-        self.priorities.contains(priority(text))
-            && self
+        self.priorities.contains(priority(text)) && self.has_tags(text)
+    }
+
+    /// Scans the text's tags once, marking required tags until all are found.
+    fn has_tags(&self, text: &str) -> bool {
+        let required = self.tags.len();
+        if required == 0 {
+            return true;
+        }
+        if required > u64::BITS as usize {
+            return self
                 .tags
                 .iter()
-                .all(|required| tags(text).any(|tag| tag == required))
+                .all(|required| tags(text).any(|tag| tag == required));
+        }
+        let all = u64::MAX >> (u64::BITS as usize - required);
+        let mut found = 0_u64;
+        for tag in tags(text) {
+            if let Some(index) = self.tags.iter().position(|required| required == tag) {
+                found |= 1 << index;
+                if found == all {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -240,6 +261,26 @@ mod tests {
         assert!(priorities.matches("(D) x"));
         assert!(priorities.matches("plain"));
         assert!(!priorities.matches("(B) x"));
+
+        let three = filter(&["+a", "@b", "@c"]);
+        assert!(three.matches("x @b +a y +a @b @c"));
+        assert!(three.matches("(A) @c, +a @b."));
+        assert!(!three.matches("x @b +a y +a @b @cc"));
+        assert!(!three.matches("x +a @b"));
+
+        let many_tokens: Vec<String> = (0..65).map(|index| format!("+t{index}")).collect();
+        let many = filter(&many_tokens.iter().map(String::as_str).collect::<Vec<_>>());
+        let all_tags = many_tokens.join(" ");
+        assert!(many.matches(&all_tags));
+        assert!(!many.matches(&many_tokens[..64].join(" ")));
+        let first_64 = filter(
+            &many_tokens[..64]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        assert!(first_64.matches(&all_tags));
+        assert!(!first_64.matches(&many_tokens[1..].join(" ")));
 
         let both = filter(&["+a", "A-B", "+a."]);
         assert_eq!(both.tags, ["+a"]);
