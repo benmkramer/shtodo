@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod input;
 mod json;
+mod metadata;
 mod mutation;
 mod projection;
 mod session;

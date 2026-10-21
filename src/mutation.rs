@@ -216,6 +216,7 @@ mod tests {
         let projection = Projection {
             view: crate::projection::TaskView::Open,
             lowercase_query: "needle 東京".into(),
+            filter: crate::metadata::TaskFilter::default(),
         };
         let request = Mutation::MoveAdjacent {
             id: first,
@@ -253,6 +254,57 @@ mod tests {
             }
         ));
         assert_eq!(list, before);
+    }
+
+    #[test]
+    fn filtered_reorder_should_reject_changed_filter_membership_and_allow_unrelated_edits() {
+        let mut filter = crate::metadata::TaskFilter::default();
+        filter.add(crate::metadata::parse_filter_token("+x").unwrap());
+        let projection = Projection {
+            filter,
+            ..Projection::default()
+        };
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first +x").unwrap();
+        let between = list.add("between").unwrap();
+        let second = list.add("second +x").unwrap();
+        let unrelated = list.add("unrelated").unwrap();
+        let request = Mutation::MoveAdjacent {
+            id: first,
+            direction: MoveDirection::Down,
+            neighbor: Some(second),
+            projection,
+        };
+        let conflicts = |list: &mut TaskList| {
+            let before = list.clone();
+            let conflicted = matches!(
+                request.apply(list),
+                Outcome::Conflict {
+                    kind: ConflictKind::OrderChanged,
+                    ..
+                }
+            );
+            assert_eq!(*list, before);
+            conflicted
+        };
+
+        let mut left = list.clone();
+        left.edit(second, "second").unwrap();
+        assert!(conflicts(&mut left), "neighbor left the filter");
+        let mut joined = list.clone();
+        joined.edit(between, "between +x.").unwrap();
+        assert!(conflicts(&mut joined), "a row between now matches");
+        let mut moved_away = list.clone();
+        moved_away.edit(first, "first").unwrap();
+        assert!(conflicts(&mut moved_away), "the moved row left the filter");
+
+        list.edit(unrelated, "unrelated but changed").unwrap();
+        list.set_completed(between, true).unwrap();
+        assert!(request.apply(&mut list).changed());
+        assert_eq!(
+            list.tasks().iter().map(Task::id).collect::<Vec<_>>(),
+            [second, between, first, unrelated]
+        );
     }
 
     #[test]

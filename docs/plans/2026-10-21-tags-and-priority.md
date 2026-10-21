@@ -1,11 +1,11 @@
 # Tags and priority: derived todo.txt tokens with TUI and shell filtering
 
-Status: APPROVED FOR IMPLEMENTATION, PR 1 PENDING START. The owner decided
+Status: IN PROGRESS. PR 1 (Stages 1 and 2, the shell Stage 4 subset, and the
+PR 1 Stage 5 items) is being implemented; PR 2 (TUI) follows. The owner decided
 every question in [Decisions before Stage 0 exits](#decisions-before-stage-0-exits)
 on October 21, 2026: every default was accepted except question 4, which adds
-shell `list --sort priority` to PR 1. No runtime code has changed, and
-implementation starts only when the owner says so. The plan index row stays
-IN PROGRESS until implementation is done.
+shell `list --sort priority` to PR 1, and approved implementation the same day.
+The plan index row stays IN PROGRESS until PR 2 is done.
 Date: October 21, 2026. Inspected baseline: `1f2421c` (feat: add JSON output
 for shell task commands, #16) on branch `feat/tags-and-priority`.
 Priority: P1. Estimated effort: L, in stages and two PRs (see Review
@@ -627,6 +627,8 @@ change visible to users.
 Acceptance: the `metadata.rs`, `projection.rs`, and filtered `MoveAdjacent`
 guard (`mutation.rs`) unit tests pass; all existing tests pass unchanged;
 Clippy strict.
+Status: DONE in PR 1. `App` now holds one `Projection` in place of its
+separate `view` and `lowercase_query` fields; TUI behavior is unchanged.
 
 ### Stage 2: Shell filters and JSON fields
 
