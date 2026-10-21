@@ -4,7 +4,8 @@ Status: IN PROGRESS. Planning only; no runtime code has changed. Revised
 after review cycle 1 (October 21, 2026).
 Date: October 21, 2026. Inspected baseline: `1f2421c` (feat: add JSON output
 for shell task commands, #16) on branch `feat/tags-and-priority`.
-Priority: P1. Estimated effort: M, in stages. Depends on: concurrent usage
+Priority: P1. Estimated effort: L, in stages and two PRs (see Review
+boundaries). Depends on: concurrent usage
 (DONE) and the Unreleased JSON output contract.
 
 This plan is self-contained; a separate spec would duplicate its contracts.
@@ -310,29 +311,84 @@ trailing in-progress token matches by prefix, and everything else is exact.
   parse yet (`A-`) is left out of the preview without an error.
 - Earlier, completed tokens are exact. If one of them is invalid, the last
   valid preview stays and the line shows the invalid token.
-- The preview is App-only state: `TaskFilter` gains `tag_prefix:
-  Option<String>`, set only in the Filter-mode preview. The shell never
-  constructs it, and no `Mutation` projection carries it. No mutation can be
-  submitted while the editor is open, and accepted filters always have
-  `tag_prefix: None`.
-- Enter accepts exactly what was typed; the prefix is not carried over. So
-  accepting `+sh` filters by the exact tag `+sh`. To prevent a surprise empty
-  list, the hint line shows the tags the prefix matches, so the user can finish
-  the word. Tab completion is not in this slice (open question 9). An empty
-  buffer clears the filter. Enter on a buffer with an invalid token stays in
-  the editor and shows
+- The prefix lives only in an App-side type, so the rule is enforced by the
+  types rather than by convention. `TaskFilter` and `Projection` stay exactly
+  what the shell and `Mutation::MoveAdjacent` carry, with no preview field:
+
+  ```rust
+  /// Filter-mode preview. It never leaves `App`, so no shell or `Mutation` value can carry it.
+  struct FilterPreview {
+      exact: TaskFilter,
+      trailing_prefix: Option<String>,
+  }
+
+  impl FilterPreview {
+      fn matches(&self, text: &str) -> bool {
+          self.exact.matches(text)
+              && self
+                  .trailing_prefix
+                  .as_deref()
+                  .is_none_or(|prefix| metadata::tags(text).any(|tag| tag.starts_with(prefix)))
+      }
+  }
+  ```
+
+  `exact` holds the buffer's completed tokens. While `Mode::Filter` is open,
+  `App::matches` builds a `Projection` from the view, the query, and
+  `preview.exact`, then also applies `trailing_prefix`. Outside Filter mode,
+  `App` holds only the accepted `TaskFilter`. No mutation can be submitted
+  while the editor is open, and `App::move_task` builds its `Projection`
+  from the accepted filter only.
+- Enter resolves the trailing token against the tags in the current view. The
+  current view means the rows that match the view, the search, and the
+  buffer's completed tokens, which is the same set the hint line counts.
+  - If the trailing token equals a tag present in that view, accept it as
+    typed.
+  - Otherwise, if it prefix-matches exactly one distinct tag, replace the
+    token with that tag and accept (`+sh` becomes `+shtodo` when only
+    `+shtodo` starts with `+sh`).
+  - If it prefix-matches several, stay in the editor, keep the buffer and
+    cursor, and show `Finish the tag: +shtodo, +shell`. Tags are listed in
+    hint-line order and clipped like the hint line.
+  - If it matches none, accept exactly as typed, so a user can set up a filter
+    for a tag that does not exist yet. The list may then be empty, which is
+    what was asked for.
+  - A sigil alone (`+`, `@`) is invalid on Enter, as in the shell.
+  - Completed tokens are never changed. Priority tokens are never completed.
+- An empty buffer clears the filter. Enter on a buffer with an invalid token
+  stays in the editor and shows
   `Invalid filter "foo"; use +project, @context, A, A-C, or none`.
 - Escape restores the previous filter and selection, as Search does.
-- Covered by the `src/app.rs` test
-  `filter_editor_should_preview_trailing_tag_by_prefix_and_accept_exactly`
+- Covered by the `src/app.rs` tests
+  `filter_editor_should_preview_trailing_tag_by_prefix_and_accept_exactly` and
+  `filter_editor_enter_should_complete_unique_prefix_refuse_ambiguous_and_accept_unknown`
   (see Test plan).
 
-**Tag discovery.** While `Mode::Filter` is open, the line below the editor
-lists the distinct tags in the rows the preview shows if the trailing token is
-ignored. They are narrowed to tags starting with the trailing tag prefix, if
-there is one. Order is by count, highest first, then by name. They are
-clipped to the terminal width with `…` and shown with counts, for example
-`+shtodo 12 · +shell 3 · @laptop 2`.
+**Tag discovery.** While `Mode::Filter` is open, a hint line lists the
+distinct tags in the rows the preview shows if the trailing token is ignored.
+They are narrowed to tags starting with the trailing tag prefix, if there is
+one. Order is by count, highest first, then by name. They are shown with
+counts, for example `+shtodo 12 · +shell 3 · @laptop 2`.
+
+Placement at the 40x8 minimum. Today `ui::render` splits the screen into row 0
+for the header, row 1 for the tab strip and status, rows 2 to 6 for the list
+(`Constraint::Min(1)`), and row 7 for the footer.
+- While `Mode::Filter` is open, `render` adds a `Constraint::Length(1)`
+  region between the list and the footer. At 8 rows high, the hint is row 6
+  and the list is rows 2 to 5 (4 rows, which keeps at least 3). Outside
+  Filter mode, that region has length 0 and the layout is unchanged.
+- The tab strip stays on row 1, so the view, the match count, and the editor
+  remain visible. The filter buffer is edited on row 1 in place of the `f:`
+  segment, with the cursor windowed by `editor_window`, as Search edits
+  `/query` there today.
+- Messages such as `Finish the tag: …` and invalid-token errors use the
+  existing footer message slot on row 7. The hint never displaces them.
+- Clipping at 40 columns: whole `tag count` entries are dropped from the end,
+  and `…` is appended when any were dropped, so no tag is shown cut in half. If
+  even the first entry does not fit, it is cut to `width - 1` columns plus `…`.
+  With no tags, the hint shows `No tags in this view`.
+- Covered by the `src/ui.rs` test
+  `filter_editor_should_render_hint_above_footer_and_keep_list_rows_at_minimum_size`.
 - Cost: one `tags` scan over the visible rows and a small `HashMap<&str, usize>`
   on each Filter-mode keystroke and refresh. There is no cost outside Filter
   mode and no stored index. At 10,000 rows this is one scan per keystroke, the
@@ -386,10 +442,13 @@ view, search, or filter").
     `existing_explicit_bindings_should_claim_all_new_search_defaults`, and
     `explicit_search_and_legacy_bindings_should_still_conflict_in_either_source_order`.
     The last one still expects exactly one issue.
-- With a config file, `shtodo doctor` reports 37 configurable actions. The
-  `move_down = ["x"]` fixture in `tests/cli.rs` goes from 47 to 49 active
-  bindings. The existing upgrade fixture `toggle_complete = ["f"]` must keep
-  loading, with `edit_filter` unbound. No new doctor note is needed: unbound
+- Each binding is registered in the stage that makes it work, so the doctor
+  counts change in two steps. With a config file, `shtodo doctor` reports 36
+  configurable actions after Stage 3b (`toggle_sort`) and 37 after Stage 3c
+  (`edit_filter`). The `move_down = ["x"]` fixture in `tests/cli.rs` goes from
+  47 to 48 to 49 active bindings. The existing upgrade fixture
+  `toggle_complete = ["f"]` must keep loading in both steps, with
+  `edit_filter` unbound after 3c. No new doctor note is needed: unbound
   search actions already set the precedent of appearing in Help only.
 
 ### Effect on existing commands and behavior
@@ -438,6 +497,24 @@ Gates (release build, paired against `1f2421c` with
 
 ## Staged implementation and acceptance gates
 
+### Review boundaries
+
+Effort is L, not M. Stages 3a to 3c, the hint row, the PTY scenario, and paired
+benchmarks are each substantial. The work is split into two PRs, each
+reviewable and releasable on its own:
+
+| PR | Stages | Ships | Documentation checklist items |
+| --- | --- | --- | --- |
+| PR 1: shell and JSON | 1, 2, plus a shell-only Stage 4 subset (`list` and `list --json` gates and the filtered-list cases) | Derived tokens, shell `list` filters, JSON `priority`/`tags`. The agent-facing gain, usable without any TUI change | README Quick start and Scope; usage.md grammar, list filters and error table, the `--json`-as-value note, JSON fields and schema policy, Version-one limits for priorities, tags, and shell filters; agent-skill.md; SKILL.md; CHANGELOG entries for tokens, filters, and JSON; plans README rejected-findings bullet; benchmarks.md "Shell listing remains unfiltered"; `cli::usage()` |
+| PR 2: TUI | 3a, 3b, 3c, then the TUI Stage 4 subset (completion-to-frame, idle refresh) | Row styling, priority sort, filter editor, tag discovery | README essentials line; usage.md Normal-mode keys, Filter mode, search-and-views composition, layered Esc, sorted reorder; configuration.md example, defaults, and upgrade rules for `s`/`f`; CHANGELOG TUI entries; benchmarks.md paired report link; this plan to DONE and the index row |
+
+PR 2 is branched from and rebased onto PR 1, and is reviewed only after PR 1
+merges. Its Stage 1 dependencies (`metadata.rs`, `TaskFilter`, extended
+`Projection`) come from PR 1 and must not be redone. Because each binding
+registers with its working stage, no intermediate state of PR 2 exposes a
+key that does nothing, so a release may be cut after PR 1 or after PR 2. No
+release is cut from a partial PR 2.
+
 ### Stage 0: Review and freeze contracts
 
 Owner reviews this plan, answers or accepts the open questions, and approves
@@ -462,41 +539,54 @@ Acceptance: every row of the exit/error table has a CLI test in text and JSON
 mode; no-storage-created holds for usage errors; existing exact list output
 holds.
 
-### Stage 3a: Styled rows and the two bindings
+### Stage 3a: Styled rows
 
-Add styled `task_item` (live and Trash rows), the `ToggleSort` and
-`EditFilter` `BindingId`s, `Action`s, `DEFINITIONS` entries, config names,
-`defaults_yield_to_overrides` membership, and Help/footer descriptions. Update
-the doctor counts. Until 3b and 3c land, the actions show a `not available
-yet` message and change nothing; no other behavior changes.
-Acceptance: ui styling tests; input/config tests including the named
-yield-rule fixtures (all pass unchanged and report `toggle_sort`/`edit_filter`
-unbound where their keys are claimed); doctor count tests at 37/49; every
-earlier test passes. A STOP may land here, and the tree stays green.
+Add styled `task_item` for live and Trash rows: the priority marker and tag
+slices are styled, completed rows keep dim and strikethrough on every span,
+and stripped trailing punctuation is left unstyled. No `BindingId`, `Action`,
+config name, or doctor count changes, so no key exists that does nothing yet.
+Acceptance: ui styling tests; every earlier test passes unchanged, including
+doctor counts of 35 actions and 47 bindings. A STOP may land here, and the
+tree stays green.
 
 ### Stage 3b: Priority sort
 
-Add `TaskOrder`, the cached sorted `Vec<TaskId>` and when it is invalidated,
-`j`/`k` in displayed order, selection identity across toggles, reconcile and
-selection fallback in displayed order, the `by priority` status segment, and
-`J`/`K` disabled with a keymap-derived message under Priority order.
+Register `BindingId::ToggleSort` and `Action::ToggleSort`: the `DEFINITIONS`
+entry with default `s`, config name `toggle_sort`,
+`defaults_yield_to_overrides` membership, and the Help and footer
+description. Add `TaskOrder`, the cached sorted `Vec<TaskId>` and when it is
+invalidated, `j`/`k` in displayed order, selection identity across toggles,
+reconcile and selection fallback in displayed order, the `by priority` status
+segment, and `J`/`K` disabled with a keymap-derived message under Priority
+order.
 Acceptance: app sort tests, ui status and clipping tests, and session tests
 showing refresh invalidates the cached order and unchanged bytes cause no
 parse or redraw while sorted. `Mutation::MoveAdjacent` is never submitted
-while sorted. A STOP may land here.
+while sorted. The `toggle_sort` input and config tests pass, including
+`load_should_resolve_search_and_view_actions_and_shared_editor_keys` loading
+with `ToggleSort` unbound. Doctor counts are 36 actions and 48 bindings. A STOP
+may land here.
 
 ### Stage 3c: Filter editor and tag discovery
 
-Add `Mode::Filter`, `FilterSession`, live preview with the trailing-token
-prefix, exact acceptance, the invalid-token message, the tag-discovery hint
-line, layered Esc in Normal mode, the `f:` status segment, filter-aware
-"hidden" messages and "No matching tasks" hints, and the filter carried in
-`MoveAdjacent`'s `Projection`.
+Register `BindingId::EditFilter` and `Action::EditFilter` (default `f`,
+config name `edit_filter`, with yield-to-override). Add `Mode::Filter`,
+`FilterSession`, the App-side `FilterPreview`, the live preview with the
+trailing-token prefix, Enter resolution (complete a unique prefix, refuse an
+ambiguous one, accept an unknown one), the invalid-token message, the
+tag-discovery hint row above the footer, layered Esc in Normal mode, the `f:`
+status segment, filter-aware "hidden" messages and "No matching tasks" hints,
+and the accepted filter carried in `MoveAdjacent`'s `Projection`.
 Acceptance: app filter tests including
-`filter_editor_should_preview_trailing_tag_by_prefix_and_accept_exactly`;
-input tests showing Filter mode uses Insert bindings; session tests for
-editor buffer, cursor, and filter across refresh; mutation tests for the
-filtered adjacency guard; the PTY smoke scenario passes.
+`filter_editor_should_preview_trailing_tag_by_prefix_and_accept_exactly` and
+`filter_editor_enter_should_complete_unique_prefix_refuse_ambiguous_and_accept_unknown`;
+ui test
+`filter_editor_should_render_hint_above_footer_and_keep_list_rows_at_minimum_size`;
+input tests showing Filter mode uses Insert bindings; the `f` yield-rule
+fixtures report `EditFilter` unbound; session tests for editor buffer,
+cursor, and filter across refresh; mutation tests for the filtered adjacency
+guard; the PTY smoke scenario passes. Doctor counts are 37 actions and 49
+bindings.
 
 ### Stage 4: Measurements
 
@@ -506,7 +596,8 @@ Acceptance: gates met, or STOP.
 
 ### Stage 5: Docs and final verification
 
-Complete the documentation checklist, then run:
+Complete the checklist items assigned to the PR being finished (see Review
+boundaries), then run this for each PR:
 
 ```sh
 cargo fmt --check
@@ -529,12 +620,12 @@ the behavior and evidence are present.
 | `src/mutation.rs` (unit) | `MoveAdjacent` with a filter: a neighbor that leaves the filter conflicts; a newly matching row between the pair conflicts; unrelated changes coexist |
 | `src/cli.rs` (unit) | `parse_list_args`: every flag, any order, repeats, `--search --json` taken as a value, `--json` in flag positions in front/middle/end, every row of the error table, both scopes; `parse_invocation` keeps the format for list usage errors |
 | `src/json.rs` (unit) | Task object includes `priority` serialized exactly as `"A"` or `null` (a one-character string, not a number or `"(A)"`) and `tags` (`[]` or normalized values) for live and deleted tasks |
-| `tests/cli.rs` | Text `list` with each filter and combinations; canonical order kept; empty match exits 0 with empty stdout; usage errors exit 1 with usage text and create no storage; filters ignore invalid keybinding config; doctor counts 37 actions and 49 bindings for the `move_down` fixture; the `toggle_complete = ["f"]` fixture still loads; exact unfiltered output unchanged |
+| `tests/cli.rs` | Text `list` with each filter and combinations; canonical order kept; empty match exits 0 with empty stdout; usage errors exit 1 with usage text and create no storage; filters ignore invalid keybinding config; doctor counts for the `move_down` fixture are 36 and 48 after Stage 3b, then 37 and 49 after Stage 3c; the `toggle_complete = ["f"]` fixture still loads; exact unfiltered output unchanged |
 | `tests/json.rs` | `list --json` with filters; new fields on list and on add/edit/done/reopen/delete/restore replies; every error-table row returns `invalid_arguments`, empty stdout, exit 1; missing scope returns `[]` without creating storage; a filter read works while a writer holds the lock |
 | `src/input.rs` (unit) | Defaults map `s`/`f` in Normal only; explicit `toggle_sort`/`edit_filter` conflicts and `ctrl-c` are rejected; Filter mode uses Insert bindings and treats `q`, `f`, `s`, `/`, Space as text. Existing tests pass unchanged, with added assertions: `search_actions_should_support_overrides_and_detect_existing_key_conflicts` and `existing_explicit_bindings_should_claim_all_new_search_defaults` report `EditFilter` in `unbound_actions_for(Mode::Normal)` because `f` is claimed; `explicit_search_and_legacy_bindings_should_still_conflict_in_either_source_order` still returns exactly one issue |
 | `src/config.rs` (unit) | `toggle_sort`/`edit_filter` parse under `[keybindings.normal]` and are unknown in other modes; doctor report counts. `load_should_resolve_search_and_view_actions_and_shared_editor_keys` (`start_search = ["s"]`) still loads with `StartSearch` on `s` and `ToggleSort` reported unbound. `load_should_preserve_existing_normal_bindings_that_claim_new_search_defaults` still loads for every key; for `f` it reports `EditFilter` unbound and `ToggleComplete` on `f` |
-| `src/app.rs` (unit) | `filter_editor_should_preview_trailing_tag_by_prefix_and_accept_exactly`: tasks with `+shtodo`, `+shell`, `+other`. Typing `+`, `+s`, `+sh`, through `+shtodo` never leaves the `+shtodo` task out of the preview; `+sh` previews both `+shtodo` and `+shell`; `+sh ` (trailing space) is exact and previews none; `@x +sh` keeps `@x` exact; Enter on `+sh` accepts the exact tag `+sh` with no prefix kept; the accepted `Projection` has `tag_prefix: None`. Also: the hint line lists matching tags with counts in the specified order; an invalid completed token keeps the last valid preview; an in-progress `A-` is left out of the preview without an error; Enter rejects an invalid buffer; Escape restores filter and selection; layered Esc clear; sort toggle keeps selection identity; `j`/`k` follow sorted order; `J`/`K` under Priority order submit nothing and show message; hidden-by-filter messages for add/edit/restore/complete; filter and sort survive Trash/Help round trips |
-| `src/ui.rs` (unit) | Styled spans for priority/tags, including on completed rows and in Trash; status segments; 40-column clipping order; "No matching tasks" hints with configured keys; Filter editor cursor visible with a long Unicode buffer |
+| `src/app.rs` (unit) | `filter_editor_should_preview_trailing_tag_by_prefix_and_accept_exactly`: tasks with `+shtodo`, `+shell`, `+other`. Typing `+`, `+s`, `+sh`, through `+shtodo` never leaves the `+shtodo` task out of the preview; `+sh` previews both `+shtodo` and `+shell`; `+sh ` (trailing space) is exact and previews none; `@x +sh` keeps `@x` exact; the preview is a `FilterPreview` with `exact` holding only `@x` and `trailing_prefix` `+sh`; after Enter, `App` holds only a plain `TaskFilter`, and a following `J`/`K` builds its `Projection` from it. `filter_editor_enter_should_complete_unique_prefix_refuse_ambiguous_and_accept_unknown`: with `+shtodo` and `+shell` present, Enter on `+sh` stays in the editor with the buffer and cursor kept and the message `Finish the tag: +shtodo, +shell`; Enter on `+sht` completes to `+shtodo` and accepts; Enter on `+shtodo` (exact and present) accepts unchanged; Enter on `+zzz` (no match) accepts `+zzz` exactly and the list is empty; Enter on `+` alone is invalid; `@x +sht` completes only the trailing token, and only among tags in rows that also match `@x`, the view, and the search; a priority token is never completed. Also: the hint line lists matching tags with counts in the specified order; an invalid completed token keeps the last valid preview; an in-progress `A-` is left out of the preview without an error; Enter rejects an invalid buffer; Escape restores filter and selection; layered Esc clear; sort toggle keeps selection identity; `j`/`k` follow sorted order; `J`/`K` under Priority order submit nothing and show message; hidden-by-filter messages for add/edit/restore/complete; filter and sort survive Trash/Help round trips |
+| `src/ui.rs` (unit) | Styled spans for priority/tags (stripped punctuation unstyled), including on completed rows and in Trash; status segments; 40-column clipping order; "No matching tasks" hints with configured keys. `filter_editor_should_render_hint_above_footer_and_keep_list_rows_at_minimum_size`, written like `search_editor_should_keep_long_unicode_query_cursor_visible_at_minimum_width` with `TestBackend::new(40, 8)`: in Filter mode with a long Unicode buffer, the cursor is on row 1 with `x < 40`; row 1 holds the buffer's tail; rows 2 to 5 hold list rows; row 6 holds the hint with whole entries and a trailing `…`; row 7 holds the Filter footer; with a message set, row 7 shows it and row 6 still shows the hint. A second case shows that in Normal mode the list again covers rows 2 to 6 |
 | `src/session.rs` (unit) | Refresh keeps the filter editor buffer/cursor, filter, and sort; external edit that adds or removes a tag reconciles selection; equal bytes cause no parse or redraw with filter and sort active; cached sort order is invalidated by refresh |
 | `scripts/test_concurrency.py` (PTY) | One scenario: TUI with `f +x` and `s` active; shell `add "(A) new +x"` and `edit` appear on idle refresh in sorted position; shell `edit` removing `+x` hides the row |
 
@@ -616,10 +707,10 @@ Stop and report to the owner instead of continuing when:
    order (default), or reorder within the same priority band?
 8. **Parent IDs.** Accept that parent IDs will likely need a stored field and
    their own migration later, even though JSON stays additive?
-9. **Tab completion in the Filter editor.** Should a key complete the trailing
-   prefix to the top tag in the hint line? Default: deferred; the hint line is
-   enough for this slice, and a completion key would need another Insert-mode
-   binding.
+9. **Tab completion in the Filter editor.** Mostly moot now that Enter
+   completes a unique prefix and refuses an ambiguous one. What remains is
+   cycling through ambiguous candidates without typing. Default: deferred; it
+   would need another Insert-mode binding.
 10. **`shtodo tags [--json]`.** Add a read-only command that prints distinct
     tags with counts? Default: deferred, out of this slice. Agents can get the
     same from the `tags` field of `list --json`, and people from the Filter
@@ -652,3 +743,23 @@ form; documented `--json` taken as a value after a filter flag; added open
 questions 9 to 11. The revised `tags` snippet was recompiled, tested
 (including `ship it +shtodo.`, `+.`, `+a.b`, and `+東京!`), and checked with
 `rustfmt --check` in the scratch directory.
+
+Review cycle 2, October 21, 2026:
+- Enter now completes a unique tag prefix, refuses an ambiguous one with
+  `Finish the tag: …`, and accepts an unknown one as typed. Open question 9
+  is now mostly moot.
+- The preview prefix moved out of `TaskFilter` into an App-side
+  `FilterPreview`, so `Projection` and `TaskFilter` stay structurally equal to
+  what the shell and `MoveAdjacent` carry.
+- Specified the hint row at 40x8 (row 6, above the footer, with the list on
+  rows 2 to 5 and the tab strip kept), its clipping rules, and the ui test.
+- Re-rated effort to L, defined the PR 1 (Stages 1 and 2) and PR 2 (Stages 3a
+  to 3c and 4) boundaries with their checklist items, and stated that PR 2
+  rebases on PR 1.
+- Moved binding registration into 3b (`toggle_sort`) and 3c (`edit_filter`),
+  so 3a is styling only and doctor counts step 35/47, then 36/48, then 37/49.
+- Verified against `src/ui.rs` (`render` layout, `MIN_WIDTH`/`MIN_HEIGHT`
+  40x8, and the search-cursor test at row 1 and footer at row 7). The
+  `FilterPreview` snippet was compiled with stub `TaskFilter` and
+  `metadata::tags`, unit-tested for prefix and no-prefix cases, and checked
+  with `rustfmt --check` in the scratch directory.
