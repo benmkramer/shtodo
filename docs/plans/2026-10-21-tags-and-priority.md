@@ -1,7 +1,8 @@
 # Tags and priority: derived todo.txt tokens with TUI and shell filtering
 
 Status: IN PROGRESS. PR 1 (Stages 1 and 2, the shell Stage 4 subset, and the
-PR 1 Stage 5 items) is being implemented; PR 2 (TUI) follows. The owner decided
+PR 1 Stage 5 items) is implemented on `feat/tags-and-priority`; PR 2 (TUI,
+Stages 3a to 3c and the TUI Stage 4 subset) follows. The owner decided
 every question in [Decisions before Stage 0 exits](#decisions-before-stage-0-exits)
 on October 21, 2026: every default was accepted except question 4, which adds
 shell `list --sort priority` to PR 1, and approved implementation the same day.
@@ -699,6 +700,9 @@ Run the paired benchmarks above, the shell subset in PR 1 and the TUI subset
 in PR 2, and record a short report for each under `docs/benchmarks/` without
 overwriting earlier samples.
 Acceptance: that PR's gates are met, or STOP.
+Status: shell subset DONE in PR 1; see the
+[shell paired report](../benchmarks/2026-10-21-tags-and-priority-cli-comparison.md).
+The TUI subset is pending in PR 2.
 
 ### Stage 5: Docs and final verification
 
@@ -716,6 +720,7 @@ git diff --check
 Acceptance: all gates pass; release-binary smoke uses a temporary home and an
 exact temporary cwd. Mark this plan DONE and update the index row only at the
 end of PR 2, once the behavior and evidence are present.
+Status: PR 1 items DONE; PR 2 items pending.
 
 ## Test plan
 
@@ -737,11 +742,11 @@ end of PR 2, once the behavior and evidence are present.
 
 ## Documentation checklist
 
-- [ ] `README.md`: Quick start examples (`list --open --tag +work`) and Scope
+- [ ] `README.md` (PR 1 part done): Quick start examples (`list --open --tag +work`) and Scope
   paragraph, which removes "priorities, tags" from the excluded list and adds
   the derived-token note (PR 1); essentials line adds `s sort · f filter`
   (PR 2).
-- [ ] `docs/usage.md`, PR 1: new "Priority and tags" section (grammar, examples,
+- [x] `docs/usage.md`, PR 1: new "Priority and tags" section (grammar, examples,
   trailing-punctuation stripping and how it differs from strict todo.txt,
   edge cases); list filter syntax, composition, exit/error table;
   `--sort priority` order, composition with filters, JSON ordering, and that
@@ -760,20 +765,20 @@ end of PR 2, once the behavior and evidence are present.
 - [ ] `docs/configuration.md` (PR 2): example config and Normal default table gain
   `toggle_sort`/`edit_filter`; upgrade section covers yield-to-override for
   `s`/`f`.
-- [ ] `docs/agent-skill.md` (PR 1): example prompt for filtered open tasks.
-- [ ] `skills/shtodo/SKILL.md` (PR 1): the "no filter flag" and "do not offer search
+- [x] `docs/agent-skill.md` (PR 1): example prompt for filtered open tasks.
+- [x] `skills/shtodo/SKILL.md` (PR 1): the "no filter flag" and "do not offer search
   or filters" text is replaced with filter flags and `--sort priority`
   (reordering stays TUI-only); task fields include
   `priority` and `tags`; priority and tags are set by editing text; older-binary
   fallback on `invalid_arguments`.
-- [ ] `CHANGELOG.md` Unreleased `### Added`: derived priority and tags, shell
+- [ ] `CHANGELOG.md` Unreleased `### Added` (PR 1 part done): derived priority and tags, shell
   list filters and `list --sort priority`, with JSON (PR 1); TUI highlighting, sort, filter, tag
   discovery, and the new configurable actions (PR 2).
-- [ ] `docs/plans/README.md`: update the rejected-findings bullet on shell
+- [ ] `docs/plans/README.md` (PR 1 part done): update the rejected-findings bullet on shell
   filters to note this plan supersedes it (PR 1); status DONE (end of PR 2).
-- [ ] `docs/benchmarks.md`: update "Shell listing remains unfiltered" and
+- [ ] `docs/benchmarks.md` (PR 1 part done): update "Shell listing remains unfiltered" and
   link the shell paired report (PR 1); link the TUI paired report (PR 2).
-- [ ] `cli::usage()` text and its tests (PR 1).
+- [x] `cli::usage()` text and its tests (PR 1).
 
 ## STOP conditions
 
@@ -964,3 +969,49 @@ Owner decisions, October 21, 2026:
   no-priority order with canonical ties, and checked with `rustfmt --check`
   in the scratch directory. `git diff --check`, local Markdown links, and the
   no-em-dash check pass.
+
+PR 1 implementation, October 21, 2026, on `feat/tags-and-priority` from
+`fa90772` (no drift: `origin/main` was still `1f2421c`):
+- Stage 1 (`c6b5821`): `src/metadata.rs` with `Priority`, `priority`, `tags`,
+  `distinct_tags`, `PrioritySet`, `FilterToken`, `parse_filter_token`, and
+  `TaskFilter` (`add`, `matches`, `is_empty`); `Projection.filter`,
+  `projection::matches(task, &Projection)`, and `Projection::is_unfiltered`.
+  The tests were written first and failed (seven `todo!()` panics in
+  `metadata.rs`, then compile errors for `projection.rs`) before the code.
+  Deviation: `App` holds one `Projection` in place of its `view` and
+  `lowercase_query` fields, so it can call the shared predicate without
+  cloning; TUI behavior is unchanged and every existing test passed unchanged.
+  Items used only from Stage 2 carried a temporary `expect(dead_code)`,
+  removed in Stage 2.
+- Stage 2 (`a2b15b6`): `ListFilter`, the four `CliError` variants,
+  `parse_list_args`, `TaskOrder`, `projection::sort_by_priority`, filtered and
+  sorted `list_tasks`, `json::write_list(scope, tasks)`, the JSON fields, and
+  usage text. The unit and integration tests were written first; the CLI
+  integration tests failed against the old binary (six failures) before the
+  code. Deviation in structure, not contract: `parse_invocation` removes
+  `--json` from `list` flag positions (skipping each value after `--tag`,
+  `--priority`, `--search`, and `--sort`), then `parse_args` hands the rest to
+  a pure `parse_list_args`, so `parse_args` stays the one command parser.
+- Stage 4 shell subset (`c5791b2`): the first paired run measured 10,000-task
+  plain `list --json` at +11.0%, over the 10% gate. `metadata::tags` now
+  skips the whitespace split when a text has no `+` or `@` byte (Performance
+  said every task pays one split). That is a mitigation within the design,
+  not a contract change. A lazily serialized `tags` field did not help and
+  was reverted, so `json::Task.tags` stays a borrowed `Vec<&str>`. The
+  harness gained `--kinds` (with a `tagged` fixture), `--operations`,
+  `list_json`, and information-only filtered and sorted cases that run for
+  the current binary only. Final gates at 10,000 records against `1f2421c`:
+  plain `list` -1.0% (-0.12 ms), plain `list --json` +8.7% (+0.49 ms), mixed
+  `list --json` +5.5% (+0.35 ms), all passing. The gates were read as
+  applying to the harness's existing fixtures; on the new half-tokened
+  fixture, unfiltered `list --json` is +15.2% (+0.93 ms), inside the
+  absolute bound but over the relative one, because every task object is
+  larger. It is reported for the owner to judge rather than treated as a
+  gate.
+- Stage 5 PR 1 items: README, usage.md, agent-skill.md, SKILL.md, CHANGELOG,
+  the plans README bullet, benchmarks.md (including the feature-comparison
+  rows for organization and priority, beyond the checklist), and
+  `cli::usage()`.
+- Verified: the check command, `cargo build --release --locked`, and
+  `git diff --check` pass; a release-binary smoke ran with a temporary home
+  and an exact temporary working directory.

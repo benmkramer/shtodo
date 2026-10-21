@@ -10,6 +10,15 @@ All notable changes to shtodo are documented in this file.
   versioned schema, explicit scope, saved task data, and mutation change status.
 - Structured JSON errors with stable codes, including lock contention and
   visible changes whose durability is unconfirmed.
+- Priority and tags derived from todo.txt tokens in the task text: a leading
+  `(A) ` to `(Z) ` and `+project`/`@context` words. Nothing new is stored, so
+  existing lists and older binaries keep working.
+- `shtodo list` filters `--open`/`--done`, repeatable `--tag` and
+  `--priority` (letters, ranges such as `A-C`, or `none`), and `--search`,
+  plus `--sort priority`. Invalid filters are usage errors detected before
+  storage is read.
+- JSON task objects include `priority` and `tags`, and JSON listing honors
+  every filter and `--sort priority`.
 
 ## [0.1.0-beta.4] - 2026-10-05
 
