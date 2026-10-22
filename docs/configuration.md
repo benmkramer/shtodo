@@ -14,6 +14,8 @@ start_search = ["/"]
 cycle_view = ["tab"]
 previous_view = ["shift-tab"]
 clear_search = ["esc"]
+toggle_sort = ["s"]
+edit_filter = ["f"]
 open_help = ["?"]
 open_trash = ["t"]
 
@@ -70,6 +72,23 @@ toggle_complete = ["tab"]
 cycle_view = ["v"]
 ```
 
+### Existing bindings and the new sort and filter defaults
+
+The Normal-mode defaults for `toggle_sort` (`s`) and `edit_filter` (`f`)
+follow the same rule. If your config already assigns `s` or `f` to another
+Normal action, the config still loads, that action keeps the key, and the new
+action is unbound. For example, both of these existing configs load unchanged:
+
+```toml
+[keybindings.normal]
+toggle_complete = ["s"]
+cycle_view = ["f"]
+```
+
+Help then shows `Unbound: toggle_sort (config)` and
+`Unbound: edit_filter (config)`. To enable either action, assign a free Normal key, for example
+`toggle_sort = ["o"]` or `edit_filter = ["F"]`. There is no fallback key.
+
 Conflicts between explicit bindings and conflicts with older defaults are
 still configuration errors. `Ctrl-C` remains fixed. `shtodo doctor` reports
 the number of supported configurable actions and the effective active keys,
@@ -114,6 +133,8 @@ invalid. Trash `close_trash` remains independent and defaults to `t` and Esc.
 | `cycle_view`      | `tab`        |
 | `previous_view`   | `shift-tab`  |
 | `clear_search`    | `esc`        |
+| `toggle_sort`     | `s`          |
+| `edit_filter`     | `f`          |
 | `open_trash`      | `t`          |
 | `open_help`       | `?`          |
 | `quit`            | `q`          |
@@ -152,10 +173,21 @@ Search footer show the effective keys with search-specific accept/cancel hints.
 
 In Normal mode, `start_search` opens the current query, `cycle_view` moves to
 the next All/Open/Done tab, `previous_view` moves to the previous tab, and
-`clear_search` clears only the query. Both tab controls wrap at either end.
-To use a letter shortcut instead, configure `cycle_view = ["f"]` or another
-free key in `[keybindings.normal]`. Search/view state is never stored in
-configuration or task snapshots.
+`clear_search` clears one layer: the accepted query if there is one, otherwise
+the accepted filter. Both tab controls wrap at either end. To use a letter
+shortcut instead, configure `cycle_view = ["v"]` or another free key in
+`[keybindings.normal]`. Search/view state is never stored in configuration or
+task snapshots.
+
+### Filter
+
+Filter mode, opened with Normal `edit_filter`, also shares every binding in
+`[keybindings.insert]`; there is no `[keybindings.filter]` table. `commit_edit`
+accepts the filter, completing a unique tag prefix, and `cancel_edit` restores
+the previous filter and selection. The Filter footer shows the effective keys
+with filter-specific accept/cancel hints. Normal `toggle_sort` switches between
+manual and priority order. Filter, sort, and the tag hint line are never stored
+in configuration or task snapshots.
 
 ### Trash
 
