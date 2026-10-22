@@ -11,12 +11,15 @@ use ratatui::{
 use crate::{
     app::{App, EditKind, Mode, TaskView},
     input::{BindingId, Keymap, ResolvedBinding},
+    metadata,
     task::{ListScope, Task},
 };
 
 const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 8;
 const ROW_PREFIX_WIDTH: u16 = 4;
+const PROJECT_COLOR: Color = Color::Cyan;
+const CONTEXT_COLOR: Color = Color::Magenta;
 
 fn editor_window(buffer: &str, cursor: usize, width: u16) -> (&str, u16) {
     let mut cursor = cursor.min(buffer.len());
@@ -242,22 +245,72 @@ fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
         columns[0],
     );
     let area = columns[1];
-    let prefix = format!(" · {} matches · /", app.visible_tasks().count());
-    let prefix_width = Line::from(prefix.as_str())
-        .width()
-        .min(usize::from(area.width)) as u16;
-    let query_width = area.width.saturating_sub(prefix_width);
-    let (query, cursor_column) = if app.mode() == Mode::Search {
-        app.editor().map_or((app.query(), 0), |editor| {
-            editor_window(editor.buffer(), editor.cursor(), query_width)
-        })
-    } else {
-        (app.query(), 0)
+    let matches = app.visible_tasks().count();
+    let Some(editor) = app.editor().filter(|_| app.mode() == Mode::Search) else {
+        let status = status_line(matches, app.query(), None, false, area.width);
+        frame.render_widget(Paragraph::new(status), area);
+        return;
     };
-    frame.render_widget(Paragraph::new(format!("{prefix}{query}")), area);
-    if app.mode() == Mode::Search {
-        frame.set_cursor_position((area.x + prefix_width + cursor_column, area.y));
+    // An editor on the status row follows the match count and uses the rest of the row.
+    let prefix = format!(" · {matches} matches · /");
+    let prefix_width = text_width(&prefix).min(usize::from(area.width)) as u16;
+    let (buffer, cursor_column) = editor_window(
+        editor.buffer(),
+        editor.cursor(),
+        area.width.saturating_sub(prefix_width),
+    );
+    frame.render_widget(Paragraph::new(format!("{prefix}{buffer}")), area);
+    frame.set_cursor_position((area.x + prefix_width + cursor_column, area.y));
+}
+
+fn text_width(text: &str) -> usize {
+    Line::from(text).width()
+}
+
+/// The match count is always kept; past `width`, the sort segment goes first, then the filter
+/// is truncated with `…`. The empty `/` placeholder gives way to an active filter or sort.
+fn status_line(
+    matches: usize,
+    query: &str,
+    filter: Option<&str>,
+    sorted: bool,
+    width: u16,
+) -> String {
+    const FILTER: &str = " · f:";
+    let width = usize::from(width);
+    let mut line = format!(" · {matches} matches");
+    if !query.is_empty() || (filter.is_none() && !sorted) {
+        line.push_str(" · /");
+        line.push_str(query);
     }
+    let sort = if sorted { " · by priority" } else { "" };
+    let used = text_width(&line);
+    let Some(filter) = filter else {
+        if used + text_width(sort) <= width {
+            line.push_str(sort);
+        }
+        return line;
+    };
+    let full = used + text_width(FILTER) + text_width(filter);
+    if full <= width {
+        line.push_str(FILTER);
+        line.push_str(filter);
+        if full + text_width(sort) <= width {
+            line.push_str(sort);
+        }
+    } else if let Some(room) = width.checked_sub(used + text_width(FILTER) + 1) {
+        line.push_str(FILTER);
+        let mut clipped = 0;
+        for character in filter.chars() {
+            clipped += text_width(character.encode_utf8(&mut [0; 4]));
+            if clipped > room {
+                break;
+            }
+            line.push(character);
+        }
+        line.push('…');
+    }
+    line
 }
 
 fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, keymap: &Keymap) {
@@ -375,7 +428,9 @@ fn render_trash_content(frame: &mut Frame<'_>, area: Rect, app: &App, keymap: &K
         .iter()
         .map(|task| {
             let state = if task.completed() { "done" } else { "open" };
-            ListItem::new(format!("{}  {state}  {}", task.id().get(), task.text()))
+            let mut spans = vec![Span::raw(format!("{}  {state}  ", task.id().get()))];
+            spans.extend(text_spans(task.text(), Style::default()));
+            ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
     let list = List::new(items)
@@ -579,10 +634,41 @@ fn task_item(task: &Task) -> ListItem<'static> {
         Style::default()
     };
 
-    ListItem::new(Line::from(vec![
-        Span::raw(marker),
-        Span::styled(task.text().to_owned(), text_style),
-    ]))
+    let mut spans = vec![Span::raw(marker)];
+    spans.extend(text_spans(task.text(), text_style));
+    ListItem::new(Line::from(spans))
+}
+
+/// Styles the priority marker and tag slices in place; the rest, including punctuation
+/// stripped from a tag, keeps `base`, so the row text and its width are unchanged.
+fn text_spans(text: &str, base: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut end = 0;
+    if metadata::priority(text).is_some() {
+        end = "(A)".len();
+        spans.push(Span::styled(
+            text[..end].to_owned(),
+            base.add_modifier(Modifier::BOLD),
+        ));
+    }
+    for tag in metadata::tags(text) {
+        // Tags borrow `text`, so their offsets come from the slice addresses.
+        let start = tag.as_ptr().addr() - text.as_ptr().addr();
+        if start > end {
+            spans.push(Span::styled(text[end..start].to_owned(), base));
+        }
+        let color = if tag.starts_with('+') {
+            PROJECT_COLOR
+        } else {
+            CONTEXT_COLOR
+        };
+        spans.push(Span::styled(tag.to_owned(), base.fg(color)));
+        end = start + tag.len();
+    }
+    if end < text.len() || spans.is_empty() {
+        spans.push(Span::styled(text[end..].to_owned(), base));
+    }
+    spans
 }
 
 fn editor_item(text: &str) -> ListItem<'static> {
@@ -1378,6 +1464,136 @@ mod tests {
         assert!(help.contains("Shift-Tab previous view"));
         assert!(help.contains("Enter apply search"));
         assert!(help.contains("Esc cancel search"));
+    }
+
+    fn row_cells(buffer: &Buffer, row: u16, text: &str) -> Vec<Cell> {
+        let width = buffer.area.width;
+        let line = buffer_row(buffer, width, row);
+        let start = line
+            .find(text)
+            .unwrap_or_else(|| panic!("{text:?} not in {line:?}"));
+        let column = line[..start].chars().count() as u16;
+        (column..column + text.chars().count() as u16)
+            .map(|x| buffer[(x, row)].clone())
+            .collect()
+    }
+
+    #[test]
+    fn rows_should_style_priority_and_tags_in_place_and_leave_stripped_punctuation_plain() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("(A) Ship +shtodo. @laptop x+y").unwrap();
+        list.add("plain (B) text").unwrap();
+        let app = App::new(list);
+        let buffer = render_app(&app, 80, 12);
+
+        assert!(buffer_row(&buffer, 80, 2).contains("○ (A) Ship +shtodo. @laptop x+y"));
+        let cells = row_cells(&buffer, 2, "(A) Ship +shtodo. @laptop x+y");
+        let bold = |cell: &Cell| cell.modifier.contains(Modifier::BOLD);
+        assert!(cells[..3].iter().all(bold));
+        assert!(!bold(&cells[3]));
+        assert!(
+            cells[4..8]
+                .iter()
+                .all(|cell| !bold(cell) && cell.fg == Color::Reset)
+        );
+        assert!(cells[9..16].iter().all(|cell| cell.fg == Color::Cyan));
+        assert_eq!(cells[16].symbol(), ".");
+        assert_eq!(cells[16].fg, Color::Reset);
+        assert!(cells[18..25].iter().all(|cell| cell.fg == Color::Magenta));
+        assert!(cells[26..].iter().all(|cell| cell.fg == Color::Reset));
+        let plain = row_cells(&buffer, 3, "plain (B) text");
+        assert!(
+            plain
+                .iter()
+                .all(|cell| !bold(cell) && cell.fg == Color::Reset)
+        );
+    }
+
+    #[test]
+    fn completed_and_trash_rows_should_style_tokens_and_keep_completed_style_on_every_span() {
+        let mut list = TaskList::new(ListScope::Global);
+        let done = list.add("(C) done +proj @ctx").unwrap();
+        list.toggle_complete(done).unwrap();
+        let deleted = list.add("(Z) gone +old!").unwrap();
+        list.delete(deleted).unwrap();
+        let mut app = App::new(list);
+        let buffer = render_app(&app, 80, 12);
+
+        let cells = row_cells(&buffer, 2, "(C) done +proj @ctx");
+        for cell in &cells {
+            assert!(
+                cell.modifier
+                    .contains(Modifier::DIM | Modifier::CROSSED_OUT),
+                "{cell:?}"
+            );
+        }
+        assert!(
+            cells[..3]
+                .iter()
+                .all(|cell| cell.modifier.contains(Modifier::BOLD))
+        );
+        assert!(cells[9..14].iter().all(|cell| cell.fg == Color::Cyan));
+        assert!(cells[15..].iter().all(|cell| cell.fg == Color::Magenta));
+
+        app.apply(Action::OpenTrash).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        assert!(buffer_row(&buffer, 80, 1).contains("2  open  (Z) gone +old!"));
+        let cells = row_cells(&buffer, 1, "(Z) gone +old!");
+        assert!(
+            cells[..3]
+                .iter()
+                .all(|cell| cell.modifier.contains(Modifier::BOLD))
+        );
+        assert!(cells[9..13].iter().all(|cell| cell.fg == Color::Cyan));
+        assert_eq!(cells[13].fg, Color::Reset);
+    }
+
+    #[test]
+    fn status_line_should_drop_sort_first_then_truncate_the_filter_and_keep_the_count() {
+        use super::status_line;
+
+        assert_eq!(status_line(3, "", None, false, 40), " · 3 matches · /");
+        assert_eq!(
+            status_line(3, "café", None, false, 40),
+            " · 3 matches · /café"
+        );
+        assert_eq!(
+            status_line(2, "", Some("+shtodo A-B"), true, 60),
+            " · 2 matches · f:+shtodo A-B · by priority"
+        );
+        assert_eq!(
+            status_line(2, "x", Some("+shtodo"), true, 60),
+            " · 2 matches · /x · f:+shtodo · by priority"
+        );
+        assert_eq!(
+            status_line(2, "", None, true, 40),
+            " · 2 matches · by priority"
+        );
+        assert_eq!(
+            status_line(2, "", Some("+shtodo A-B"), true, 30),
+            " · 2 matches · f:+shtodo A-B"
+        );
+        assert_eq!(
+            status_line(2, "", Some("+shtodo A-B"), true, 21),
+            " · 2 matches · f:+sh…"
+        );
+        assert_eq!(status_line(2, "", None, true, 21), " · 2 matches");
+        assert_eq!(
+            status_line(2, "", Some("+東京 +x"), false, 21),
+            " · 2 matches · f:+東…"
+        );
+        assert_eq!(
+            status_line(10_000, "", Some("+x A"), false, 22),
+            " · 10000 matches · f:…"
+        );
+        assert_eq!(
+            status_line(10_000, "", Some("+x A"), false, 21),
+            " · 10000 matches"
+        );
+        assert_eq!(
+            status_line(10_000, "query", None, true, 10),
+            " · 10000 matches · /query"
+        );
     }
 
     #[test]
