@@ -130,12 +130,15 @@ pub(crate) enum TaskOrder {
     Priority,
 }
 
+/// Priority order's sort key: `A` to `Z`, then no priority.
+pub(crate) fn priority_key(task: &Task) -> (bool, Option<metadata::Priority>) {
+    let priority = metadata::priority(task.text());
+    (priority.is_none(), priority)
+}
+
 /// Stable: `A` to `Z`, then no priority; equal keys keep canonical order.
 pub(crate) fn sort_by_priority(tasks: &mut [&Task]) {
-    tasks.sort_by_key(|task| {
-        let priority = metadata::priority(task.text());
-        (priority.is_none(), priority)
-    });
+    tasks.sort_by_key(|task| priority_key(task));
 }
 
 #[cfg(test)]

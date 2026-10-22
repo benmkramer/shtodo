@@ -506,13 +506,16 @@ impl App {
 
     fn rebuild_order(&mut self) {
         self.sorted = (self.order == TaskOrder::Priority).then(|| {
-            let start = self.tasks.tasks().as_ptr().addr();
-            let mut live = self.tasks.visible_tasks().collect::<Vec<_>>();
-            projection::sort_by_priority(&mut live);
-            // The sorted references point into the canonical slice, so their offsets are indices.
-            live.into_iter()
-                .map(|task| (std::ptr::from_ref(task).addr() - start) / size_of::<Task>())
-                .collect()
+            let mut live = self
+                .tasks
+                .tasks()
+                .iter()
+                .enumerate()
+                .filter(|(_, task)| !task.is_deleted())
+                .collect::<Vec<_>>();
+            // Stable, like `projection::sort_by_priority`: equal keys keep canonical order.
+            live.sort_by_key(|(_, task)| projection::priority_key(task));
+            live.into_iter().map(|(index, _)| index).collect()
         });
     }
 
