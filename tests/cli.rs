@@ -1727,3 +1727,105 @@ fn concurrent_tuis_and_shell_commands_should_pass_real_pty_regressions() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
+
+fn added_due(output: &std::process::Output) -> jiff::civil::Date {
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    value["task"]["due"].as_str().unwrap().parse().unwrap()
+}
+
+fn date_at_offset(hours: i8) -> jiff::civil::Date {
+    jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::fixed(jiff::tz::offset(hours)))
+        .date()
+}
+
+#[test]
+fn add_and_edit_should_rewrite_relative_words_to_the_local_date() {
+    let (day, (added, edited, unchanged, snapshot_before, snapshot_after)) =
+        on_stable_utc_day(|_| {
+            let home = tempfile::tempdir().unwrap();
+            let added = run_utc(
+                home.path(),
+                &["add", "(A) Pay due:Today. due:TOMORROW +home"],
+            );
+            let edited = run_utc(home.path(), &["edit", "1", "Pay due:tomorrow"]);
+            let path = snapshot_path(home.path(), "global");
+            let snapshot_before = std::fs::read(&path).unwrap();
+            let unchanged = run_utc(home.path(), &["edit", "1", "  Pay due:tomorrow  "]);
+            let snapshot_after = std::fs::read(&path).unwrap();
+            (added, edited, unchanged, snapshot_before, snapshot_after)
+        });
+    let tomorrow = day.tomorrow().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&added.stdout),
+        format!("Added: (A) Pay due:{day}. due:{tomorrow} +home\n")
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&edited.stdout),
+        format!("Edited 1: Pay due:{tomorrow}\n")
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&unchanged.stdout),
+        format!("Unchanged 1: Pay due:{tomorrow}\n")
+    );
+    assert_eq!(
+        snapshot_after, snapshot_before,
+        "an unchanged edit writes nothing"
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    for text in [
+        "plain text",
+        "x due:2026-11-01",
+        "x Due:today overdue:today",
+    ] {
+        let output = run_in_zone(home.path(), Some("UTC0"), &["add", text]);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("Added: {text}\n")
+        );
+    }
+    let output = run_utc(home.path(), &["add", "--print-id", "x due:today"]);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "4\n");
+}
+
+#[test]
+fn add_should_resolve_today_in_the_process_zone_for_posix_rules_and_iana_names() {
+    let home = tempfile::tempdir().unwrap();
+    for (east, west) in [("<+14>-14", "<-12>12"), ("Etc/GMT-14", "Etc/GMT+12")] {
+        for _ in 0..2 {
+            let before = (date_at_offset(14), date_at_offset(-12));
+            let east_due = added_due(&run_in_zone(
+                home.path(),
+                Some(east),
+                &["--json", "add", "x due:today"],
+            ));
+            let west_due = added_due(&run_in_zone(
+                home.path(),
+                Some(west),
+                &["--json", "add", "x due:today"],
+            ));
+            if (date_at_offset(14), date_at_offset(-12)) != before {
+                continue;
+            }
+            assert_eq!(east_due, before.0, "{east}");
+            assert_eq!(west_due, before.1, "{west}");
+            // UTC+14 and UTC-12 are 26 hours apart, so their dates always differ by one or two.
+            let days = (east_due - west_due).get_days();
+            assert!(
+                (1..=2).contains(&days),
+                "{east} {east_due} vs {west} {west_due}"
+            );
+            break;
+        }
+    }
+
+    let output = run_in_zone(home.path(), None, &["--json", "add", "x due:today"]);
+    let system = added_due(&output);
+    let days = (system - utc_today()).get_days().abs();
+    assert!(
+        days <= 1,
+        "system zone date {system} is {days} days from UTC"
+    );
+}

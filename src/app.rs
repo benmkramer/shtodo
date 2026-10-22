@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     action::Action,
-    metadata::{self, FilterToken, TaskFilter},
+    metadata::{self, Date, FilterToken, TaskFilter},
     mutation::{ConflictKind, Mutation, Outcome, TaskObservation},
     projection::{self, Projection, TaskOrder},
     task::{ListError, MoveDirection, Task, TaskId, TaskList},
@@ -313,6 +313,14 @@ pub(crate) struct App {
     pending: Option<Mutation>,
     storage_error: Option<String>,
     durability_warning: Option<String>,
+    /// The local date shown and used to rewrite `due:today` and `due:tomorrow` on add and edit.
+    today: Date,
+}
+
+/// The fixed date every test `App` starts on, so no unit test reads the real clock.
+#[cfg(test)]
+pub(crate) fn test_today() -> Date {
+    Date::new(2026, 10, 21).unwrap()
 }
 
 struct SearchSession {
@@ -321,7 +329,12 @@ struct SearchSession {
 }
 
 impl App {
+    #[cfg(test)]
     pub(crate) fn new(tasks: TaskList) -> Self {
+        Self::with_today(tasks, test_today())
+    }
+
+    pub(crate) fn with_today(tasks: TaskList, today: Date) -> Self {
         let selected = tasks.visible_tasks().next().map(Task::id);
         Self {
             tasks,
@@ -342,7 +355,19 @@ impl App {
             pending: None,
             storage_error: None,
             durability_warning: None,
+            today,
         }
+    }
+
+    #[cfg_attr(not(test), expect(dead_code, reason = "PR 2 shows the date"))]
+    pub(crate) fn today(&self) -> Date {
+        self.today
+    }
+
+    /// Records a new local date. Nothing shown depends on it yet, so no redraw is needed.
+    pub(crate) fn set_today(&mut self, today: Date) -> bool {
+        self.today = today;
+        false
     }
 
     pub(crate) fn prepare(&mut self, action: Action) -> Result<Transition, ListError> {
@@ -1538,7 +1563,9 @@ impl App {
             self.message = Some("Task was deleted; draft retained".into());
             return Ok(Transition::Transient);
         }
-        let text = crate::task::validated_text(&editor.buffer)?.to_owned();
+        let today = self.today;
+        let text = crate::task::validated_text(&editor.buffer)?;
+        let text = metadata::normalize_due(text, || today).into_owned();
         let request = match editor.kind {
             EditKind::Add => Mutation::Add(text),
             EditKind::Edit(id) => {
@@ -3393,5 +3420,103 @@ mod filter_tests {
         assert_eq!(visible_ids(&app), [5, 2, 4]);
         app.apply(Action::CycleView).unwrap();
         assert_eq!(visible_ids(&app), [5, 2]);
+    }
+}
+
+#[cfg(test)]
+mod due_tests {
+    use super::{App, Mode, Transition, test_today};
+    use crate::{
+        action::Action,
+        metadata::Date,
+        mutation::Mutation,
+        task::{ListScope, TaskList},
+    };
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.prepare(Action::InsertChar(character)).unwrap();
+        }
+    }
+
+    /// Commits the editor and applies the submitted mutation as a fresh-list transaction would.
+    fn commit(app: &mut App) -> Option<Mutation> {
+        app.prepare(Action::CommitEdit).unwrap();
+        let request = app.take_mutation()?;
+        let mut latest = app.tasks().clone();
+        let outcome = request.apply(&mut latest);
+        app.finish(&request, latest, outcome);
+        Some(request)
+    }
+
+    #[test]
+    fn tui_add_should_rewrite_relative_words_to_the_app_date() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        assert_eq!(app.today(), test_today());
+        app.prepare(Action::StartAdd).unwrap();
+        type_text(&mut app, "  (A) Pay due:Today. due:tomorrow +home  ");
+        assert_eq!(
+            commit(&mut app),
+            Some(Mutation::Add(
+                "(A) Pay due:2026-10-21. due:2026-10-22 +home".into()
+            ))
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+
+        app.prepare(Action::StartAdd).unwrap();
+        type_text(&mut app, "plain due:soon");
+        assert_eq!(
+            commit(&mut app),
+            Some(Mutation::Add("plain due:soon".into()))
+        );
+    }
+
+    #[test]
+    fn tui_edit_should_rewrite_relative_words_before_the_unchanged_check() {
+        let mut list = TaskList::new(ListScope::Global);
+        let id = list.add("Pay due:2026-10-21").unwrap();
+        let mut app = App::new(list);
+
+        app.prepare(Action::StartEdit).unwrap();
+        for _ in 0.."2026-10-21".len() {
+            app.prepare(Action::DeleteBeforeCursor).unwrap();
+        }
+        type_text(&mut app, "today");
+        assert_eq!(
+            app.prepare(Action::CommitEdit).unwrap(),
+            Transition::Refresh,
+            "the rewrite equals the original, so the editor closes"
+        );
+        assert_eq!(app.take_mutation(), None);
+        assert_eq!(app.mode(), Mode::Normal);
+
+        app.prepare(Action::StartEdit).unwrap();
+        for _ in 0.."2026-10-21".len() {
+            app.prepare(Action::DeleteBeforeCursor).unwrap();
+        }
+        type_text(&mut app, "tomorrow");
+        assert_eq!(
+            commit(&mut app),
+            Some(Mutation::EditText {
+                id,
+                text: "Pay due:2026-10-22".into(),
+                original: Some("Pay due:2026-10-21".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn set_today_should_change_what_the_next_add_writes_without_a_redraw() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        let new_year = Date::new(2026, 12, 31).unwrap();
+        assert!(!app.set_today(new_year));
+        assert_eq!(app.today(), new_year);
+        assert!(!app.set_today(new_year));
+        app.prepare(Action::StartAdd).unwrap();
+        type_text(&mut app, "x due:tomorrow");
+        assert_eq!(
+            commit(&mut app),
+            Some(Mutation::Add("x due:2027-01-01".into()))
+        );
     }
 }

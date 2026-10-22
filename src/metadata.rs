@@ -157,10 +157,6 @@ pub(crate) fn due(text: &str) -> Option<Date> {
 
 /// Rewrites `due:today` and `due:tomorrow` (ASCII case-insensitive words) to dates at add and
 /// edit time. `today` is called at most once, and only when such a word is present.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "shell and TUI add and edit use it in Stage 2b")
-)]
 pub(crate) fn normalize_due(text: &str, mut today: impl FnMut() -> Date) -> Cow<'_, str> {
     if !text.contains(DUE_KEY) {
         return Cow::Borrowed(text);

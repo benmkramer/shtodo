@@ -976,3 +976,44 @@ fn json_list_due_filters_and_sort_should_return_the_text_mode_rows_and_same_obje
         }
     }
 }
+
+#[test]
+fn json_add_and_edit_should_show_the_rewritten_text_and_unchanged_status() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join(".shtodo/global/tasks.json");
+    for _ in 0..2 {
+        let day = jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .date();
+        let utc = |args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_shtodo"))
+                .args(args)
+                .env("HOME", home.path())
+                .env("TZ", "UTC0")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let added = success(&utc(&["--json", "add", "x due:today"]));
+        let before = std::fs::read(&path).unwrap();
+        let unchanged = success(&utc(&["--json", "edit", "1", "x due:Today"]));
+        let after = std::fs::read(&path).unwrap();
+        if jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .date()
+            != day
+        {
+            std::fs::remove_dir_all(home.path().join(".shtodo")).unwrap();
+            continue;
+        }
+        let text = format!("x due:{day}");
+        let expected = dated(1, &text, "open", false, None, &[], Some(&day.to_string()));
+        assert_eq!(added["task"], expected);
+        assert_eq!(added["changed"], true);
+        assert_eq!(unchanged["task"], expected);
+        assert_eq!(unchanged["changed"], false);
+        assert_eq!(after, before);
+        return;
+    }
+    panic!("the UTC date changed twice while the test ran");
+}

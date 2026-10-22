@@ -76,6 +76,7 @@ fn execute(command: cli::Command, format: cli::OutputFormat) -> Result<()> {
         }
         cli::Command::Edit(choice, id, argument) => {
             let text = task_text_from_argument(argument)?;
+            let text = metadata::normalize_due(&text, clock::today);
             mutate_task(choice, id, TaskMutation::Edit(&text), format)?;
         }
         cli::Command::Restore(choice, id) => {
@@ -118,6 +119,8 @@ fn add_task(
         return Err(missing_task_text());
     }
 
+    // Stored text never holds a relative word, so its date cannot drift.
+    let text = metadata::normalize_due(&text, clock::today).into_owned();
     let home = storage::home_from_environment()?;
     let scope = storage::scope_from_environment(choice)?;
     let store = storage::Store::open(&home, scope)?;
