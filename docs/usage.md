@@ -607,7 +607,8 @@ is blue and their `✓` marker is never red or yellow, because a done task is
 never overdue. Trash rows use the same styling, with due tokens always blue
 and no marker color. When the local date changes while the TUI is open, rows
 are restyled and `today`, `tomorrow`, and `overdue` in an accepted or open
-filter move to the new date on the next one-second check, with one redraw;
+filter move to the new date within a second (up to five while storage errors
+slow its refresh), with one redraw;
 the typed filter words do not change.
 
 Matching tasks retain their manual, canonical order unless a sorted order is

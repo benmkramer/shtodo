@@ -40,7 +40,8 @@ All notable changes to shtodo are documented in this file.
   as `due:overdue due:today`, ORed together and ANDed with tags and
   priorities. In-progress due tokens are left out of the preview, and due
   tokens are never completed by Enter.
-- The TUI notices a new local date within a second, restyles rows, and moves
+- The TUI notices a new local date within a second (up to five while storage
+  errors slow its refresh), restyles rows, and moves
   `today`, `tomorrow`, and `overdue` in the filter to it, with one redraw.
 - TUI `f` opens a tag and priority filter editor with a live prefix preview,
   a hint line listing tags in the current rows with counts, and Enter
