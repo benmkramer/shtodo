@@ -408,6 +408,10 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
     // Style only the rows the list can show: the window a fresh `ListState` scrolls to, which
     // ends at the selected row once it is past the first screen.
     let rows = usize::from(area.height);
+    debug_assert!(
+        rows > 0,
+        "the layout keeps list rows at the minimum terminal size"
+    );
     let start = selected_index.map_or(0, |index| (index + 1).saturating_sub(rows));
     let mut items = visible_tasks
         .iter()
@@ -421,7 +425,7 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
     if detached && let Some((_, visible, _)) = editor_view {
         items.push(editor_item(visible));
     }
-    let selected_index = selected_index.map(|index| index - start);
+    let selected_index = selected_index.map(|index| index.saturating_sub(start));
 
     let list = List::new(items)
         .highlight_symbol("› ")
