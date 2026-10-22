@@ -742,7 +742,7 @@ static DEFINITIONS: &[Definition] = &[
     Definition {
         id: BindingId::ToggleSort,
         action: Action::ToggleSort,
-        description: "toggle priority sort",
+        description: "cycle sort order",
         footer_priority: Some(1),
         defaults: &[chord(KeyCode::Char('s'), KeyModifiers::NONE)],
         fixed: &[],

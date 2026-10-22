@@ -234,7 +234,7 @@ struct TrashState {
 /// A footer notice that names a configured key, so the UI renders its text from the keymap.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Notice {
-    /// Reorder was requested while the list is sorted by priority.
+    /// Reorder was requested while the list is sorted by priority or due date.
     ManualOrderRequired,
     /// Enter on a tag prefix shared by these tags, in hint-line order.
     FinishTag(Vec<String>),
@@ -307,8 +307,12 @@ pub(crate) struct App {
     filter_text: String,
     filter_session: Option<FilterSession>,
     order: TaskOrder,
-    /// Canonical indices of live tasks in Priority order; rebuilt when tasks or order change.
+    /// Canonical indices of live tasks in Priority or Due order; rebuilt only when tasks or the
+    /// order change. Due keys are absolute dates, so a new day never rebuilds it.
     sorted: Option<Vec<usize>>,
+    /// How often `sorted` was rebuilt, so tests can prove when it is not.
+    #[cfg(test)]
+    order_rebuilds: usize,
     search_session: Option<SearchSession>,
     pending: Option<Mutation>,
     storage_error: Option<String>,
@@ -352,6 +356,8 @@ impl App {
             filter_session: None,
             order: TaskOrder::Manual,
             sorted: None,
+            #[cfg(test)]
+            order_rebuilds: 0,
             search_session: None,
             pending: None,
             storage_error: None,
@@ -525,7 +531,7 @@ impl App {
         self.ordered_live_tasks().filter(|task| self.matches(task))
     }
 
-    /// Live tasks in display order: canonical, or the cached Priority order.
+    /// Live tasks in display order: canonical, or the cached Priority or Due order.
     fn ordered_live_tasks(&self) -> impl Iterator<Item = &Task> {
         let tasks = self.tasks.tasks();
         let sorted = self.sorted.as_deref();
@@ -537,8 +543,18 @@ impl App {
             .chain(canonical.into_iter().flatten())
     }
 
+    #[cfg(test)]
+    pub(crate) fn order_rebuilds(&self) -> usize {
+        self.order_rebuilds
+    }
+
     fn rebuild_order(&mut self) {
-        self.sorted = (self.order == TaskOrder::Priority).then(|| {
+        #[cfg(test)]
+        {
+            self.order_rebuilds += 1;
+        }
+        let order = self.order;
+        self.sorted = (order != TaskOrder::Manual).then(|| {
             let mut live = self
                 .tasks
                 .tasks()
@@ -546,8 +562,13 @@ impl App {
                 .enumerate()
                 .filter(|(_, task)| !task.is_deleted())
                 .collect::<Vec<_>>();
-            // Stable, like `projection::sort_by_priority`: equal keys keep canonical order.
-            live.sort_by_key(|(_, task)| projection::priority_key(task));
+            // Stable, like `projection::sort_by_priority` and `sort_by_due`: equal keys keep
+            // canonical order. A due key parses the text, so each task is parsed once.
+            if order == TaskOrder::Due {
+                live.sort_by_cached_key(|(_, task)| projection::due_key(task));
+            } else {
+                live.sort_by_key(|(_, task)| projection::priority_key(task));
+            }
             live.into_iter().map(|(index, _)| index).collect()
         });
     }
@@ -1016,7 +1037,8 @@ impl App {
     fn toggle_sort(&mut self) -> Transition {
         self.order = match self.order {
             TaskOrder::Manual => TaskOrder::Priority,
-            TaskOrder::Priority | TaskOrder::Due => TaskOrder::Manual,
+            TaskOrder::Priority => TaskOrder::Due,
+            TaskOrder::Due => TaskOrder::Manual,
         };
         self.rebuild_order();
         self.reconcile_selection();
@@ -1109,8 +1131,8 @@ impl App {
     }
 
     fn move_task(&mut self, direction: MoveDirection) -> Result<Transition, ListError> {
-        if self.order == TaskOrder::Priority {
-            // A swap in priority order has no canonical meaning, so no mutation is submitted.
+        if self.order != TaskOrder::Manual {
+            // A swap in a sorted order has no canonical meaning, so no mutation is submitted.
             self.notice = Some(Notice::ManualOrderRequired);
             return Ok(Transition::Transient);
         }
@@ -2865,6 +2887,21 @@ mod sort_tests {
         assert_eq!(visible_ids(&app), [2, 4]);
         assert_eq!(app.selected(), Some(id(2)));
 
+        // No fixture task has a date, so Due order falls back to Priority order.
+        assert_eq!(
+            app.apply(Action::ToggleSort).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.order(), TaskOrder::Due);
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(app.selected(), Some(id(2)));
+        app.apply(Action::ClearSearch).unwrap();
+        assert_eq!(visible_ids(&app), [3, 2, 4, 1]);
+        assert_eq!(app.selected(), Some(id(2)));
+        app.apply(Action::StartSearch).unwrap();
+        app.apply(Action::InsertChar('b')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+
         assert_eq!(
             app.apply(Action::ToggleSort).unwrap(),
             Transition::Transient
@@ -2895,6 +2932,16 @@ mod sort_tests {
         app.apply(Action::CloseHelp).unwrap();
 
         app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Due);
+        for action in [Action::MoveTaskDown, Action::MoveTaskUp] {
+            assert_eq!(app.prepare(action).unwrap(), Transition::Transient);
+            assert!(app.take_mutation().is_none());
+            assert_eq!(app.notice(), Some(&Notice::ManualOrderRequired));
+            assert_eq!(app.tasks(), &before);
+        }
+
+        app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Manual);
         for _ in 0..4 {
             app.apply(Action::MoveDown).unwrap();
         }
@@ -2935,6 +2982,108 @@ mod sort_tests {
         );
         assert_eq!(visible_ids(&app), [1, 3, 5, 2, 4, 6]);
         assert_eq!(app.selected(), Some(id(2)));
+    }
+
+    /// Canonical 1..=5; Priority order is 3, 2, 5, 1, 4 and Due order 4, 3, 2, 5, 1.
+    fn dated() -> App {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "plain one",
+            "(B) b due:2026-10-25",
+            "(A) a due:2026-10-25",
+            "c due:2026-10-01",
+            "(C) no date",
+        ] {
+            list.add(text).unwrap();
+        }
+        App::new(list)
+    }
+
+    #[test]
+    fn sort_should_cycle_manual_priority_and_due_and_keep_selection_identity() {
+        let mut app = dated();
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(2)));
+        for (order, rows) in [
+            (TaskOrder::Priority, [3, 2, 5, 1, 4]),
+            (TaskOrder::Due, [4, 3, 2, 5, 1]),
+            (TaskOrder::Manual, [1, 2, 3, 4, 5]),
+            (TaskOrder::Priority, [3, 2, 5, 1, 4]),
+        ] {
+            assert_eq!(
+                app.apply(Action::ToggleSort).unwrap(),
+                Transition::Transient
+            );
+            assert_eq!(app.order(), order);
+            assert_eq!(visible_ids(&app), rows, "{order:?}");
+            assert_eq!(app.selected(), Some(id(2)), "{order:?}");
+        }
+    }
+
+    #[test]
+    fn due_order_should_drive_selection_movement_and_refuse_reorder() {
+        let mut app = dated();
+        app.apply(Action::ToggleSort).unwrap();
+        app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Due);
+        assert_eq!(app.selected(), Some(id(1)));
+        for expected in [5, 2, 3, 4] {
+            assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Transient);
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Unchanged);
+        for expected in [3, 2, 5, 1] {
+            app.apply(Action::MoveDown).unwrap();
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Unchanged);
+
+        let before = app.tasks().clone();
+        for action in [Action::MoveTaskDown, Action::MoveTaskUp] {
+            assert_eq!(app.prepare(action).unwrap(), Transition::Transient);
+            assert!(app.take_mutation().is_none());
+            assert_eq!(app.notice(), Some(&Notice::ManualOrderRequired));
+        }
+        assert_eq!(app.tasks(), &before);
+    }
+
+    #[test]
+    fn due_order_should_be_rebuilt_only_on_reconcile_and_order_changes() {
+        let mut app = dated();
+        app.apply(Action::ToggleSort).unwrap();
+        app.apply(Action::ToggleSort).unwrap();
+        let rebuilds = app.order_rebuilds;
+
+        app.apply(Action::CycleView).unwrap();
+        app.apply(Action::StartSearch).unwrap();
+        app.apply(Action::InsertChar('a')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        app.apply(Action::ClearSearch).unwrap();
+        app.apply(Action::EditFilter).unwrap();
+        app.apply(Action::InsertChar('A')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        app.apply(Action::ClearSearch).unwrap();
+        app.apply(Action::PreviousView).unwrap();
+        assert!(app.set_today(crate::metadata::Date::new(2026, 10, 30).unwrap()));
+        app.apply(Action::OpenTrash).unwrap();
+        app.apply(Action::CloseTrash).unwrap();
+        assert_eq!(
+            app.order_rebuilds, rebuilds,
+            "views, search, filter, and days reuse it"
+        );
+        assert_eq!(visible_ids(&app), [4, 3, 2, 5, 1]);
+
+        let mut latest = app.tasks().clone();
+        latest.edit(id(1), "plain one due:2026-09-01").unwrap();
+        assert!(app.reconcile(latest));
+        assert_eq!(app.order_rebuilds, rebuilds + 1);
+        assert_eq!(visible_ids(&app), [1, 4, 3, 2, 5]);
+        assert!(!app.reconcile(app.tasks().clone()), "unchanged data");
+        assert_eq!(app.order_rebuilds, rebuilds + 1);
+
+        app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Manual);
+        assert_eq!(app.order_rebuilds, rebuilds + 2);
     }
 
     #[test]

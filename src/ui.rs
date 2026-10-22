@@ -261,8 +261,7 @@ fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .filter(|_| matches!(app.mode(), Mode::Search | Mode::Filter))
     else {
         let filter = Some(app.filter_text()).filter(|text| !text.is_empty());
-        let sorted = app.order() == TaskOrder::Priority;
-        let status = status_line(matches, app.query(), filter, sorted, area.width);
+        let status = status_line(matches, app.query(), filter, app.order(), area.width);
         frame.render_widget(Paragraph::new(status), area);
         return;
     };
@@ -293,9 +292,15 @@ fn status_line(
     matches: usize,
     query: &str,
     filter: Option<&str>,
-    sorted: bool,
+    order: TaskOrder,
     width: u16,
 ) -> String {
+    let sort = match order {
+        TaskOrder::Manual => "",
+        TaskOrder::Priority => " · by priority",
+        TaskOrder::Due => " · by due",
+    };
+    let sorted = !sort.is_empty();
     const FILTER: &str = " · f:";
     let width = usize::from(width);
     let mut line = format!(" · {matches} matches");
@@ -303,7 +308,6 @@ fn status_line(
         line.push_str(" · /");
         line.push_str(query);
     }
-    let sort = if sorted { " · by priority" } else { "" };
     let used = text_width(&line);
     let Some(filter) = filter else {
         if used + text_width(sort) <= width {
@@ -521,8 +525,8 @@ fn notice_text(notice: &Notice, keymap: &Keymap, width: usize) -> String {
     match notice {
         Notice::ManualOrderRequired => {
             match binding_label(keymap, Mode::Normal, BindingId::ToggleSort) {
-                Some(key) => format!("Reorder uses manual order; press {key} to switch"),
-                None => "Reorder uses manual order".into(),
+                Some(key) => format!("Reorder needs manual order; {key} cycles"),
+                None => "Reorder needs manual order".into(),
             }
         }
         Notice::FinishTag(tags) => clip_entries("Finish the tag: ", tags, ", ", width),
@@ -1948,48 +1952,68 @@ mod tests {
     #[test]
     fn status_line_should_drop_sort_first_then_truncate_the_filter_and_keep_the_count() {
         use super::status_line;
+        use crate::projection::TaskOrder::{Due, Manual, Priority};
 
-        assert_eq!(status_line(3, "", None, false, 40), " · 3 matches · /");
+        assert_eq!(status_line(3, "", None, Manual, 40), " · 3 matches · /");
         assert_eq!(
-            status_line(3, "café", None, false, 40),
+            status_line(3, "café", None, Manual, 40),
             " · 3 matches · /café"
         );
         assert_eq!(
-            status_line(2, "", Some("+shtodo A-B"), true, 60),
+            status_line(2, "", Some("+shtodo A-B"), Priority, 60),
             " · 2 matches · f:+shtodo A-B · by priority"
         );
         assert_eq!(
-            status_line(2, "x", Some("+shtodo"), true, 60),
+            status_line(2, "x", Some("+shtodo"), Priority, 60),
             " · 2 matches · /x · f:+shtodo · by priority"
         );
         assert_eq!(
-            status_line(2, "", None, true, 40),
+            status_line(2, "", None, Priority, 40),
             " · 2 matches · by priority"
         );
         assert_eq!(
-            status_line(2, "", Some("+shtodo A-B"), true, 30),
+            status_line(2, "", Some("+shtodo A-B"), Priority, 30),
             " · 2 matches · f:+shtodo A-B"
         );
         assert_eq!(
-            status_line(2, "", Some("+shtodo A-B"), true, 21),
+            status_line(2, "", Some("+shtodo A-B"), Priority, 21),
             " · 2 matches · f:+sh…"
         );
-        assert_eq!(status_line(2, "", None, true, 21), " · 2 matches");
+        assert_eq!(status_line(2, "", None, Priority, 21), " · 2 matches");
         assert_eq!(
-            status_line(2, "", Some("+東京 +x"), false, 21),
+            status_line(2, "", Some("+東京 +x"), Manual, 21),
             " · 2 matches · f:+東…"
         );
         assert_eq!(
-            status_line(10_000, "", Some("+x A"), false, 22),
+            status_line(10_000, "", Some("+x A"), Manual, 22),
             " · 10000 matches · f:…"
         );
         assert_eq!(
-            status_line(10_000, "", Some("+x A"), false, 21),
+            status_line(10_000, "", Some("+x A"), Manual, 21),
             " · 10000 matches"
         );
         assert_eq!(
-            status_line(10_000, "query", None, true, 10),
+            status_line(10_000, "query", None, Priority, 10),
             " · 10000 matches · /query"
+        );
+
+        assert_eq!(status_line(2, "", None, Due, 40), " · 2 matches · by due");
+        assert_eq!(
+            status_line(2, "", Some("due:today"), Due, 40),
+            " · 2 matches · f:due:today · by due"
+        );
+        assert_eq!(
+            status_line(2, "", Some("due:today"), Due, 30),
+            " · 2 matches · f:due:today"
+        );
+        assert_eq!(
+            status_line(2, "", Some("+shtodo A-B"), Due, 21),
+            " · 2 matches · f:+sh…"
+        );
+        assert_eq!(status_line(2, "", None, Due, 20), " · 2 matches");
+        assert_eq!(
+            status_line(2, "x", None, Due, 40),
+            " · 2 matches · /x · by due"
         );
     }
 
@@ -2020,6 +2044,27 @@ mod tests {
         assert!(status.contains(" · 3 matches"), "{status}");
         assert!(!status.contains("by priority"));
         assert!(!status.contains('/'));
+
+        app.apply(Action::ToggleSort).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        let status = buffer_row(&buffer, 80, 1);
+        assert!(status.contains("Done  · 3 matches · by due"), "{status}");
+        assert!(!status.contains("by priority"));
+        assert!(buffer_row(&buffer, 80, 2).contains("○ (A) a open"));
+        // ` · by due` is shorter than ` · by priority` and still fits at 40 columns...
+        let status = buffer_row(&render_app(&app, 40, 8), 40, 1);
+        assert_eq!(status, "[All]│ Open │ Done  · 3 matches · by due");
+        // ...until a filter needs the room, when it is dropped before the filter is cut.
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "A-C");
+        app.apply(Action::CommitEdit).unwrap();
+        let status = buffer_row(&render_app(&app, 40, 8), 40, 1);
+        assert_eq!(status, "[All]│ Open │ Done  · 2 matches · f:A-C ");
+        assert!(
+            buffer_row(&render_app(&app, 80, 12), 80, 1).contains(" · 2 matches · f:A-C · by due")
+        );
+        app.apply(Action::ClearSearch).unwrap();
+
         app.apply(Action::ToggleSort).unwrap();
         assert!(buffer_row(&render_app(&app, 80, 12), 80, 1).contains(" · 3 matches · /"));
     }
@@ -2033,22 +2078,29 @@ mod tests {
                 "o",
             ),
         ] {
-            let mut app = prioritized();
-            app.apply(Action::ToggleSort).unwrap();
-            app.apply(Action::MoveTaskUp).unwrap();
-            let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
-            assert!(
-                footer.contains(&format!(
-                    "NORMAL  Reorder uses manual order; press {key} to switch"
-                )),
-                "{footer}"
-            );
-            app.apply(Action::OpenHelp).unwrap();
-            let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
-            assert!(
-                help.contains(&format!("{key} toggle priority sort")),
-                "{help}"
-            );
+            for presses in [1, 2] {
+                let mut app = prioritized();
+                for _ in 0..presses {
+                    app.apply(Action::ToggleSort).unwrap();
+                }
+                app.apply(Action::MoveTaskUp).unwrap();
+                let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+                assert!(
+                    footer.contains(&format!("NORMAL  Reorder needs manual order; {key} cycles")),
+                    "{footer}"
+                );
+                assert!(!footer.contains("uses manual order"), "{footer}");
+                // The notice is 36 columns; after the mode label, 40 columns keep the key.
+                let narrow = buffer_row(&render_app_with_keymap(&app, &keymap, 40, 8), 40, 7);
+                assert_eq!(
+                    narrow,
+                    format!("NORMAL  Reorder needs manual order; {key} cy")
+                );
+                app.apply(Action::OpenHelp).unwrap();
+                let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+                assert!(help.contains(&format!("{key} cycle sort order")), "{help}");
+                assert!(!help.contains("toggle priority sort"), "{help}");
+            }
         }
         let keymap =
             Keymap::with_overrides(&[override_for(BindingId::StartSearch, &["s"])]).unwrap();
@@ -2056,6 +2108,16 @@ mod tests {
         app.apply(Action::OpenHelp).unwrap();
         let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
         assert!(help.contains("Unbound: toggle_sort (config)"));
+
+        // With `toggle_sort` unbound, the notice names no key.
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        app.apply(Action::MoveTaskUp).unwrap();
+        let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+        assert!(
+            footer.starts_with("NORMAL  Reorder needs manual order · "),
+            "{footer}"
+        );
     }
 
     fn type_text(app: &mut App, text: &str) {
@@ -2184,7 +2246,7 @@ mod tests {
         app.apply(Action::CloseHelp).unwrap();
         let normal = buffer_row(&render_app(&app, 200, 12), 200, 11);
         assert!(
-            normal.contains("s toggle priority sort · f edit filter"),
+            normal.contains("s cycle sort order · f edit filter"),
             "{normal}"
         );
 

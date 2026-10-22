@@ -422,6 +422,51 @@ mod tests {
     }
 
     #[test]
+    fn refresh_should_rebuild_due_order_and_a_new_day_should_only_restyle() {
+        let (_home, store, mut session, now) = fixture();
+        session.action(&store, Action::ToggleSort).unwrap();
+        session.action(&store, Action::ToggleSort).unwrap();
+        assert_eq!(session.app.order(), crate::projection::TaskOrder::Due);
+        write(&store, Mutation::Add("late due:2026-10-01".into()));
+        write(&store, Mutation::Add("(A) soon due:2026-10-22".into()));
+        assert!(session.refresh_using(&store, || now));
+        assert_eq!(displayed(&session), [3, 4, 1, 2]);
+        assert_eq!(session.app.selected(), Some(id(1)));
+
+        let rebuilds = session.app.order_rebuilds();
+        let before = store.counts();
+        let tomorrow = test_today().succ().unwrap();
+        let at = now + Duration::from_secs(1);
+        assert!(session.tick_using(&store, at, || at, || tomorrow));
+        assert_eq!(session.app.today(), tomorrow);
+        for step in 2..=4 {
+            let at = now + Duration::from_secs(step);
+            assert!(!session.tick_using(&store, at, || at, || tomorrow));
+        }
+        assert_eq!(store.counts().1, before.1, "unchanged bytes parse nothing");
+        assert_eq!(
+            session.app.order_rebuilds(),
+            rebuilds,
+            "the day does not rebuild"
+        );
+        assert_eq!(displayed(&session), [3, 4, 1, 2]);
+        assert_eq!(session.app.selected(), Some(id(1)));
+
+        write(
+            &store,
+            Mutation::EditText {
+                id: id(3),
+                text: "late due:2026-12-01".into(),
+                original: None,
+            },
+        );
+        let at = now + Duration::from_secs(5);
+        assert!(session.tick_using(&store, at, || at, || tomorrow));
+        assert_eq!(session.app.order_rebuilds(), rebuilds + 1);
+        assert_eq!(displayed(&session), [4, 3, 1, 2]);
+    }
+
+    #[test]
     fn refresh_should_keep_filter_editor_buffer_cursor_filter_and_sort_and_reconcile_tags() {
         let (_home, store, mut session, now) = fixture();
         write(&store, Mutation::Add("(B) other +x".into()));
