@@ -46,6 +46,8 @@ pub(crate) struct Session {
     token: SnapshotToken,
     initialized: bool,
     refresh: RetryDeadline,
+    /// When the local date is next read; successful mutations postpone `refresh`, not this.
+    date_check: Instant,
     recovery: Option<RetryDeadline>,
     pending_sync: Option<Outcome>,
 }
@@ -57,6 +59,7 @@ impl Session {
             app: App::with_today(snapshot.list, today),
             token: snapshot.token,
             refresh: RetryDeadline::new(now),
+            date_check: now + REFRESH_INTERVAL,
             recovery: None,
             pending_sync: None,
         }
@@ -71,11 +74,10 @@ impl Session {
     }
 
     pub(crate) fn next_deadline(&self) -> Instant {
+        let next = self.refresh.next.min(self.date_check);
         self.recovery
             .as_ref()
-            .map_or(self.refresh.next, |recovery| {
-                recovery.next.min(self.refresh.next)
-            })
+            .map_or(next, |recovery| recovery.next.min(next))
     }
 
     pub(crate) fn action(&mut self, store: &Store, action: Action) -> Result<(bool, bool)> {
@@ -187,7 +189,8 @@ impl Session {
         self.tick_using(store, now, Instant::now, clock::today)
     }
 
-    /// Refreshes on the one-second deadline, which is also the only time the local date is read.
+    /// Refreshes on its deadline and reads the local date at that deadline, or at its own deadline
+    /// when successful mutations have postponed the refresh, so writes cannot starve date reads.
     fn tick_using(
         &mut self,
         store: &Store,
@@ -196,9 +199,16 @@ impl Session {
         today: impl Fn() -> Date,
     ) -> bool {
         let mut dirty = false;
-        if now >= self.refresh.next {
+        let refresh_due = now >= self.refresh.next;
+        if refresh_due || now >= self.date_check {
             dirty |= self.app.set_today(today());
-            dirty |= self.refresh_using(store, &clock);
+            if refresh_due {
+                dirty |= self.refresh_using(store, &clock);
+            }
+            // The next read is at the current refresh deadline, so idle and backed-off refreshes
+            // share one wakeup; successful mutations later postpone only the refresh. The date is
+            // read at least once a second, or with the refresh while storage errors back it off.
+            self.date_check = self.refresh.next;
         }
         if self
             .recovery
@@ -278,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn the_date_should_be_read_only_on_refresh_deadlines_without_parsing_or_redrawing() {
+    fn the_date_should_be_read_once_per_second_without_parsing_or_redrawing() {
         let (_home, store, mut session, now) = fixture();
         let reads = std::cell::Cell::new(0);
         let date = std::cell::Cell::new(test_today());
@@ -303,6 +313,11 @@ mod tests {
             );
         }
         assert_eq!(reads.get(), 3, "one read per deadline");
+        assert_eq!(
+            session.next_deadline(),
+            now + Duration::from_secs(4),
+            "idle date checks share the refresh wakeup"
+        );
         let after = store.counts();
         assert_eq!(after.1, before.1, "unchanged bytes and date parse nothing");
 
@@ -314,6 +329,53 @@ mod tests {
         assert_eq!(session.app.today(), tomorrow);
         assert_eq!(reads.get(), 4);
         assert_eq!(store.counts().1, before.1);
+    }
+
+    #[test]
+    fn the_date_should_be_read_every_second_while_successful_mutations_postpone_the_refresh() {
+        let (_home, store, mut session, now) = fixture();
+        let reads = std::cell::Cell::new(0);
+        let date = std::cell::Cell::new(test_today());
+        let today = || {
+            reads.set(reads.get() + 1);
+            date.get()
+        };
+        let tomorrow = test_today().succ().unwrap();
+
+        // A successful write every 500 ms keeps pushing the refresh deadline out by a second.
+        for step in 1..=20 {
+            let at = now + Duration::from_millis(step * 500);
+            if step == 11 {
+                date.set(tomorrow);
+            }
+            let request = Mutation::Add(format!("write {step}"));
+            let reply = store.mutate(
+                &request,
+                ScopePresence::RequireExisting,
+                INTERACTIVE_LOCK_BUDGET,
+            );
+            session.receive(&request, reply, at);
+            session.tick_using(&store, at, || at, today);
+            assert!(session.next_deadline() <= at + REFRESH_INTERVAL);
+        }
+        assert!(
+            reads.get() >= 9,
+            "{} date reads in ten seconds",
+            reads.get()
+        );
+        assert_eq!(session.app.today(), tomorrow);
+
+        session.action(&store, Action::StartAdd).unwrap();
+        for character in "x due:today".chars() {
+            session
+                .action(&store, Action::InsertChar(character))
+                .unwrap();
+        }
+        session.action(&store, Action::CommitEdit).unwrap();
+        assert_eq!(
+            store.load().unwrap().visible_tasks().last().unwrap().text(),
+            format!("x due:{tomorrow}")
+        );
     }
 
     #[test]
