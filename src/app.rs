@@ -313,8 +313,8 @@ pub(crate) struct App {
     pending: Option<Mutation>,
     storage_error: Option<String>,
     durability_warning: Option<String>,
-    /// The local date: used now to rewrite `due:today` and `due:tomorrow` on add and edit, and
-    /// the date the TUI will display once due styling lands (PR 2 of the due dates plan).
+    /// The displayed local date: it styles due tokens, resolves relative due filter terms, and
+    /// rewrites `due:today` and `due:tomorrow` on add and edit.
     today: Date,
 }
 
@@ -360,15 +360,20 @@ impl App {
         }
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "PR 2 shows the date"))]
     pub(crate) fn today(&self) -> Date {
         self.today
     }
 
-    /// Records a new local date. Nothing shown depends on it yet, so no redraw is needed.
+    /// Records a new local date and re-resolves relative due terms against it. Returns whether
+    /// anything shown changed: row styling depends on the date, so every new date redraws.
     pub(crate) fn set_today(&mut self, today: Date) -> bool {
+        if self.today == today {
+            return false;
+        }
         self.today = today;
-        false
+        self.projection.filter.due.resolve(|| today);
+        self.reconcile_selection();
+        true
     }
 
     pub(crate) fn prepare(&mut self, action: Action) -> Result<Transition, ListError> {
@@ -3507,10 +3512,14 @@ mod due_tests {
     }
 
     #[test]
-    fn set_today_should_change_what_the_next_add_writes_without_a_redraw() {
+    fn set_today_should_change_what_the_next_add_writes_and_redraw_only_on_a_new_date() {
         let mut app = App::new(TaskList::new(ListScope::Global));
         let new_year = Date::new(2026, 12, 31).unwrap();
-        assert!(!app.set_today(new_year));
+        assert!(
+            !app.set_today(test_today()),
+            "the same date needs no redraw"
+        );
+        assert!(app.set_today(new_year), "a new date restyles rows");
         assert_eq!(app.today(), new_year);
         assert!(!app.set_today(new_year));
         app.prepare(Action::StartAdd).unwrap();

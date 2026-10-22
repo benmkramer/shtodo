@@ -321,14 +321,25 @@ mod tests {
         let after = store.counts();
         assert_eq!(after.1, before.1, "unchanged bytes and date parse nothing");
 
-        // In PR 1 nothing shown depends on the date: a new day is stored without a redraw.
+        // Row styling depends on the date: a new day redraws once, then idles again.
         let tomorrow = test_today().succ().unwrap();
         date.set(tomorrow);
         let at = now + Duration::from_secs(4);
-        assert!(!session.tick_using(&store, at, || at, today));
+        assert!(
+            session.tick_using(&store, at, || at, today),
+            "a new day redraws"
+        );
         assert_eq!(session.app.today(), tomorrow);
         assert_eq!(reads.get(), 4);
-        assert_eq!(store.counts().1, before.1);
+        for step in 5..=7 {
+            let at = now + Duration::from_secs(step);
+            assert!(
+                !session.tick_using(&store, at, || at, today),
+                "the same new day does not redraw again"
+            );
+        }
+        assert_eq!(reads.get(), 7);
+        assert_eq!(store.counts().1, before.1, "a new day parses no bytes");
     }
 
     #[test]
