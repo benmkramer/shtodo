@@ -67,10 +67,13 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
         return;
     }
 
+    let filter_mode = app.mode() == Mode::Filter;
     let regions = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(u16::from(!app.is_trash_view())),
         Constraint::Min(1),
+        // The tag hint sits above the footer, so footer messages are never displaced.
+        Constraint::Length(u16::from(filter_mode)),
         Constraint::Length(1),
     ])
     .split(frame.area());
@@ -80,7 +83,10 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
         render_view(frame, regions[1], app);
     }
     render_content(frame, regions[2], app, keymap);
-    render_footer(frame, regions[3], app, keymap);
+    if filter_mode {
+        render_filter_hint(frame, regions[3], app);
+    }
+    render_footer(frame, regions[4], app, keymap);
     if app.mode() == Mode::Help {
         let help_area = Rect::new(
             regions[1].x,
@@ -247,14 +253,23 @@ fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
     let area = columns[1];
     let matches = app.visible_tasks().count();
-    let Some(editor) = app.editor().filter(|_| app.mode() == Mode::Search) else {
+    let Some(editor) = app
+        .editor()
+        .filter(|_| matches!(app.mode(), Mode::Search | Mode::Filter))
+    else {
+        let filter = Some(app.filter_text()).filter(|text| !text.is_empty());
         let sorted = app.order() == TaskOrder::Priority;
-        let status = status_line(matches, app.query(), None, sorted, area.width);
+        let status = status_line(matches, app.query(), filter, sorted, area.width);
         frame.render_widget(Paragraph::new(status), area);
         return;
     };
     // An editor on the status row follows the match count and uses the rest of the row.
-    let prefix = format!(" · {matches} matches · /");
+    let sigil = if app.mode() == Mode::Filter {
+        "f:"
+    } else {
+        "/"
+    };
+    let prefix = format!(" · {matches} matches · {sigil}");
     let prefix_width = text_width(&prefix).min(usize::from(area.width)) as u16;
     let (buffer, cursor_column) = editor_window(
         editor.buffer(),
@@ -323,7 +338,7 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
     let visible_tasks = app.visible_tasks().collect::<Vec<_>>();
     let editor = app
         .editor()
-        .filter(|editor| editor.kind() != EditKind::Search);
+        .filter(|editor| !matches!(editor.kind(), EditKind::Search | EditKind::Filter));
     if visible_tasks.is_empty() && editor.is_none() {
         let no_tasks = app.tasks().visible_tasks().next().is_none();
         let mut text = if no_tasks {
@@ -341,11 +356,18 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         {
             text.push_str(&format!("\nPress {add} to add · {help} for help"));
         } else if !no_tasks && app.mode() == Mode::Normal {
+            // Esc clears the search first, then the filter.
+            let clear = if app.query().is_empty() && !app.filter().is_empty() {
+                "clear filter"
+            } else {
+                "clear search"
+            };
             let hints = [
-                (BindingId::ClearSearch, "clear search"),
+                (BindingId::ClearSearch, clear),
                 (BindingId::CycleView, "next view"),
                 (BindingId::PreviousView, "previous view"),
                 (BindingId::StartSearch, "edit search"),
+                (BindingId::EditFilter, "edit filter"),
             ]
             .into_iter()
             .filter_map(|(id, description)| {
@@ -386,7 +408,7 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         let detached = match kind {
             EditKind::Add => true,
             EditKind::Edit(id) => !visible_tasks.iter().any(|task| task.id() == id),
-            EditKind::Search => false,
+            EditKind::Search | EditKind::Filter => false,
         };
         if detached {
             selected_index = Some(items.len());
@@ -459,7 +481,11 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
     } else {
         None
     };
-    let notice = app.notice().map(|notice| notice_text(notice, keymap));
+    let label = mode_label(app.mode());
+    let notice_width = usize::from(area.width).saturating_sub(text_width(label) + 2);
+    let notice = app
+        .notice()
+        .map(|notice| notice_text(notice, keymap, notice_width));
     let message = if app.needs_sync() || app.storage_unavailable() {
         app.message()
     } else {
@@ -470,12 +496,12 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
         (Some(message), true) => message.to_owned(),
         (None, _) => hints,
     };
-    let text = format!("{}  {detail}", mode_label(app.mode()));
+    let text = format!("{label}  {detail}");
 
     frame.render_widget(Paragraph::new(text), area);
 }
 
-fn notice_text(notice: &Notice, keymap: &Keymap) -> String {
+fn notice_text(notice: &Notice, keymap: &Keymap, width: usize) -> String {
     match notice {
         Notice::ManualOrderRequired => {
             match binding_label(keymap, Mode::Normal, BindingId::ToggleSort) {
@@ -483,7 +509,50 @@ fn notice_text(notice: &Notice, keymap: &Keymap) -> String {
                 None => "Reorder uses manual order".into(),
             }
         }
+        Notice::FinishTag(tags) => clip_entries("Finish the tag: ", tags, ", ", width),
     }
+}
+
+fn render_filter_hint(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let entries = app
+        .filter_hint()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(tag, count)| format!("{tag} {count}"))
+        .collect::<Vec<_>>();
+    let text = if entries.is_empty() {
+        "No tags in this view".to_owned()
+    } else {
+        clip_entries("", &entries, " · ", usize::from(area.width))
+    };
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(Color::Gray)),
+        area,
+    );
+}
+
+/// Drops whole entries from the end and appends `…`; if even the first entry does not fit,
+/// cuts it to `width - 1` columns plus `…`.
+fn clip_entries(prefix: &str, entries: &[String], separator: &str, width: usize) -> String {
+    let full = format!("{prefix}{}", entries.join(separator));
+    if text_width(&full) <= width {
+        return full;
+    }
+    for kept in (1..entries.len()).rev() {
+        let clipped = format!("{prefix}{}{separator}…", entries[..kept].join(separator));
+        if text_width(&clipped) <= width {
+            return clipped;
+        }
+    }
+    let mut cut = String::new();
+    for character in full.chars() {
+        if text_width(&cut) + text_width(character.encode_utf8(&mut [0; 4])) >= width {
+            break;
+        }
+        cut.push(character);
+    }
+    cut.push('…');
+    cut
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) {
@@ -519,8 +588,19 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) 
         }
         insert_and_help.push(Line::default());
     }
-    insert_and_help.extend(help_lines(keymap, Mode::Help));
-    if let Some(normal_width) = help_column_width(&normal, &insert_and_help, inner) {
+    let help = help_lines(keymap, Mode::Help);
+    let mut separated = insert_and_help.clone();
+    separated.extend(help.iter().cloned());
+    let mut compact = insert_and_help;
+    // Without room for two columns, the blank line before Help is dropped first.
+    if !trash {
+        compact.pop();
+    }
+    compact.extend(help);
+    let columns = help_column_width(&normal, &separated, inner)
+        .map(|width| (width, separated.clone()))
+        .or_else(|| help_column_width(&normal, &compact, inner).map(|width| (width, compact)));
+    if let Some((normal_width, insert_and_help)) = columns {
         let columns =
             Layout::horizontal([Constraint::Length(normal_width), Constraint::Min(1)]).split(inner);
         frame.render_widget(
@@ -534,7 +614,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) 
     } else {
         let mut all_modes = normal;
         all_modes.push(Line::default());
-        all_modes.extend(insert_and_help);
+        all_modes.extend(separated);
         frame.render_widget(
             Paragraph::new(wrap_help_lines(&all_modes, inner.width)),
             inner,
@@ -621,6 +701,7 @@ fn mode_name(mode: Mode) -> &'static str {
         Mode::Normal => "Normal",
         Mode::Insert => "Insert",
         Mode::Search => "Search",
+        Mode::Filter => "Filter",
         Mode::Help => "Help",
         Mode::Trash => "Trash",
     }
@@ -703,11 +784,19 @@ fn search_description(binding: &ResolvedBinding) -> &'static str {
     }
 }
 
+fn filter_description(binding: &ResolvedBinding) -> &'static str {
+    match binding.id() {
+        BindingId::CommitEdit => "apply filter",
+        BindingId::CancelEdit => "cancel filter",
+        _ => binding.description(),
+    }
+}
+
 fn footer_binding(binding: &ResolvedBinding, mode: Mode) -> String {
-    let description = if mode == Mode::Search {
-        search_description(binding)
-    } else {
-        binding.description()
+    let description = match mode {
+        Mode::Search => search_description(binding),
+        Mode::Filter => filter_description(binding),
+        _ => binding.description(),
     };
     let description = match description.strip_prefix("show ") {
         Some(description) => description,
@@ -721,6 +810,7 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Normal => "NORMAL",
         Mode::Insert => "INSERT",
         Mode::Search => "SEARCH",
+        Mode::Filter => "FILTER",
         Mode::Help => "HELP",
         Mode::Trash => "TRASH",
     }
@@ -763,7 +853,7 @@ mod tests {
                 match id.mode() {
                     crate::app::Mode::Normal => "normal",
                     crate::app::Mode::Insert => "insert",
-                    crate::app::Mode::Search => "insert",
+                    crate::app::Mode::Search | crate::app::Mode::Filter => "insert",
                     crate::app::Mode::Help => "help",
                     crate::app::Mode::Trash => "trash",
                 },
@@ -1476,6 +1566,18 @@ mod tests {
         assert!(help.contains("Esc cancel search"));
     }
 
+    /// A row as displayed: the blank cell after each wide character is skipped.
+    fn display_row(buffer: &Buffer, row: u16) -> String {
+        let mut text = String::new();
+        let mut column = 0;
+        while column < buffer.area.width {
+            let symbol = buffer[(column, row)].symbol();
+            text.push_str(symbol);
+            column += u16::try_from(super::text_width(symbol)).unwrap().max(1);
+        }
+        text
+    }
+
     fn row_cells(buffer: &Buffer, row: u16, text: &str) -> Vec<Cell> {
         let width = buffer.area.width;
         let line = buffer_row(buffer, width, row);
@@ -1669,6 +1771,157 @@ mod tests {
         app.apply(Action::OpenHelp).unwrap();
         let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
         assert!(help.contains("Unbound: toggle_sort (config)"));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+    }
+
+    #[test]
+    fn filter_editor_should_render_hint_above_footer_and_keep_list_rows_at_minimum_size() {
+        let mut list = TaskList::new(ListScope::Global);
+        for letter in ['a', 'b', 'c', 'd', 'e', 'f'] {
+            list.add(&format!("task {letter} +東京 +東京{letter}"))
+                .unwrap();
+        }
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "+東京 +東京 +東");
+        let keymap = Keymap::defaults();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| render(frame, &app, &keymap)).unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor.y, 1);
+        assert!(cursor.x < 40);
+        let buffer = terminal.backend().buffer().clone();
+        let row = |index| display_row(&buffer, index);
+        assert!(row(1).contains(" · 6 matches · f:"), "{}", row(1));
+        assert!(row(1).trim_end().ends_with("+東"), "{}", row(1));
+        for index in 2..=5 {
+            assert!(row(index).contains("task "), "row {index}: {}", row(index));
+        }
+        assert!(row(6).starts_with("+東京 6 · +東京a 1 · "), "{}", row(6));
+        assert!(row(6).trim_end().ends_with(" · …"), "{}", row(6));
+        assert!(!row(6).contains("+東京f"));
+        assert!(
+            row(7).starts_with("FILTER  Enter apply filter"),
+            "{}",
+            row(7)
+        );
+
+        app.apply(Action::CommitEdit).unwrap();
+        assert!(app.notice().is_some());
+        let buffer = render_app(&app, 40, 8);
+        let footer = display_row(&buffer, 7);
+        assert!(
+            footer.starts_with("FILTER  Finish the tag: +東京, +東京a, "),
+            "{footer}"
+        );
+        assert!(footer.trim_end().ends_with('…'), "{footer}");
+        assert!(display_row(&buffer, 6).starts_with("+東京 6 · "));
+
+        app.apply(Action::CancelEdit).unwrap();
+        let buffer = render_app(&app, 40, 8);
+        for index in 2..=6 {
+            assert!(buffer_row(&buffer, 40, index).contains("task "));
+        }
+        assert!(buffer_row(&buffer, 40, 7).starts_with("NORMAL"));
+    }
+
+    #[test]
+    fn filter_hint_should_cut_a_single_wide_entry_and_explain_an_empty_view() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add(&format!("one +{}", "x".repeat(60))).unwrap();
+        list.add("untagged").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        let hint = buffer_row(&render_app(&app, 40, 8), 40, 6);
+        assert_eq!(hint, format!("+{}…", "x".repeat(38)));
+        type_text(&mut app, "+zzz");
+        let hint = buffer_row(&render_app(&app, 40, 8), 40, 6);
+        assert!(hint.starts_with("No tags in this view"), "{hint}");
+    }
+
+    #[test]
+    fn accepted_filter_should_show_status_segment_and_filter_aware_recovery_hints() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("(A) ship +shtodo").unwrap();
+        list.add("plain").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "+shtodo");
+        app.apply(Action::CommitEdit).unwrap();
+        let status = buffer_row(&render_app(&app, 80, 12), 80, 1);
+        assert!(status.contains("Done  · 1 matches · f:+shtodo"), "{status}");
+        app.apply(Action::ToggleSort).unwrap();
+        let status = buffer_row(&render_app(&app, 80, 12), 80, 1);
+        assert!(
+            status.contains(" · 1 matches · f:+shtodo · by priority"),
+            "{status}"
+        );
+        let narrow = buffer_row(&render_app(&app, 40, 8), 40, 1);
+        assert!(narrow.contains(" · 1 matches · f:+sh…"), "{narrow}");
+
+        app.apply(Action::CycleView).unwrap();
+        app.apply(Action::CycleView).unwrap();
+        let text = buffer_text(&render_app(&app, 120, 12));
+        assert!(text.contains("No matching tasks"));
+        assert!(
+            text.contains("Esc clear filter · Tab next view · Shift-Tab previous view · / edit search · f edit filter"),
+            "{text}"
+        );
+        app.apply(Action::StartSearch).unwrap();
+        type_text(&mut app, "zzz");
+        app.apply(Action::CommitEdit).unwrap();
+        let text = buffer_text(&render_app(&app, 120, 12));
+        assert!(text.contains("Esc clear search · Tab next view"));
+        assert!(buffer_row(&render_app(&app, 120, 12), 120, 1).contains("/zzz · f:+shtodo"));
+
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::EditFilter, &["ctrl-f"]),
+            override_for(BindingId::ClearSearch, &["ctrl-g"]),
+        ])
+        .unwrap();
+        app.apply(Action::ClearSearch).unwrap();
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 120, 12));
+        assert!(text.contains("Ctrl-g clear filter"), "{text}");
+        assert!(text.contains("Ctrl-f edit filter"));
+    }
+
+    #[test]
+    fn filter_footer_and_help_should_use_the_configured_filter_keys() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app(&app, 100, 30));
+        assert!(help.contains("f edit filter"), "{help}");
+        app.apply(Action::CloseHelp).unwrap();
+        let normal = buffer_row(&render_app(&app, 200, 12), 200, 11);
+        assert!(
+            normal.contains("s toggle priority sort · f edit filter"),
+            "{normal}"
+        );
+
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::CommitEdit, &["ctrl-s"]),
+            override_for(BindingId::CancelEdit, &["ctrl-g"]),
+        ])
+        .unwrap();
+        app.apply(Action::EditFilter).unwrap();
+        let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+        assert!(
+            footer.starts_with("FILTER  Ctrl-s apply filter · Ctrl-g cancel filter"),
+            "{footer}"
+        );
+        app.apply(Action::CancelEdit).unwrap();
+
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::ToggleComplete, &["f"])]).unwrap();
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+        assert!(help.contains("Unbound: edit_filter (config)"));
+        assert!(help.contains("f toggle complete"));
     }
 
     #[test]

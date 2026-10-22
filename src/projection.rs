@@ -74,9 +74,18 @@ impl Projection {
 
 /// Checks run cheapest first: tombstone, view, filter, then the lowercase search.
 pub(crate) fn matches(task: &Task, projection: &Projection) -> bool {
+    matches_with(task, projection, |text| projection.filter.matches(text))
+}
+
+/// The shared predicate with `filter` in place of `projection.filter`, for the TUI filter preview.
+pub(crate) fn matches_with(
+    task: &Task,
+    projection: &Projection,
+    filter: impl Fn(&str) -> bool,
+) -> bool {
     !task.is_deleted()
         && projection.view.matches(task)
-        && projection.filter.matches(task.text())
+        && filter(task.text())
         && (projection.lowercase_query.is_empty()
             || task
                 .text()

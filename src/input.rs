@@ -20,6 +20,7 @@ pub(crate) enum BindingId {
     PreviousView,
     ClearSearch,
     ToggleSort,
+    EditFilter,
     OpenTrash,
     TrashMoveDown,
     TrashMoveUp,
@@ -57,6 +58,7 @@ impl BindingId {
                 | Self::PreviousView
                 | Self::ClearSearch
                 | Self::ToggleSort
+                | Self::EditFilter
         )
     }
 
@@ -76,6 +78,7 @@ impl BindingId {
             (Mode::Normal, "previous_view") => Self::PreviousView,
             (Mode::Normal, "clear_search") => Self::ClearSearch,
             (Mode::Normal, "toggle_sort") => Self::ToggleSort,
+            (Mode::Normal, "edit_filter") => Self::EditFilter,
             (Mode::Normal, "open_trash") => Self::OpenTrash,
             (Mode::Trash, "move_down") => Self::TrashMoveDown,
             (Mode::Trash, "move_up") => Self::TrashMoveUp,
@@ -118,6 +121,7 @@ impl BindingId {
             Self::PreviousView => Some("previous_view"),
             Self::ClearSearch => Some("clear_search"),
             Self::ToggleSort => Some("toggle_sort"),
+            Self::EditFilter => Some("edit_filter"),
             Self::OpenTrash => Some("open_trash"),
             Self::TrashMoveDown => Some("move_down"),
             Self::TrashMoveUp => Some("move_up"),
@@ -160,6 +164,7 @@ impl BindingId {
             | Self::PreviousView
             | Self::ClearSearch
             | Self::ToggleSort
+            | Self::EditFilter
             | Self::OpenTrash
             | Self::OpenHelp
             | Self::NormalQuit => Mode::Normal,
@@ -742,6 +747,14 @@ static DEFINITIONS: &[Definition] = &[
         defaults: &[chord(KeyCode::Char('s'), KeyModifiers::NONE)],
         fixed: &[],
     },
+    Definition {
+        id: BindingId::EditFilter,
+        action: Action::EditFilter,
+        description: "edit filter",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Char('f'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
 ];
 
 impl Keymap {
@@ -881,7 +894,7 @@ impl Keymap {
         }
         match (mode, chord) {
             (
-                Mode::Insert | Mode::Search,
+                Mode::Insert | Mode::Search | Mode::Filter,
                 KeyChord {
                     code: KeyCode::Char(character),
                     modifiers,
@@ -892,8 +905,8 @@ impl Keymap {
     }
 
     pub(crate) fn bindings_for(&self, mode: Mode) -> impl Iterator<Item = &ResolvedBinding> {
-        // Search shares the configurable text editor, including commit/cancel and Ctrl-C.
-        let mode = if mode == Mode::Search {
+        // Search and Filter share the configurable text editor, including commit/cancel and Ctrl-C.
+        let mode = if matches!(mode, Mode::Search | Mode::Filter) {
             Mode::Insert
         } else {
             mode
@@ -987,7 +1000,7 @@ fn issue(override_: &BindingOverride, message: impl Into<String>) -> KeymapIssue
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-    use super::{BindingId, BindingOverride, KeyChord, Keymap};
+    use super::{BindingId, BindingOverride, KeyChord, Keymap, ResolvedBinding};
     use crate::{action::Action, app::Mode};
 
     fn pressed(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -1026,15 +1039,13 @@ mod tests {
                 None
             );
         }
-        for key in ['r', 'f'] {
-            assert_eq!(
-                keymap.map_key(
-                    Mode::Normal,
-                    pressed(KeyCode::Char(key), KeyModifiers::NONE)
-                ),
-                None
-            );
-        }
+        assert_eq!(
+            keymap.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('r'), KeyModifiers::NONE)
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1406,8 +1417,8 @@ mod tests {
     #[test]
     fn keymap_should_expose_configurable_and_active_binding_counts() {
         let keymap = Keymap::defaults();
-        assert_eq!(keymap.configurable_action_count(), 36);
-        assert_eq!(keymap.active_binding_count(), 49);
+        assert_eq!(keymap.configurable_action_count(), 37);
+        assert_eq!(keymap.active_binding_count(), 50);
         assert_eq!(
             BindingId::from_config(Mode::Normal, "move_down"),
             Some(BindingId::MoveDown)
@@ -1558,6 +1569,10 @@ mod tests {
             ),
             Some(Action::CycleView)
         );
+        assert_eq!(
+            keymap.unbound_actions_for(Mode::Normal).collect::<Vec<_>>(),
+            vec![BindingId::EditFilter]
+        );
         let issues = Keymap::with_overrides(&[
             BindingOverride {
                 order: 0,
@@ -1618,9 +1633,10 @@ mod tests {
                 BindingId::CycleView,
                 BindingId::ClearSearch,
                 BindingId::PreviousView,
+                BindingId::EditFilter,
             ]
         );
-        assert_eq!(keymap.configurable_action_count(), 36);
+        assert_eq!(keymap.configurable_action_count(), 37);
         assert_eq!(keymap.active_binding_count(), 47);
         assert!(keymap.unbound_actions_for(Mode::Insert).next().is_none());
         for mode in [Mode::Normal, Mode::Insert, Mode::Search, Mode::Help] {
@@ -1879,6 +1895,94 @@ mod tests {
             vec![
                 "Ctrl-C is reserved and cannot be configured",
                 "\"d\" conflicts with delete_task"
+            ]
+        );
+    }
+
+    #[test]
+    fn edit_filter_should_default_to_f_and_filter_mode_should_use_insert_bindings() {
+        let f = pressed(KeyCode::Char('f'), KeyModifiers::NONE);
+        let keymap = Keymap::defaults();
+        assert_eq!(keymap.map_key(Mode::Normal, f), Some(Action::EditFilter));
+        assert_eq!(keymap.map_key(Mode::Trash, f), None);
+        assert_eq!(keymap.map_key(Mode::Help, f), None);
+        assert_eq!(
+            BindingId::from_config(Mode::Normal, "edit_filter"),
+            Some(BindingId::EditFilter)
+        );
+        for mode in [Mode::Insert, Mode::Help, Mode::Trash] {
+            assert_eq!(BindingId::from_config(mode, "edit_filter"), None);
+        }
+        for (code, action) in [
+            (KeyCode::Enter, Action::CommitEdit),
+            (KeyCode::Esc, Action::CancelEdit),
+            (KeyCode::Backspace, Action::DeleteBeforeCursor),
+            (KeyCode::Left, Action::MoveCursorLeft),
+        ] {
+            assert_eq!(
+                keymap.map_key(Mode::Filter, pressed(code, KeyModifiers::NONE)),
+                Some(action)
+            );
+        }
+        for character in ['q', 'f', 's', '/', ' ', '+', '@', 'é'] {
+            assert_eq!(
+                keymap.map_key(
+                    Mode::Filter,
+                    pressed(KeyCode::Char(character), KeyModifiers::NONE)
+                ),
+                Some(Action::InsertChar(character))
+            );
+        }
+        assert_eq!(
+            keymap.map_key(
+                Mode::Filter,
+                pressed(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::Quit)
+        );
+        assert_eq!(
+            keymap
+                .bindings_for(Mode::Filter)
+                .map(ResolvedBinding::id)
+                .collect::<Vec<_>>(),
+            keymap
+                .bindings_for(Mode::Insert)
+                .map(ResolvedBinding::id)
+                .collect::<Vec<_>>()
+        );
+
+        let claimed = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.toggle_complete".into(),
+            id: BindingId::ToggleComplete,
+            keys: vec!["f".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            claimed.map_key(Mode::Normal, f),
+            Some(Action::ToggleComplete)
+        );
+        assert_eq!(
+            claimed
+                .unbound_actions_for(Mode::Normal)
+                .collect::<Vec<_>>(),
+            vec![BindingId::EditFilter]
+        );
+        let issues = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.edit_filter".into(),
+            id: BindingId::EditFilter,
+            keys: vec!["s".into(), "ctrl-c".into(), "j".into()],
+        }])
+        .unwrap_err()
+        .into_iter()
+        .map(|issue| issue.message)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            issues,
+            vec![
+                "Ctrl-C is reserved and cannot be configured",
+                "\"j\" conflicts with move_down"
             ]
         );
     }
