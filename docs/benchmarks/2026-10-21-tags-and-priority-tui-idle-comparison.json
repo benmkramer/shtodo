@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "started_at": "2026-10-22T01:29:38.746920+00:00",
+  "completed_at": "2026-10-22T01:32:44.156399+00:00",
+  "mode": "idle",
+  "machine": {
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "architecture": "arm64",
+    "python": "3.14.6",
+    "logical_cpus": 16,
+    "hardware": {
+      "machine_model": "Mac16,5",
+      "chip_type": "Apple M4 Max",
+      "physical_memory": "48 GB",
+      "number_processors": "proc 16:0:12:4"
+    },
+    "power": "Now drawing from 'AC Power'"
+  },
+  "binaries": {
+    "baseline": {
+      "path": "/Users/benmkramer/.herdr/worktrees/shtodo/feat-tags-and-priority/target/control-527127c/target/release/shtodo",
+      "sha256": "a1911bfed685201069c3d197c1bebac29fa21745d08b4c20e592d081c05a6c74",
+      "version": "shtodo 0.1.0-beta.4"
+    },
+    "current": {
+      "path": "/Users/benmkramer/.herdr/worktrees/shtodo/feat-tags-and-priority/target/release/shtodo",
+      "sha256": "24c70e1aec7864964566ce4c2cec045b07d94de71e99bfca02048fe41cb268c6",
+      "version": "shtodo 0.1.0-beta.4"
+    }
+  },
+  "settings": {
+    "baseline": "target/control-527127c/target/release/shtodo",
+    "current": "/Users/benmkramer/.herdr/worktrees/shtodo/feat-tags-and-priority/target/release/shtodo",
+    "mode": "idle",
+    "sizes": [
+      0,
+      100,
+      1000,
+      10000
+    ],
+    "kinds": [
+      "plain",
+      "mixed"
+    ],
+    "operations": null,
+    "runs": 50,
+    "warmups": 5,
+    "seed": 20261005,
+    "idle_seconds": 60,
+    "idle_samples": 3,
+    "idle_warmup": 5,
+    "output": "docs/benchmarks/2026-10-21-tags-and-priority-tui-idle-comparison.json"
+  },
+  "harness_sha256": "ce3e0a59e7efd4de2d7956c798665c27022d2daa9771c997cd3c66a3c193918f",
+  "cargo_lock_sha256": "0bf71476a40809dadb144b482943e1f66b410b5508811699d1cbe7eff8c04af5",
+  "baseline_commit": "1f2421c073a615623b60de1bda840ee07367430c",
+  "current_git_status": "",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "method": "Paired release binaries on independent temporary global scopes. CLI cases shuffled each round; snapshot reset and correctness checks outside timers; null stdout; process launch/exit included. Plain fixtures match the historical short open-task workload; mixed fixtures have Unicode and one-third tombstones. TUI cases shuffled each round; input ends at an acknowledged marker/mode frame, including rendering and PTY/harness work; completion persisted before frame. Idle runs six independent scopes together, one TUI each, with wait4 CPU including initialization/warmup and no terminal output after warmup. Warm caches, local storage; not a throughput ceiling or a cross-platform result.",
+  "results": [
+    {
+      "binary": "baseline",
+      "records": 0,
+      "clients": 1,
+      "snapshot_bytes": 132,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.047828999999999997,
+      "elapsed_seconds": 185.38295187498443,
+      "percent_of_one_core": 0.025800107030475028
+    },
+    {
+      "binary": "current",
+      "records": 0,
+      "clients": 1,
+      "snapshot_bytes": 132,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.042358,
+      "elapsed_seconds": 185.32671566586941,
+      "percent_of_one_core": 0.02285585208144971
+    },
+    {
+      "binary": "baseline",
+      "records": 1000,
+      "clients": 1,
+      "snapshot_bytes": 166983,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.064121,
+      "elapsed_seconds": 185.26951512508094,
+      "percent_of_one_core": 0.0346095794317322
+    },
+    {
+      "binary": "current",
+      "records": 1000,
+      "clients": 1,
+      "snapshot_bytes": 166983,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.067813,
+      "elapsed_seconds": 185.21230550017208,
+      "percent_of_one_core": 0.03661365794074465
+    },
+    {
+      "binary": "baseline",
+      "records": 10000,
+      "clients": 1,
+      "snapshot_bytes": 1691822,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.233533,
+      "elapsed_seconds": 185.14768954110332,
+      "percent_of_one_core": 0.12613335903830167
+    },
+    {
+      "binary": "current",
+      "records": 10000,
+      "clients": 1,
+      "snapshot_bytes": 1691822,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.225542,
+      "elapsed_seconds": 185.08515920909122,
+      "percent_of_one_core": 0.12185850068357158
+    }
+  ]
+}

@@ -118,7 +118,7 @@ impl TaskList {
         &self.scope
     }
 
-    #[cfg(test)]
+    /// Every stored task, tombstones included, in canonical order.
     pub(crate) fn tasks(&self) -> &[Task] {
         &self.tasks
     }

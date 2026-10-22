@@ -1,12 +1,14 @@
 # Tags and priority: derived todo.txt tokens with TUI and shell filtering
 
-Status: IN PROGRESS. PR 1 (Stages 1 and 2, the shell Stage 4 subset, and the
-PR 1 Stage 5 items) is implemented on `feat/tags-and-priority`; PR 2 (TUI,
-Stages 3a to 3c and the TUI Stage 4 subset) follows. The owner decided
+Status: DONE. PR 1 (Stages 1 and 2, the shell Stage 4 subset, and the PR 1
+Stage 5 items) merged as `527127c` (#21); PR 2 (TUI, Stages 3a to 3c, the TUI
+Stage 4 subset, and the PR 2 Stage 5 items) is implemented on
+`feat/tags-and-priority-tui`. The owner decided
 every question in [Decisions before Stage 0 exits](#decisions-before-stage-0-exits)
 on October 21, 2026: every default was accepted except question 4, which adds
 shell `list --sort priority` to PR 1, and approved implementation the same day.
-The plan index row stays IN PROGRESS until PR 2 is done.
+Questions 12 and 13 came from the benchmark reviews and were decided the same
+day.
 Date: October 21, 2026. Inspected baseline: `1f2421c` (feat: add JSON output
 for shell task commands, #16) on branch `feat/tags-and-priority`.
 Priority: P1. Estimated effort: L, in stages and two PRs (see Review
@@ -51,7 +53,8 @@ deferred.
 
 A question gates a PR if its answer changes that PR's contracts or scope. The
 owner answered questions 1 to 11 on October 21, 2026. Question 12 came from
-the PR 1 benchmark review and is pending.
+the PR 1 benchmark review and question 13 from the PR 2 benchmark review; the
+owner decided both the same day.
 
 | # | Question | Default | Gates | Decided |
 | --- | --- | --- | --- | --- |
@@ -67,6 +70,7 @@ the PR 1 benchmark review and is pending.
 | 10 | Read-only `shtodo tags [--json]` command | Deferred; would be its own follow-up PR | None | Deferred |
 | 11 | Config key for the default sort order | Not in this slice | PR 2 | Not in this slice |
 | 12 | Tagged-fixture `list --json` +15.2% (over 10% relative, inside 1.5 ms absolute) | Accept; cost is the approved always-present fields | PR 1 | Accepted by owner 2026-10-21 |
+| 13 | Filter keystroke-to-frame at 10,000 tasks: 0.853 ms against 0.574 ms for `/` (+48.7%, +0.28 ms) after the viewport mitigation, over the 5% relative gate | STOP for the owner | PR 2 | Owner restated the gate 2026-10-21 as within 5% of the `/` search keystroke or within 0.5 ms absolute, matching the absolute bounds of the shell gates; the final run passes it (+0.28 ms) |
 
 The mapping matches the reviewer's reading. Question 8 gates PR 1 only
 through the reserved-name text in usage.md's schema policy. With question 4
@@ -566,10 +570,12 @@ view, search, or filter").
 - Shell `--sort priority`: one `Vec<&Task>` of the filtered rows and one
   stable sort keyed by a constant-time `priority` check. Only that flag pays
   this cost.
-- TUI Priority order: collect the visible tasks, then sort them with the same
-  `projection::sort_by_priority`. Cache this `Vec<TaskId>` on `App` and
-  invalidate it on `reconcile`, filter, view, query, or sort changes, so
-  navigation and rendering do not re-sort every keypress.
+- TUI Priority order: sort every live task by the same priority key as
+  `projection::sort_by_priority` (stable, canonical ties) and cache their
+  canonical indices on `App`. The cache is rebuilt only on `reconcile` and on
+  a sort toggle. View, search, and filter are applied on top of it at display
+  time, and a stable sort's subset stays sorted, so no stale order can be
+  shown and navigation and rendering do not re-sort every keypress.
 - Filter mode adds the preview predicate and the hint line's tag scan per
   keystroke; neither runs outside Filter mode.
 - Row styling adds a few spans per row, and `render_content` builds an item for
@@ -588,7 +594,9 @@ Gates (release build, paired against `1f2421c` with
 - TUI completion-to-frame at 10,000 tasks within 5% in Manual order; measure
   Priority order and report it. Measure and report Filter-mode
   keystroke-to-frame at 10,000 tasks; it must stay within 5% of `/` search
-  keystroke-to-frame on the same fixture.
+  keystroke-to-frame on the same fixture, or within 0.5 ms absolute of it.
+  The absolute bound was added by the owner on October 21, 2026 (question
+  13), matching the absolute bounds the shell gates carry.
 - The shell gates run in PR 1 and the TUI gates in PR 2 (see Review
   boundaries).
 - Idle refresh: zero parses and zero redraws on unchanged bytes still hold.
@@ -656,6 +664,7 @@ config name, or doctor count changes, so no key exists that does nothing yet.
 Acceptance: ui styling tests; every earlier test passes unchanged, including
 doctor counts of 35 actions and 47 bindings. A STOP may land here, and the
 tree stays green.
+Status: DONE in PR 2 (`dc230b0`).
 
 ### Stage 3b: Priority sort
 
@@ -674,6 +683,7 @@ while sorted. The `toggle_sort` input and config tests pass, including
 `load_should_resolve_search_and_view_actions_and_shared_editor_keys` loading
 with `ToggleSort` unbound. Doctor counts are 36 actions and 48 bindings. A STOP
 may land here.
+Status: DONE in PR 2 (`2795f89`).
 
 ### Stage 3c: Filter editor and tag discovery
 
@@ -695,6 +705,7 @@ fixtures report `EditFilter` unbound; session tests for editor buffer,
 cursor, and filter across refresh; mutation tests for the filtered adjacency
 guard; the PTY smoke scenario passes. Doctor counts are 37 actions and 49
 bindings.
+Status: DONE in PR 2 (`daae639`, with the hint-count cache in `af89c20`).
 
 ### Stage 4: Measurements
 
@@ -704,7 +715,14 @@ overwriting earlier samples.
 Acceptance: that PR's gates are met, or STOP.
 Status: shell subset DONE in PR 1; see the
 [shell paired report](../benchmarks/2026-10-21-tags-and-priority-cli-comparison.md).
-The TUI subset is pending in PR 2.
+TUI subset: DONE in PR 2. Completion-to-frame passes in Manual order at
+10,000 mixed records (15.37 ms against 15.71 ms for `527127c`, -2.2%).
+Filter keystroke-to-frame missed the original 5% relative gate after the
+viewport mitigation (`5cae464`) and passes the owner's restated gate (question
+13), within 5% or within 0.5 ms of `/`: 0.853 ms against 0.574 ms, +48.7%,
++0.28 ms. Idle refresh keeps zero terminal output, zero parses, and zero
+redraws on unchanged bytes. See the
+[TUI paired report](../benchmarks/2026-10-21-tags-and-priority-tui-comparison.md).
 
 ### Stage 5: Docs and final verification
 
@@ -722,7 +740,7 @@ git diff --check
 Acceptance: all gates pass; release-binary smoke uses a temporary home and an
 exact temporary cwd. Mark this plan DONE and update the index row only at the
 end of PR 2, once the behavior and evidence are present.
-Status: PR 1 items DONE; PR 2 items pending.
+Status: DONE. PR 1 items in PR 1; PR 2 items in PR 2.
 
 ## Test plan
 
@@ -744,7 +762,7 @@ Status: PR 1 items DONE; PR 2 items pending.
 
 ## Documentation checklist
 
-- [ ] `README.md` (PR 1 part done): Quick start examples (`list --open --tag +work`) and Scope
+- [x] `README.md`: Quick start examples (`list --open --tag +work`) and Scope
   paragraph, which removes "priorities, tags" from the excluded list and adds
   the derived-token note (PR 1); essentials line adds `s sort · f filter`
   (PR 2).
@@ -760,11 +778,11 @@ Status: PR 1 items DONE; PR 2 items pending.
   JSON fields and schema policy with reserved `due`/`parent_id`; Version-one
   limits removes "priorities, tags" and "shell search or filters", and keeps
   dates, notifications, and subtasks listed as deferred.
-- [ ] `docs/usage.md`, PR 2: Normal-mode table rows for `s`/`f`; Filter mode,
+- [x] `docs/usage.md`, PR 2: Normal-mode table rows for `s`/`f`; Filter mode,
   including prefix preview, Enter completion, and the hint line;
   search-and-views section covering composition, layered Esc, and sorted
   reorder.
-- [ ] `docs/configuration.md` (PR 2): example config and Normal default table gain
+- [x] `docs/configuration.md` (PR 2): example config and Normal default table gain
   `toggle_sort`/`edit_filter`; upgrade section covers yield-to-override for
   `s`/`f`.
 - [x] `docs/agent-skill.md` (PR 1): example prompt for filtered open tasks.
@@ -773,12 +791,12 @@ Status: PR 1 items DONE; PR 2 items pending.
   (reordering stays TUI-only); task fields include
   `priority` and `tags`; priority and tags are set by editing text; older-binary
   fallback on `invalid_arguments`.
-- [ ] `CHANGELOG.md` Unreleased `### Added` (PR 1 part done): derived priority and tags, shell
+- [x] `CHANGELOG.md` Unreleased `### Added`: derived priority and tags, shell
   list filters and `list --sort priority`, with JSON (PR 1); TUI highlighting, sort, filter, tag
   discovery, and the new configurable actions (PR 2).
-- [ ] `docs/plans/README.md` (PR 1 part done): update the rejected-findings bullet on shell
+- [x] `docs/plans/README.md`: update the rejected-findings bullet on shell
   filters to note this plan supersedes it (PR 1); status DONE (end of PR 2).
-- [ ] `docs/benchmarks.md` (PR 1 part done): update "Shell listing remains unfiltered" and
+- [x] `docs/benchmarks.md`: update "Shell listing remains unfiltered" and
   link the shell paired report (PR 1); link the TUI paired report (PR 2).
 - [x] `cli::usage()` text and its tests (PR 1).
 
@@ -1032,3 +1050,58 @@ PR 1 review fixes, October 21, 2026 (PR 21, independent review):
   over the relative bound and inside the absolute one; question 12 records it
   as pending owner. usage.md notes that `--sort` values are case-sensitive and
   `--priority` values are ASCII case-insensitive.
+
+PR 2 implementation, October 21, 2026, on `feat/tags-and-priority-tui` from
+the PR 1 merge `527127c`:
+- Stage 3a (`dc230b0`): styled priority and tag spans in live and Trash rows,
+  and the status line's filter and sort segments with 40-column clipping.
+- Stage 3b (`2795f89`): `toggle_sort` on `s`, Priority order through
+  `projection::sort_by_priority`, `J`/`K` refused with a keymap-derived
+  message while sorted. Doctor counts 36 and 48.
+- Stage 3c (`daae639`): `edit_filter` on `f`, `Mode::Filter`, the App-side
+  `FilterPreview`, Enter resolution, the hint row on row 6 at 40x8, layered
+  Esc, and the PTY scenario. Doctor counts 37 and 49. The tests named in the
+  Test plan were written before the code; the existing yield-rule fixtures
+  load unchanged.
+- Deviations, none of which changes a contract:
+  - The Priority order cache holds the canonical indices of all live tasks and
+    is rebuilt only on `reconcile` and sort toggles. Filter, view, and query
+    changes reuse it, because filtering a sorted list keeps it sorted.
+  - The hint row's tag counts are cached in the filter session and recounted
+    only when the completed tokens change or a refresh installs new tasks
+    (`af89c20`), instead of a scan on every keystroke.
+  - Styled list items are built only for the visible window (`5cae464`), the
+    Performance section's viewport mitigation, applied for the Filter gate.
+  - A `Notice` type renders messages that name configured keys.
+  - The status line omits the empty `/` placeholder when a filter or sort
+    segment is shown.
+  - Help moves the search accept and cancel rows into the Insert column and
+    drops the blank line before Help only when two columns would not fit, so
+    the 16-alias Help test still fits; the default layout is unchanged.
+  - `projection::matches_with` takes the filter predicate, so the preview
+    reuses the shared view and search checks; `TaskList::tasks()` is no
+    longer test-only.
+- Stage 4 TUI subset: three full paired runs against a `527127c` release
+  build (SHA-256 `a1911bfe…`), all kept. Manual completion-to-frame at 10,000
+  mixed records passes (-2.2%). Filter keystroke-to-frame was +47.6% before
+  the hint cache, +15.1% after it, and +48.7% (+0.28 ms) after the viewport
+  mitigation, which made both keystroke cases about 1.1 ms faster. That missed
+  the 5% gate, and the work stopped for the owner. Idle refresh: zero terminal
+  output in every window; CPU at 10,000 records 0.1219% against 0.1261% of
+  one core. The ignored release test `idle_refresh_measurements` passes with zero
+  parses on unchanged bytes; the session unit tests cover equal bytes with
+  filter and sort active.
+- Stage 5 PR 2 items: README essentials line, usage.md (Normal keys, Filter
+  mode, search, filter, and view composition, layered Esc, sorted reorder),
+  configuration.md, CHANGELOG, benchmarks.md, this plan, and the index row.
+
+Review cycle 4, October 21, 2026 (owner decision on the Filter gate):
+- Added question 13. The owner restated the Filter keystroke-to-frame gate as
+  within 5% of the `/` search keystroke or within 0.5 ms absolute, matching
+  the absolute bounds the shell gates already carry. The final run (0.853 ms
+  against 0.574 ms, +0.28 ms) passes it.
+- Updated the Performance gate text, the Stage 4 status from STOP to DONE,
+  the TUI report's Result line and gate table (naming the original relative
+  gate it missed), and benchmarks.md.
+- Status set to DONE and the index row to DONE, after the Stage 5
+  verification.

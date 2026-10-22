@@ -258,6 +258,140 @@ mod tests {
         session.action(store, Action::CommitEdit).unwrap();
     }
 
+    fn displayed(session: &Session) -> Vec<u64> {
+        session
+            .app
+            .visible_tasks()
+            .map(|task| task.id().get())
+            .collect()
+    }
+
+    #[test]
+    fn refresh_should_rebuild_sorted_order_and_unchanged_bytes_should_not_parse_while_sorted() {
+        let (_home, store, mut session, now) = fixture();
+        session.action(&store, Action::ToggleSort).unwrap();
+        session.action(&store, Action::MoveDown).unwrap();
+        assert_eq!(displayed(&session), [1, 2]);
+        assert_eq!(session.app.selected(), Some(id(2)));
+        write(&store, Mutation::Add("(B) shell arrival".into()));
+        write(
+            &store,
+            Mutation::EditText {
+                id: id(1),
+                text: "(C) base 東京".into(),
+                original: None,
+            },
+        );
+        assert!(session.refresh_using(&store, || now));
+        assert_eq!(displayed(&session), [3, 1, 2]);
+        assert_eq!(session.app.selected(), Some(id(2)));
+        assert_eq!(session.app.order(), crate::projection::TaskOrder::Priority);
+
+        let before = store.counts();
+        for step in 1..=5 {
+            let at = now + Duration::from_secs(step);
+            assert!(!session.tick_using(&store, at, || at));
+        }
+        let after = store.counts();
+        assert_eq!(after.0 - before.0, 5);
+        assert_eq!(after.1, before.1);
+        assert_eq!(displayed(&session), [3, 1, 2]);
+    }
+
+    #[test]
+    fn refresh_should_keep_filter_editor_buffer_cursor_filter_and_sort_and_reconcile_tags() {
+        let (_home, store, mut session, now) = fixture();
+        write(&store, Mutation::Add("(B) other +x".into()));
+        write(&store, Mutation::Add("(A) task +x".into()));
+        assert!(session.refresh_using(&store, || now));
+        session.action(&store, Action::ToggleSort).unwrap();
+        session.action(&store, Action::EditFilter).unwrap();
+        for character in "+x".chars() {
+            session
+                .action(&store, Action::InsertChar(character))
+                .unwrap();
+        }
+        session.action(&store, Action::CommitEdit).unwrap();
+        assert_eq!(displayed(&session), [4, 3]);
+        assert_eq!(session.app.selected(), Some(id(3)));
+
+        session.action(&store, Action::EditFilter).unwrap();
+        session.action(&store, Action::InsertChar('@')).unwrap();
+        session.action(&store, Action::MoveCursorLeft).unwrap();
+        let before = session.app.editor().unwrap().clone();
+        assert_eq!(before.buffer(), "+x @");
+        write(
+            &store,
+            Mutation::EditText {
+                id: id(3),
+                text: "(B) other".into(),
+                original: None,
+            },
+        );
+        write(&store, Mutation::Add("(C) new +x".into()));
+        assert!(session.refresh_using(&store, || now));
+        assert_eq!(session.app.mode(), Mode::Filter);
+        assert_eq!(session.app.editor().unwrap(), &before);
+        assert_eq!(displayed(&session), [4, 5]);
+        assert_eq!(session.app.selected(), Some(id(5)));
+
+        session.action(&store, Action::CancelEdit).unwrap();
+        assert_eq!(session.app.mode(), Mode::Normal);
+        assert_eq!(session.app.filter_text(), "+x");
+        assert_eq!(session.app.order(), crate::projection::TaskOrder::Priority);
+        assert_eq!(displayed(&session), [4, 5]);
+        let before = store.counts();
+        for step in 1..=5 {
+            let at = now + Duration::from_secs(step);
+            assert!(!session.tick_using(&store, at, || at));
+        }
+        let after = store.counts();
+        assert_eq!(after.0 - before.0, 5);
+        assert_eq!(after.1, before.1);
+        assert_eq!(displayed(&session), [4, 5]);
+    }
+
+    #[test]
+    fn filtered_reorder_should_conflict_when_the_neighbor_leaves_the_filter_before_the_lock() {
+        let (_home, store, mut session, now) = fixture();
+        for text in ["(A) a +x", "between", "b +x"] {
+            write(&store, Mutation::Add(text.into()));
+        }
+        assert!(session.refresh_using(&store, || now));
+        session.action(&store, Action::EditFilter).unwrap();
+        for character in "+x".chars() {
+            session
+                .action(&store, Action::InsertChar(character))
+                .unwrap();
+        }
+        session.action(&store, Action::CommitEdit).unwrap();
+        assert_eq!(displayed(&session), [3, 5]);
+        assert_eq!(session.app.selected(), Some(id(3)));
+        write(
+            &store,
+            Mutation::EditText {
+                id: id(5),
+                text: "b".into(),
+                original: None,
+            },
+        );
+        session.action(&store, Action::MoveTaskDown).unwrap();
+        assert_eq!(
+            session.app.message(),
+            Some("Task order changed; review and retry")
+        );
+        let stored = store.read_snapshot(ScopePresence::RequireExisting).unwrap();
+        assert_eq!(
+            stored
+                .list
+                .visible_tasks()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+        assert_eq!(displayed(&session), [3]);
+    }
+
     #[test]
     fn refresh_should_preserve_live_search_editor_and_reconcile_the_active_projection() {
         let (_home, store, mut session, now) = fixture();

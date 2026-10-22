@@ -9,14 +9,18 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, EditKind, Mode, TaskView},
+    app::{App, EditKind, Mode, Notice, TaskView},
     input::{BindingId, Keymap, ResolvedBinding},
+    metadata,
+    projection::TaskOrder,
     task::{ListScope, Task},
 };
 
 const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 8;
 const ROW_PREFIX_WIDTH: u16 = 4;
+const PROJECT_COLOR: Color = Color::Cyan;
+const CONTEXT_COLOR: Color = Color::Magenta;
 
 fn editor_window(buffer: &str, cursor: usize, width: u16) -> (&str, u16) {
     let mut cursor = cursor.min(buffer.len());
@@ -63,10 +67,13 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
         return;
     }
 
+    let filter_mode = app.mode() == Mode::Filter;
     let regions = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(u16::from(!app.is_trash_view())),
         Constraint::Min(1),
+        // The tag hint sits above the footer, so footer messages are never displaced.
+        Constraint::Length(u16::from(filter_mode)),
         Constraint::Length(1),
     ])
     .split(frame.area());
@@ -76,7 +83,10 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
         render_view(frame, regions[1], app);
     }
     render_content(frame, regions[2], app, keymap);
-    render_footer(frame, regions[3], app, keymap);
+    if filter_mode {
+        render_filter_hint(frame, regions[3], app);
+    }
+    render_footer(frame, regions[4], app, keymap);
     if app.mode() == Mode::Help {
         let help_area = Rect::new(
             regions[1].x,
@@ -242,22 +252,82 @@ fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
         columns[0],
     );
     let area = columns[1];
-    let prefix = format!(" · {} matches · /", app.visible_tasks().count());
-    let prefix_width = Line::from(prefix.as_str())
-        .width()
-        .min(usize::from(area.width)) as u16;
-    let query_width = area.width.saturating_sub(prefix_width);
-    let (query, cursor_column) = if app.mode() == Mode::Search {
-        app.editor().map_or((app.query(), 0), |editor| {
-            editor_window(editor.buffer(), editor.cursor(), query_width)
-        })
-    } else {
-        (app.query(), 0)
+    let matches = app.visible_tasks().count();
+    let Some(editor) = app
+        .editor()
+        .filter(|_| matches!(app.mode(), Mode::Search | Mode::Filter))
+    else {
+        let filter = Some(app.filter_text()).filter(|text| !text.is_empty());
+        let sorted = app.order() == TaskOrder::Priority;
+        let status = status_line(matches, app.query(), filter, sorted, area.width);
+        frame.render_widget(Paragraph::new(status), area);
+        return;
     };
-    frame.render_widget(Paragraph::new(format!("{prefix}{query}")), area);
-    if app.mode() == Mode::Search {
-        frame.set_cursor_position((area.x + prefix_width + cursor_column, area.y));
+    // An editor on the status row follows the match count and uses the rest of the row.
+    let sigil = if app.mode() == Mode::Filter {
+        "f:"
+    } else {
+        "/"
+    };
+    let prefix = format!(" · {matches} matches · {sigil}");
+    let prefix_width = text_width(&prefix).min(usize::from(area.width)) as u16;
+    let (buffer, cursor_column) = editor_window(
+        editor.buffer(),
+        editor.cursor(),
+        area.width.saturating_sub(prefix_width),
+    );
+    frame.render_widget(Paragraph::new(format!("{prefix}{buffer}")), area);
+    frame.set_cursor_position((area.x + prefix_width + cursor_column, area.y));
+}
+
+fn text_width(text: &str) -> usize {
+    Line::from(text).width()
+}
+
+/// The match count is always kept; past `width`, the sort segment goes first, then the filter
+/// is truncated with `…`. The empty `/` placeholder gives way to an active filter or sort.
+fn status_line(
+    matches: usize,
+    query: &str,
+    filter: Option<&str>,
+    sorted: bool,
+    width: u16,
+) -> String {
+    const FILTER: &str = " · f:";
+    let width = usize::from(width);
+    let mut line = format!(" · {matches} matches");
+    if !query.is_empty() || (filter.is_none() && !sorted) {
+        line.push_str(" · /");
+        line.push_str(query);
     }
+    let sort = if sorted { " · by priority" } else { "" };
+    let used = text_width(&line);
+    let Some(filter) = filter else {
+        if used + text_width(sort) <= width {
+            line.push_str(sort);
+        }
+        return line;
+    };
+    let full = used + text_width(FILTER) + text_width(filter);
+    if full <= width {
+        line.push_str(FILTER);
+        line.push_str(filter);
+        if full + text_width(sort) <= width {
+            line.push_str(sort);
+        }
+    } else if let Some(room) = width.checked_sub(used + text_width(FILTER) + 1) {
+        line.push_str(FILTER);
+        let mut clipped = 0;
+        for character in filter.chars() {
+            clipped += text_width(character.encode_utf8(&mut [0; 4]));
+            if clipped > room {
+                break;
+            }
+            line.push(character);
+        }
+        line.push('…');
+    }
+    line
 }
 
 fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, keymap: &Keymap) {
@@ -268,7 +338,7 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
     let visible_tasks = app.visible_tasks().collect::<Vec<_>>();
     let editor = app
         .editor()
-        .filter(|editor| editor.kind() != EditKind::Search);
+        .filter(|editor| !matches!(editor.kind(), EditKind::Search | EditKind::Filter));
     if visible_tasks.is_empty() && editor.is_none() {
         let no_tasks = app.tasks().visible_tasks().next().is_none();
         let mut text = if no_tasks {
@@ -286,11 +356,18 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         {
             text.push_str(&format!("\nPress {add} to add · {help} for help"));
         } else if !no_tasks && app.mode() == Mode::Normal {
+            // Esc clears the search first, then the filter.
+            let clear = if app.query().is_empty() && !app.filter().is_empty() {
+                "clear filter"
+            } else {
+                "clear search"
+            };
             let hints = [
-                (BindingId::ClearSearch, "clear search"),
+                (BindingId::ClearSearch, clear),
                 (BindingId::CycleView, "next view"),
                 (BindingId::PreviousView, "previous view"),
                 (BindingId::StartSearch, "edit search"),
+                (BindingId::EditFilter, "edit filter"),
             ]
             .into_iter()
             .filter_map(|(id, description)| {
@@ -316,28 +393,39 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
             editor_window(editor.buffer(), editor.cursor(), editor_width);
         (editor.kind(), visible, cursor_column)
     });
-    let mut selected_index = visible_tasks
-        .iter()
-        .position(|task| Some(task.id()) == app.selected());
+    let detached = editor_view.is_some_and(|(kind, _, _)| match kind {
+        EditKind::Add => true,
+        EditKind::Edit(id) => !visible_tasks.iter().any(|task| task.id() == id),
+        EditKind::Search | EditKind::Filter => false,
+    });
+    let selected_index = if detached {
+        Some(visible_tasks.len())
+    } else {
+        visible_tasks
+            .iter()
+            .position(|task| Some(task.id()) == app.selected())
+    };
+    // Style only the rows the list can show: the window a fresh `ListState` scrolls to, which
+    // ends at the selected row once it is past the first screen.
+    let rows = usize::from(area.height);
+    debug_assert!(
+        rows > 0,
+        "the layout keeps list rows at the minimum terminal size"
+    );
+    let start = selected_index.map_or(0, |index| (index + 1).saturating_sub(rows));
     let mut items = visible_tasks
         .iter()
+        .skip(start)
+        .take(rows)
         .map(|task| match editor_view {
             Some((EditKind::Edit(id), visible, _)) if task.id() == id => editor_item(visible),
             _ => task_item(task),
         })
         .collect::<Vec<_>>();
-
-    if let Some((kind, visible, _)) = editor_view {
-        let detached = match kind {
-            EditKind::Add => true,
-            EditKind::Edit(id) => !visible_tasks.iter().any(|task| task.id() == id),
-            EditKind::Search => false,
-        };
-        if detached {
-            selected_index = Some(items.len());
-            items.push(editor_item(visible));
-        }
+    if detached && let Some((_, visible, _)) = editor_view {
+        items.push(editor_item(visible));
     }
+    let selected_index = selected_index.map(|index| index.saturating_sub(start));
 
     let list = List::new(items)
         .highlight_symbol("› ")
@@ -375,7 +463,9 @@ fn render_trash_content(frame: &mut Frame<'_>, area: Rect, app: &App, keymap: &K
         .iter()
         .map(|task| {
             let state = if task.completed() { "done" } else { "open" };
-            ListItem::new(format!("{}  {state}  {}", task.id().get(), task.text()))
+            let mut spans = vec![Span::raw(format!("{}  {state}  ", task.id().get()))];
+            spans.extend(text_spans(task.text(), Style::default()));
+            ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
     let list = List::new(items)
@@ -402,19 +492,78 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
     } else {
         None
     };
+    let label = mode_label(app.mode());
+    let notice_width = usize::from(area.width).saturating_sub(text_width(label) + 2);
+    let notice = app
+        .notice()
+        .map(|notice| notice_text(notice, keymap, notice_width));
     let message = if app.needs_sync() || app.storage_unavailable() {
         app.message()
     } else {
-        conflict.as_deref().or(app.message())
+        conflict.as_deref().or(app.message()).or(notice.as_deref())
     };
     let detail = match (message, hints.is_empty()) {
         (Some(message), false) => format!("{message} · {hints}"),
         (Some(message), true) => message.to_owned(),
         (None, _) => hints,
     };
-    let text = format!("{}  {detail}", mode_label(app.mode()));
+    let text = format!("{label}  {detail}");
 
     frame.render_widget(Paragraph::new(text), area);
+}
+
+fn notice_text(notice: &Notice, keymap: &Keymap, width: usize) -> String {
+    match notice {
+        Notice::ManualOrderRequired => {
+            match binding_label(keymap, Mode::Normal, BindingId::ToggleSort) {
+                Some(key) => format!("Reorder uses manual order; press {key} to switch"),
+                None => "Reorder uses manual order".into(),
+            }
+        }
+        Notice::FinishTag(tags) => clip_entries("Finish the tag: ", tags, ", ", width),
+    }
+}
+
+fn render_filter_hint(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let entries = app
+        .filter_hint()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(tag, count)| format!("{tag} {count}"))
+        .collect::<Vec<_>>();
+    let text = if entries.is_empty() {
+        "No tags in this view".to_owned()
+    } else {
+        clip_entries("", &entries, " · ", usize::from(area.width))
+    };
+    frame.render_widget(
+        Paragraph::new(text).style(Style::default().fg(Color::Gray)),
+        area,
+    );
+}
+
+/// Drops whole entries from the end and appends `…`; if even the first entry does not fit,
+/// cuts it to `width - 1` columns plus `…`.
+fn clip_entries(prefix: &str, entries: &[String], separator: &str, width: usize) -> String {
+    let full = format!("{prefix}{}", entries.join(separator));
+    if text_width(&full) <= width {
+        return full;
+    }
+    for kept in (1..entries.len()).rev() {
+        let clipped = format!("{prefix}{}{separator}…", entries[..kept].join(separator));
+        if text_width(&clipped) <= width {
+            return clipped;
+        }
+    }
+    let mut cut = String::new();
+    for character in full.chars() {
+        if text_width(&cut) + text_width(character.encode_utf8(&mut [0; 4])) >= width {
+            break;
+        }
+        cut.push(character);
+    }
+    cut.push('…');
+    cut
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) {
@@ -427,14 +576,17 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) 
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let mut normal = help_lines(keymap, if trash { Mode::Trash } else { Mode::Normal });
+    let normal = help_lines(keymap, if trash { Mode::Trash } else { Mode::Normal });
+    let mut insert_and_help = Vec::new();
     if !trash {
+        insert_and_help = help_lines(keymap, Mode::Insert);
+        // The search editor shares the Insert keys; listing it here keeps the Normal column short.
         for id in [BindingId::CommitEdit, BindingId::CancelEdit] {
             if let Some(binding) = keymap
                 .bindings_for(Mode::Search)
                 .find(|binding| binding.id() == id)
             {
-                normal.push(Line::from(format!(
+                insert_and_help.push(Line::from(format!(
                     "{} {}",
                     binding.labels().collect::<Vec<_>>().join(" / "),
                     if id == BindingId::CommitEdit {
@@ -445,17 +597,21 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) 
                 )));
             }
         }
-    }
-    let mut insert_and_help = if trash {
-        Vec::new()
-    } else {
-        help_lines(keymap, Mode::Insert)
-    };
-    if !trash {
         insert_and_help.push(Line::default());
     }
-    insert_and_help.extend(help_lines(keymap, Mode::Help));
-    if let Some(normal_width) = help_column_width(&normal, &insert_and_help, inner) {
+    let help = help_lines(keymap, Mode::Help);
+    let mut separated = insert_and_help.clone();
+    separated.extend(help.iter().cloned());
+    let mut compact = insert_and_help;
+    // Without room for two columns, the blank line before Help is dropped first.
+    if !trash {
+        compact.pop();
+    }
+    compact.extend(help);
+    let columns = help_column_width(&normal, &separated, inner)
+        .map(|width| (width, separated.clone()))
+        .or_else(|| help_column_width(&normal, &compact, inner).map(|width| (width, compact)));
+    if let Some((normal_width, insert_and_help)) = columns {
         let columns =
             Layout::horizontal([Constraint::Length(normal_width), Constraint::Min(1)]).split(inner);
         frame.render_widget(
@@ -469,7 +625,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) 
     } else {
         let mut all_modes = normal;
         all_modes.push(Line::default());
-        all_modes.extend(insert_and_help);
+        all_modes.extend(separated);
         frame.render_widget(
             Paragraph::new(wrap_help_lines(&all_modes, inner.width)),
             inner,
@@ -556,6 +712,7 @@ fn mode_name(mode: Mode) -> &'static str {
         Mode::Normal => "Normal",
         Mode::Insert => "Insert",
         Mode::Search => "Search",
+        Mode::Filter => "Filter",
         Mode::Help => "Help",
         Mode::Trash => "Trash",
     }
@@ -579,10 +736,42 @@ fn task_item(task: &Task) -> ListItem<'static> {
         Style::default()
     };
 
-    ListItem::new(Line::from(vec![
-        Span::raw(marker),
-        Span::styled(task.text().to_owned(), text_style),
-    ]))
+    let mut spans = vec![Span::raw(marker)];
+    spans.extend(text_spans(task.text(), text_style));
+    ListItem::new(Line::from(spans))
+}
+
+/// Styles the priority marker and tag slices in place; the rest, including punctuation
+/// stripped from a tag, keeps `base`, so the row text and its width are unchanged.
+fn text_spans(text: &str, base: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut end = 0;
+    if metadata::priority(text).is_some() {
+        end = "(A)".len();
+        spans.push(Span::styled(
+            text[..end].to_owned(),
+            base.add_modifier(Modifier::BOLD),
+        ));
+    }
+    for tag in metadata::tags(text) {
+        // Tags borrow `text`, so their offsets come from the slice addresses.
+        let start = tag.as_ptr().addr() - text.as_ptr().addr();
+        debug_assert!(start + tag.len() <= text.len() && text.is_char_boundary(start));
+        if start > end {
+            spans.push(Span::styled(text[end..start].to_owned(), base));
+        }
+        let color = if tag.starts_with('+') {
+            PROJECT_COLOR
+        } else {
+            CONTEXT_COLOR
+        };
+        spans.push(Span::styled(tag.to_owned(), base.fg(color)));
+        end = start + tag.len();
+    }
+    if end < text.len() || spans.is_empty() {
+        spans.push(Span::styled(text[end..].to_owned(), base));
+    }
+    spans
 }
 
 fn editor_item(text: &str) -> ListItem<'static> {
@@ -607,11 +796,19 @@ fn search_description(binding: &ResolvedBinding) -> &'static str {
     }
 }
 
+fn filter_description(binding: &ResolvedBinding) -> &'static str {
+    match binding.id() {
+        BindingId::CommitEdit => "apply filter",
+        BindingId::CancelEdit => "cancel filter",
+        _ => binding.description(),
+    }
+}
+
 fn footer_binding(binding: &ResolvedBinding, mode: Mode) -> String {
-    let description = if mode == Mode::Search {
-        search_description(binding)
-    } else {
-        binding.description()
+    let description = match mode {
+        Mode::Search => search_description(binding),
+        Mode::Filter => filter_description(binding),
+        _ => binding.description(),
     };
     let description = match description.strip_prefix("show ") {
         Some(description) => description,
@@ -625,6 +822,7 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Normal => "NORMAL",
         Mode::Insert => "INSERT",
         Mode::Search => "SEARCH",
+        Mode::Filter => "FILTER",
         Mode::Help => "HELP",
         Mode::Trash => "TRASH",
     }
@@ -667,7 +865,7 @@ mod tests {
                 match id.mode() {
                     crate::app::Mode::Normal => "normal",
                     crate::app::Mode::Insert => "insert",
-                    crate::app::Mode::Search => "insert",
+                    crate::app::Mode::Search | crate::app::Mode::Filter => "insert",
                     crate::app::Mode::Help => "help",
                     crate::app::Mode::Trash => "trash",
                 },
@@ -1004,6 +1202,46 @@ mod tests {
 
         assert!(text.contains("task 9"));
         assert!(!text.contains("task 0"));
+    }
+
+    #[test]
+    fn list_should_scroll_the_same_window_for_every_selection_and_detached_add() {
+        let mut list = TaskList::new(ListScope::Global);
+        for index in 0..30 {
+            list.add(&format!("(A) task {index} +p")).unwrap();
+        }
+        let mut app = App::new(list);
+        // At 40x10 the list has rows 2 to 8; the selection scrolls into the last row.
+        let rows = 2..9_u16;
+        let height = rows.len();
+        for selected in 0..30_usize {
+            let buffer = render_app(&app, 40, 10);
+            let first = (selected + 1).saturating_sub(height);
+            for (offset, row) in rows.clone().enumerate() {
+                let marker = if first + offset == selected {
+                    "› "
+                } else {
+                    "  "
+                };
+                assert_eq!(
+                    buffer_row(&buffer, 40, row).trim_end(),
+                    format!("{marker}○ (A) task {} +p", first + offset),
+                    "selection {selected}, row {row}"
+                );
+            }
+            app.apply(Action::MoveDown).unwrap();
+        }
+        app.apply(Action::StartAdd).unwrap();
+        type_text(&mut app, "new");
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &Keymap::defaults()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer_row(buffer, 40, 2).trim_end(), "  ○ (A) task 24 +p");
+        assert_eq!(buffer_row(buffer, 40, 8).trim_end(), "› ○ new");
+        terminal.backend_mut().assert_cursor_position((7, 8));
     }
 
     #[test]
@@ -1378,6 +1616,364 @@ mod tests {
         assert!(help.contains("Shift-Tab previous view"));
         assert!(help.contains("Enter apply search"));
         assert!(help.contains("Esc cancel search"));
+    }
+
+    /// A row as displayed: the blank cell after each wide character is skipped.
+    fn display_row(buffer: &Buffer, row: u16) -> String {
+        let mut text = String::new();
+        let mut column = 0;
+        while column < buffer.area.width {
+            let symbol = buffer[(column, row)].symbol();
+            text.push_str(symbol);
+            column += u16::try_from(super::text_width(symbol)).unwrap().max(1);
+        }
+        text
+    }
+
+    fn row_cells(buffer: &Buffer, row: u16, text: &str) -> Vec<Cell> {
+        let width = buffer.area.width;
+        let line = buffer_row(buffer, width, row);
+        let start = line
+            .find(text)
+            .unwrap_or_else(|| panic!("{text:?} not in {line:?}"));
+        let column = line[..start].chars().count() as u16;
+        (column..column + text.chars().count() as u16)
+            .map(|x| buffer[(x, row)].clone())
+            .collect()
+    }
+
+    #[test]
+    fn rows_should_style_priority_and_tags_in_place_and_leave_stripped_punctuation_plain() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("(A) Ship +shtodo. @laptop x+y").unwrap();
+        list.add("plain (B) text").unwrap();
+        let app = App::new(list);
+        let buffer = render_app(&app, 80, 12);
+
+        assert!(buffer_row(&buffer, 80, 2).contains("○ (A) Ship +shtodo. @laptop x+y"));
+        let cells = row_cells(&buffer, 2, "(A) Ship +shtodo. @laptop x+y");
+        let bold = |cell: &Cell| cell.modifier.contains(Modifier::BOLD);
+        assert!(cells[..3].iter().all(bold));
+        assert!(!bold(&cells[3]));
+        assert!(
+            cells[4..8]
+                .iter()
+                .all(|cell| !bold(cell) && cell.fg == Color::Reset)
+        );
+        assert!(cells[9..16].iter().all(|cell| cell.fg == Color::Cyan));
+        assert_eq!(cells[16].symbol(), ".");
+        assert_eq!(cells[16].fg, Color::Reset);
+        assert!(cells[18..25].iter().all(|cell| cell.fg == Color::Magenta));
+        assert!(cells[26..].iter().all(|cell| cell.fg == Color::Reset));
+        let plain = row_cells(&buffer, 3, "plain (B) text");
+        assert!(
+            plain
+                .iter()
+                .all(|cell| !bold(cell) && cell.fg == Color::Reset)
+        );
+    }
+
+    #[test]
+    fn completed_and_trash_rows_should_style_tokens_and_keep_completed_style_on_every_span() {
+        let mut list = TaskList::new(ListScope::Global);
+        let done = list.add("(C) done +proj @ctx").unwrap();
+        list.toggle_complete(done).unwrap();
+        let deleted = list.add("(Z) gone +old!").unwrap();
+        list.delete(deleted).unwrap();
+        let mut app = App::new(list);
+        let buffer = render_app(&app, 80, 12);
+
+        let cells = row_cells(&buffer, 2, "(C) done +proj @ctx");
+        for cell in &cells {
+            assert!(
+                cell.modifier
+                    .contains(Modifier::DIM | Modifier::CROSSED_OUT),
+                "{cell:?}"
+            );
+        }
+        assert!(
+            cells[..3]
+                .iter()
+                .all(|cell| cell.modifier.contains(Modifier::BOLD))
+        );
+        assert!(cells[9..14].iter().all(|cell| cell.fg == Color::Cyan));
+        assert!(cells[15..].iter().all(|cell| cell.fg == Color::Magenta));
+
+        app.apply(Action::OpenTrash).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        assert!(buffer_row(&buffer, 80, 1).contains("2  open  (Z) gone +old!"));
+        let cells = row_cells(&buffer, 1, "(Z) gone +old!");
+        assert!(
+            cells[..3]
+                .iter()
+                .all(|cell| cell.modifier.contains(Modifier::BOLD))
+        );
+        assert!(cells[9..13].iter().all(|cell| cell.fg == Color::Cyan));
+        assert_eq!(cells[13].fg, Color::Reset);
+    }
+
+    #[test]
+    fn status_line_should_drop_sort_first_then_truncate_the_filter_and_keep_the_count() {
+        use super::status_line;
+
+        assert_eq!(status_line(3, "", None, false, 40), " · 3 matches · /");
+        assert_eq!(
+            status_line(3, "café", None, false, 40),
+            " · 3 matches · /café"
+        );
+        assert_eq!(
+            status_line(2, "", Some("+shtodo A-B"), true, 60),
+            " · 2 matches · f:+shtodo A-B · by priority"
+        );
+        assert_eq!(
+            status_line(2, "x", Some("+shtodo"), true, 60),
+            " · 2 matches · /x · f:+shtodo · by priority"
+        );
+        assert_eq!(
+            status_line(2, "", None, true, 40),
+            " · 2 matches · by priority"
+        );
+        assert_eq!(
+            status_line(2, "", Some("+shtodo A-B"), true, 30),
+            " · 2 matches · f:+shtodo A-B"
+        );
+        assert_eq!(
+            status_line(2, "", Some("+shtodo A-B"), true, 21),
+            " · 2 matches · f:+sh…"
+        );
+        assert_eq!(status_line(2, "", None, true, 21), " · 2 matches");
+        assert_eq!(
+            status_line(2, "", Some("+東京 +x"), false, 21),
+            " · 2 matches · f:+東…"
+        );
+        assert_eq!(
+            status_line(10_000, "", Some("+x A"), false, 22),
+            " · 10000 matches · f:…"
+        );
+        assert_eq!(
+            status_line(10_000, "", Some("+x A"), false, 21),
+            " · 10000 matches"
+        );
+        assert_eq!(
+            status_line(10_000, "query", None, true, 10),
+            " · 10000 matches · /query"
+        );
+    }
+
+    fn prioritized() -> App {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in ["plain one", "(B) b first", "(A) a open"] {
+            list.add(text).unwrap();
+        }
+        App::new(list)
+    }
+
+    #[test]
+    fn priority_sort_should_render_sorted_rows_and_a_status_segment_dropped_first_when_narrow() {
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        assert!(
+            buffer_row(&buffer, 80, 1).contains("[All]│ Open │ Done  · 3 matches · by priority"),
+            "{}",
+            buffer_row(&buffer, 80, 1)
+        );
+        assert!(buffer_row(&buffer, 80, 2).contains("○ (A) a open"));
+        assert!(buffer_row(&buffer, 80, 3).contains("○ (B) b first"));
+        assert!(buffer_row(&buffer, 80, 4).contains("› ○ plain one"));
+
+        let narrow = render_app(&app, 40, 8);
+        let status = buffer_row(&narrow, 40, 1);
+        assert!(status.contains(" · 3 matches"), "{status}");
+        assert!(!status.contains("by priority"));
+        assert!(!status.contains('/'));
+        app.apply(Action::ToggleSort).unwrap();
+        assert!(buffer_row(&render_app(&app, 80, 12), 80, 1).contains(" · 3 matches · /"));
+    }
+
+    #[test]
+    fn sorted_reorder_notice_and_help_should_name_the_configured_sort_key() {
+        for (keymap, key) in [
+            (Keymap::defaults(), "s"),
+            (
+                Keymap::with_overrides(&[override_for(BindingId::ToggleSort, &["o"])]).unwrap(),
+                "o",
+            ),
+        ] {
+            let mut app = prioritized();
+            app.apply(Action::ToggleSort).unwrap();
+            app.apply(Action::MoveTaskUp).unwrap();
+            let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+            assert!(
+                footer.contains(&format!(
+                    "NORMAL  Reorder uses manual order; press {key} to switch"
+                )),
+                "{footer}"
+            );
+            app.apply(Action::OpenHelp).unwrap();
+            let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+            assert!(
+                help.contains(&format!("{key} toggle priority sort")),
+                "{help}"
+            );
+        }
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::StartSearch, &["s"])]).unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+        assert!(help.contains("Unbound: toggle_sort (config)"));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+    }
+
+    #[test]
+    fn filter_editor_should_render_hint_above_footer_and_keep_list_rows_at_minimum_size() {
+        let mut list = TaskList::new(ListScope::Global);
+        for letter in ['a', 'b', 'c', 'd', 'e', 'f'] {
+            list.add(&format!("task {letter} +東京 +東京{letter}"))
+                .unwrap();
+        }
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "+東京 +東京 +東");
+        let keymap = Keymap::defaults();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| render(frame, &app, &keymap)).unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor.y, 1);
+        assert!(cursor.x < 40);
+        let buffer = terminal.backend().buffer().clone();
+        let row = |index| display_row(&buffer, index);
+        assert!(row(1).contains(" · 6 matches · f:"), "{}", row(1));
+        assert!(row(1).trim_end().ends_with("+東"), "{}", row(1));
+        for index in 2..=5 {
+            assert!(row(index).contains("task "), "row {index}: {}", row(index));
+        }
+        assert!(row(6).starts_with("+東京 6 · +東京a 1 · "), "{}", row(6));
+        assert!(row(6).trim_end().ends_with(" · …"), "{}", row(6));
+        assert!(!row(6).contains("+東京f"));
+        assert!(
+            row(7).starts_with("FILTER  Enter apply filter"),
+            "{}",
+            row(7)
+        );
+
+        app.apply(Action::CommitEdit).unwrap();
+        assert!(app.notice().is_some());
+        let buffer = render_app(&app, 40, 8);
+        let footer = display_row(&buffer, 7);
+        assert!(
+            footer.starts_with("FILTER  Finish the tag: +東京, +東京a, "),
+            "{footer}"
+        );
+        assert!(footer.trim_end().ends_with('…'), "{footer}");
+        assert!(display_row(&buffer, 6).starts_with("+東京 6 · "));
+
+        app.apply(Action::CancelEdit).unwrap();
+        let buffer = render_app(&app, 40, 8);
+        for index in 2..=6 {
+            assert!(buffer_row(&buffer, 40, index).contains("task "));
+        }
+        assert!(buffer_row(&buffer, 40, 7).starts_with("NORMAL"));
+    }
+
+    #[test]
+    fn filter_hint_should_cut_a_single_wide_entry_and_explain_an_empty_view() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add(&format!("one +{}", "x".repeat(60))).unwrap();
+        list.add("untagged").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        let hint = buffer_row(&render_app(&app, 40, 8), 40, 6);
+        assert_eq!(hint, format!("+{}…", "x".repeat(38)));
+        type_text(&mut app, "+zzz");
+        let hint = buffer_row(&render_app(&app, 40, 8), 40, 6);
+        assert!(hint.starts_with("No tags in this view"), "{hint}");
+    }
+
+    #[test]
+    fn accepted_filter_should_show_status_segment_and_filter_aware_recovery_hints() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("(A) ship +shtodo").unwrap();
+        list.add("plain").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "+shtodo");
+        app.apply(Action::CommitEdit).unwrap();
+        let status = buffer_row(&render_app(&app, 80, 12), 80, 1);
+        assert!(status.contains("Done  · 1 matches · f:+shtodo"), "{status}");
+        app.apply(Action::ToggleSort).unwrap();
+        let status = buffer_row(&render_app(&app, 80, 12), 80, 1);
+        assert!(
+            status.contains(" · 1 matches · f:+shtodo · by priority"),
+            "{status}"
+        );
+        let narrow = buffer_row(&render_app(&app, 40, 8), 40, 1);
+        assert!(narrow.contains(" · 1 matches · f:+sh…"), "{narrow}");
+
+        app.apply(Action::CycleView).unwrap();
+        app.apply(Action::CycleView).unwrap();
+        let text = buffer_text(&render_app(&app, 120, 12));
+        assert!(text.contains("No matching tasks"));
+        assert!(
+            text.contains("Esc clear filter · Tab next view · Shift-Tab previous view · / edit search · f edit filter"),
+            "{text}"
+        );
+        app.apply(Action::StartSearch).unwrap();
+        type_text(&mut app, "zzz");
+        app.apply(Action::CommitEdit).unwrap();
+        let text = buffer_text(&render_app(&app, 120, 12));
+        assert!(text.contains("Esc clear search · Tab next view"));
+        assert!(buffer_row(&render_app(&app, 120, 12), 120, 1).contains("/zzz · f:+shtodo"));
+
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::EditFilter, &["ctrl-f"]),
+            override_for(BindingId::ClearSearch, &["ctrl-g"]),
+        ])
+        .unwrap();
+        app.apply(Action::ClearSearch).unwrap();
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 120, 12));
+        assert!(text.contains("Ctrl-g clear filter"), "{text}");
+        assert!(text.contains("Ctrl-f edit filter"));
+    }
+
+    #[test]
+    fn filter_footer_and_help_should_use_the_configured_filter_keys() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app(&app, 100, 30));
+        assert!(help.contains("f edit filter"), "{help}");
+        app.apply(Action::CloseHelp).unwrap();
+        let normal = buffer_row(&render_app(&app, 200, 12), 200, 11);
+        assert!(
+            normal.contains("s toggle priority sort · f edit filter"),
+            "{normal}"
+        );
+
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::CommitEdit, &["ctrl-s"]),
+            override_for(BindingId::CancelEdit, &["ctrl-g"]),
+        ])
+        .unwrap();
+        app.apply(Action::EditFilter).unwrap();
+        let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+        assert!(
+            footer.starts_with("FILTER  Ctrl-s apply filter · Ctrl-g cancel filter"),
+            "{footer}"
+        );
+        app.apply(Action::CancelEdit).unwrap();
+
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::ToggleComplete, &["f"])]).unwrap();
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+        assert!(help.contains("Unbound: edit_filter (config)"));
+        assert!(help.contains("f toggle complete"));
     }
 
     #[test]

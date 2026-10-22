@@ -265,6 +265,40 @@ class ConcurrentUsage(unittest.TestCase):
                 self.fail(f"filtered reorder did not preserve hidden slots: {rows!r}")
             tui.wait_absent(b"hidden row")
 
+    def test_tag_filter_and_priority_sort_follow_idle_refresh_and_hide_untagged_rows(self):
+        for text in ["plain first", "(B) beta +x", "(C) gamma +x"]:
+            self.assertEqual(cli(self.home, "add", text).returncode, 0)
+
+        def wait_rows(tui, expected):
+            # Rows that mention a fixture word, top to bottom, must equal `expected` exactly.
+            words = ("plain", "alpha", "beta", "gamma")
+            deadline = time.monotonic() + 4
+            while True:
+                rows = ["".join(row) for row in tui.screen[2:-1]]
+                found = [word for row in rows for word in words if word in row]
+                if found == expected:
+                    return
+                if time.monotonic() >= deadline:
+                    self.fail(f"rows {found!r} != {expected!r}: {tui.text()}")
+                tui.drain(0.05)
+
+        with Tui(self.home) as tui:
+            tui.send(b"f")
+            tui.wait_for(b"FILTER")
+            tui.send(b"+x\r")
+            tui.wait_for(b"f:+x")
+            tui.send(b"s")
+            tui.wait_for(b"by priority")
+            wait_rows(tui, ["beta", "gamma"])
+            self.assertEqual(cli(self.home, "add", "(A) alpha +x").returncode, 0)
+            wait_rows(tui, ["alpha", "beta", "gamma"])
+            self.assertEqual(cli(self.home, "edit", "2", "(D) beta +x").returncode, 0)
+            wait_rows(tui, ["alpha", "gamma", "beta"])
+            self.assertEqual(cli(self.home, "edit", "3", "(C) gamma").returncode, 0)
+            wait_rows(tui, ["alpha", "beta"])
+            tui.wait_for(b"2 matches")
+            self.assertIn(b"3  open  (C) gamma", cli(self.home, "list").stdout)
+
     def test_trash_stays_open_and_refreshes_external_restoration_and_new_deletion(self):
         self.seed()
         self.assertEqual(cli(self.home, "delete", "1").returncode, 0)

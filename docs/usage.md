@@ -303,7 +303,7 @@ text; select JSON mode before the command when editing to that text.
 
 ### Interactive editing
 
-The interface has Normal, Insert, Search, Help, and Trash modes. Add or edit
+The interface has Normal, Insert, Search, Filter, Help, and Trash modes. Add or edit
 tasks in Insert mode, then press Enter to save. Task text is trimmed, must be non-empty
 and single-line, and Escape cancels an uncommitted add or edit. A terminal smaller
 than 40 columns by 8 rows displays a resize message until it is large enough.
@@ -318,17 +318,19 @@ mode, saves nothing, and shows `Task text cannot be empty`.
 | ------------- | ----------------------------------------------- |
 | `j` or Down   | Move selection down                             |
 | `k` or Up     | Move selection up                               |
-| `J`           | Move the selected task down                     |
-| `K`           | Move the selected task up                       |
+| `J`           | Move the selected task down (manual order only) |
+| `K`           | Move the selected task up (manual order only)   |
 | `i`           | Add a task                                      |
 | `e`           | Edit the selected task                          |
 | Space         | Toggle the selected task complete or incomplete |
 | `d`           | Delete the selected task                        |
 | `u`           | Restore the most recently deleted task          |
 | `/`           | Enter or refine text search                     |
+| `f`           | Edit the tag and priority filter                |
+| `s`           | Toggle priority order and manual order          |
 | Tab           | Move to the next All, Open, or Done tab          |
 | Shift-Tab     | Move to the previous view tab                    |
-| Esc           | Clear the accepted search, keeping the view     |
+| Esc           | Clear the accepted search; with none, the filter |
 | `t`           | Open trash for the current scope                |
 | `?`           | Open keyboard help                              |
 | `q` or Ctrl-C | Quit                                            |
@@ -354,6 +356,50 @@ Type to enter task text. `q` is ordinary text in this mode.
 On macOS, terminals report Option as Alt when Option is configured as an
 Escape/Meta key. The common Meta-b and Meta-f encodings are supported by the
 Alt-b and Alt-f aliases above.
+
+### Filter mode
+
+Press `f` to edit the filter. Filter mode uses the Insert mode text editing
+keys above, and `q`, `s`, `f`, `/`, and Space are text. The buffer holds
+space-separated tokens with the same grammar as the shell `--tag` and
+`--priority` values: `+project`, `@context`, a priority letter `A`, a range
+`A-C`, or `none`. For example, `+shtodo @laptop A-B` shows tasks with both tags
+and priority `A` or `B`. Tags are combined with AND, priorities with OR. See
+[Priority and tags](#priority-and-tags) and
+[Filtering and sorting the list](#filtering-and-sorting-the-list).
+
+| Key    | Action                                               |
+| ------ | ---------------------------------------------------- |
+| Enter  | Accept the filter, completing a unique tag prefix    |
+| Esc    | Cancel and restore the previous filter and selection |
+| Ctrl-C | Quit                                                 |
+
+The list previews the filter as you type. Completed tokens match exactly. The
+last token, while you are still typing it, matches any tag that starts with
+it, so `+sh` previews both `+shtodo` and `+shell`. A sigil alone (`+` or `@`)
+previews no tag constraint, and a priority token that does not parse yet
+(`A-`) is left out of the preview.
+
+A hint line above the footer lists the tags in the rows matching the view,
+the search, and the completed tokens, with row counts, highest first:
+`+shtodo 12 · +shell 3 · @laptop 2`. While you type a tag, it lists only the
+tags that start with it. `No tags in this view` means those rows have no tags.
+
+Enter resolves the last tag token against the tags in the hint line:
+
+- A tag that is present is accepted as typed. Trailing `.,;:!?` is removed,
+  as for `--tag`.
+- A prefix of exactly one tag is completed to that tag, so `+sh` becomes
+  `+shtodo` when no other tag starts with `+sh`.
+- A prefix of several tags keeps the editor open and shows
+  `Finish the tag: +shtodo, +shell`.
+- A tag that matches nothing is accepted as typed, so you can filter for a tag
+  no task has yet. The list is then empty.
+
+Earlier tokens and priority tokens are never completed. An invalid token, such
+as `foo` or a sigil alone, keeps the editor open with
+`Invalid filter "foo"; use +project, @context, A, A-C, or none`. Accepting an
+empty buffer clears the filter.
 
 ### Help mode
 
@@ -404,14 +450,14 @@ only clears the deletion marker; text, completion, ID, and canonical position
 are preserved. The normal list's `u` still restores the latest remaining
 deletion, including after a restart.
 
-Normal mutation and search keys (`i`, `e`, Space, `d`, `J`, `K`, `u`, `/`,
-Tab, and Shift-Tab) are inactive in trash. Tombstones cannot be edited,
+Normal mutation, search, filter, and sort keys (`i`, `e`, Space, `d`, `J`,
+`K`, `u`, `/`, `f`, `s`, Tab, and Shift-Tab) are inactive in trash. Tombstones cannot be edited,
 completed, reordered, or permanently
 removed from this view. Browse and help actions never save the snapshot.
 
 To change these controls, see [Configuring keybindings].
 
-## Search and task views
+## Search, filters, and task views
 
 Each TUI session starts in All with an empty search. The tab strip highlights
 and brackets the active view, such as `[All]`. Tab moves through All, Open,
@@ -420,34 +466,65 @@ These controls work in Normal mode; accept or cancel an edit before switching
 views. Press `/` to edit the current query. Matches update as you type and
 combine with the active view. Search uses a literal substring of task text
 after Unicode lowercasing; spaces and punctuation are literal, and there are
-no regular expressions, accent normalization, or tags.
+no regular expressions or accent normalization. Search treats `+project` and
+`@context` as plain text; use the filter for exact tags.
 
 Search mode uses the same text editing bindings as Insert mode. Enter accepts
 the query and returns to the list, including an empty query. Escape cancels
 search editing and restores the previous query and selected task. From Normal
 mode, Escape clears an accepted query while keeping Open/Done filtering. `q`,
-`f`, `/`, and Space are text while editing a query; Ctrl-C still quits. All of
+`f`, `s`, `/`, and Space are text while editing a query; Ctrl-C still quits. All of
 these keys follow the configured bindings described in [Configuring keybindings].
 
-The tab strip and status line show the active view, matching count, and
-`/query`, including an empty query. The header's open/done counts cover all
-non-deleted tasks in the scope. An empty list shows `No tasks yet`; a populated
-list whose current view/search matches nothing shows `No matching tasks`. Search and view changes
-are transient, do not save anything, and do not affect `shtodo list` output.
+Press `f` to filter by tag and priority (see [Filter mode](#filter-mode)). The
+view, the search, and the filter combine: a task is shown only if it matches
+all three. For example, Open with `/bug` and `f +shtodo A-B` shows open tasks
+containing `bug`, tagged `+shtodo`, with priority `A` or `B`. In Normal mode
+Escape clears one layer per press: the accepted search first, then the filter.
+The view tab is never cleared by Escape.
 
-Matching tasks retain their manual, canonical order. Navigation and task
-actions operate on those same rows. Selection keeps its task identity while
+The tab strip and status line show the active view, matching count, and
+`/query`, including an empty query. An accepted filter adds `f:` and its
+tokens, and priority order adds `by priority`, for example
+`· 3 matches · /bug · f:+shtodo A-B · by priority`. When a filter or sort is
+shown, an empty query is left out. In a narrow terminal the sort label is
+dropped first, then the filter is shortened with `…`; the count is always
+shown. The header's open/done counts cover all
+non-deleted tasks in the scope. An empty list shows `No tasks yet`; a populated
+list whose current view, search, or filter matches nothing shows
+`No matching tasks`. Search, filter, sort, and view changes are transient,
+start fresh in every session, do not save anything, and do not affect
+`shtodo list` output.
+
+Rows keep their text exactly as typed. A priority marker such as `(A)` is
+bold, `+project` tags are cyan, and `@context` tags are magenta. Completed
+rows are dimmed and struck through, including those spans. Trash rows use the
+same styling.
+
+Matching tasks retain their manual, canonical order unless priority order is
+on. Press `s` to toggle priority order: `A` to `Z`, then tasks without a
+priority, with manual order breaking ties, the same as
+`shtodo list --sort priority`. Open and done tasks are not separated; use the
+Open tab for that. Selection keeps the same task when the order changes.
+Navigation and task actions operate on the displayed rows. Selection keeps its task identity while
 that task still matches. If completion, reopening, editing, or a view change
-hides it, selection moves to the next matching task in canonical order, then
+hides it, selection moves to the next matching task in display order, then
 the previous one. Deletion also selects the next match, then the previous one.
 No matches means no selected task, so navigation, reordering, editing,
 completion, and deletion safely do nothing.
 
-`J`/`K` swap the selected task with its next/previous matching neighbor in
-their existing canonical slots. Hidden tasks and tombstones stay in their
+`J`/`K` reorder only in manual order. In priority order they change nothing
+and show `Reorder uses manual order; press s to switch`, naming the configured
+`toggle_sort` key. In manual order, `J`/`K` swap the selected task with its
+next/previous matching neighbor in their existing canonical slots. With a
+filter, the neighbor is the next or previous task that matches the view,
+search, and filter. If another process changes the list so that neighbor no
+longer matches, the move is refused with `Task order changed; review and
+retry`. Hidden tasks and tombstones stay in their
 slots. This preserves manual ordering without shifting hidden rows. A new or
 restored task is selected if it matches; otherwise the current selection is
-kept and a message explains that the task is hidden by the view/search. `u`
+kept and a message explains that the task is hidden by the current view,
+search, or filter. `u`
 still restores the most recently deleted task even if it will be hidden.
 The completion celebration occurs only when the final actual open task is
 completed, including open tasks hidden by search.

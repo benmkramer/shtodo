@@ -181,7 +181,7 @@ fn doctor_should_summarize_valid_effective_keymap_without_task_storage() {
     assert!(output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains("OK: 35 configurable actions, 47 active bindings")
+            .contains("OK: 37 configurable actions, 49 active bindings")
     );
     assert!(!home.path().join(".shtodo/global").exists());
     assert!(!home.path().join(".shtodo/projects").exists());
@@ -1402,6 +1402,30 @@ fn stored_task_text_at(path: &std::path::Path) -> String {
 }
 
 #[test]
+fn doctor_should_accept_existing_bindings_on_new_sort_and_filter_default_keys() {
+    for config in [
+        "[keybindings.normal]\ntoggle_complete = [\"s\"]\n",
+        "[keybindings.normal]\nstart_search = [\"s\"]\n",
+        "[keybindings.normal]\ntoggle_complete = [\"f\"]\n",
+        "[keybindings.normal]\ncycle_view = [\"f\"]\n",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        write_config(home.path(), config);
+        let output = run_with_home(home.path(), &["doctor"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("OK: 37 configurable actions, 49 active bindings")
+        );
+        assert!(!home.path().join(".shtodo/global").exists());
+    }
+}
+
+#[test]
 fn doctor_should_accept_existing_bindings_on_new_search_default_keys() {
     for config in [
         "[keybindings.normal]\ntoggle_complete = [\"f\"]\n",
@@ -1420,7 +1444,7 @@ fn doctor_should_accept_existing_bindings_on_new_search_default_keys() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("35 configurable actions"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("37 configurable actions"));
         assert_eq!(
             std::fs::read_to_string(home.path().join(".shtodo/config.toml")).unwrap(),
             config

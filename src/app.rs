@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use crate::{
     action::Action,
+    metadata::{self, FilterToken, TaskFilter},
     mutation::{ConflictKind, Mutation, Outcome, TaskObservation},
-    projection::Projection,
+    projection::{self, Projection, TaskOrder},
     task::{ListError, MoveDirection, Task, TaskId, TaskList},
 };
 
@@ -12,6 +15,7 @@ pub(crate) enum Mode {
     Normal,
     Insert,
     Search,
+    Filter,
     Help,
     Trash,
 }
@@ -23,6 +27,7 @@ pub(crate) enum EditKind {
     Add,
     Edit(TaskId),
     Search,
+    Filter,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -226,6 +231,67 @@ struct TrashState {
     selected: Option<TaskId>,
 }
 
+/// A footer notice that names a configured key, so the UI renders its text from the keymap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Notice {
+    /// Reorder was requested while the list is sorted by priority.
+    ManualOrderRequired,
+    /// Enter on a tag prefix shared by these tags, in hint-line order.
+    FinishTag(Vec<String>),
+}
+
+/// Filter-mode preview. It never leaves `App`, so no shell or `Mutation` value can carry it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FilterPreview {
+    exact: TaskFilter,
+    /// The trailing tag token with trailing `.,;:!?` stripped, as for `--tag` values.
+    trailing_prefix: Option<String>,
+}
+
+impl FilterPreview {
+    fn matches(&self, text: &str) -> bool {
+        self.exact.matches(text)
+            && self
+                .trailing_prefix
+                .as_deref()
+                .is_none_or(|prefix| metadata::tags(text).any(|tag| tag.starts_with(prefix)))
+    }
+}
+
+struct FilterSession {
+    selected: Option<TaskId>,
+    preview: FilterPreview,
+    /// The buffer's completed tokens: the rows the hint line counts and Enter completes from.
+    completed: TaskFilter,
+    /// Tag counts for `completed`, kept across keystrokes that only extend the trailing token.
+    tag_counts: Vec<(String, usize)>,
+}
+
+/// Splits a filter buffer into completed tokens and the trailing token still being typed.
+fn split_filter_buffer(buffer: &str) -> (Vec<&str>, Option<&str>) {
+    let mut tokens = buffer.split_whitespace().collect::<Vec<_>>();
+    let trailing = if buffer.ends_with(char::is_whitespace) {
+        None
+    } else {
+        tokens.pop()
+    };
+    (tokens, trailing)
+}
+
+fn parse_filter_tokens<'a>(tokens: &[&'a str]) -> Result<TaskFilter, &'a str> {
+    let mut filter = TaskFilter::default();
+    for token in tokens {
+        filter.add(metadata::parse_filter_token(token).ok_or(*token)?);
+    }
+    Ok(filter)
+}
+
+fn invalid_filter(token: &str) -> String {
+    format!("Invalid filter \"{token}\"; use +project, @context, A, A-C, or none")
+}
+
+const HIDDEN: &str = "hidden by the current view, search, or filter";
+
 pub(crate) struct App {
     tasks: TaskList,
     mode: Mode,
@@ -233,9 +299,16 @@ pub(crate) struct App {
     trash: Option<TrashState>,
     editor: Option<Editor>,
     message: Option<String>,
+    notice: Option<Notice>,
     celebration: Option<Celebration>,
     query: String,
     projection: Projection,
+    /// The accepted filter's normalized tokens, as shown in the status line and editor.
+    filter_text: String,
+    filter_session: Option<FilterSession>,
+    order: TaskOrder,
+    /// Canonical indices of live tasks in Priority order; rebuilt when tasks or order change.
+    sorted: Option<Vec<usize>>,
     search_session: Option<SearchSession>,
     pending: Option<Mutation>,
     storage_error: Option<String>,
@@ -257,9 +330,14 @@ impl App {
             trash: None,
             editor: None,
             message: None,
+            notice: None,
             celebration: None,
             query: String::new(),
             projection: Projection::default(),
+            filter_text: String::new(),
+            filter_session: None,
+            order: TaskOrder::Manual,
+            sorted: None,
             search_session: None,
             pending: None,
             storage_error: None,
@@ -308,6 +386,7 @@ impl App {
             Mode::Normal => self.apply_normal(action),
             Mode::Insert => self.apply_insert(action),
             Mode::Search => self.apply_search(action),
+            Mode::Filter => self.apply_filter(action),
             Mode::Help => self.apply_help(action),
             Mode::Trash => self.apply_trash(action),
         }
@@ -347,13 +426,106 @@ impl App {
         &self.query
     }
 
-    /// The transient TUI projection, in canonical order. Storage visibility stays unchanged.
+    /// The accepted filter; the Filter-mode preview never replaces it.
+    pub(crate) fn filter(&self) -> &TaskFilter {
+        &self.projection.filter
+    }
+
+    pub(crate) fn filter_text(&self) -> &str {
+        &self.filter_text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn filter_preview(&self) -> Option<&FilterPreview> {
+        self.filter_session.as_ref().map(|session| &session.preview)
+    }
+
+    /// Filter mode's tag discovery: distinct tags with row counts, highest first, then by name.
+    pub(crate) fn filter_hint(&self) -> Option<Vec<(&str, usize)>> {
+        let session = self.filter_session.as_ref()?;
+        let prefix = session.preview.trailing_prefix.as_deref().unwrap_or("");
+        Some(
+            session
+                .tag_counts
+                .iter()
+                .filter(|(tag, _)| tag.starts_with(prefix))
+                .map(|(tag, count)| (tag.as_str(), *count))
+                .collect(),
+        )
+    }
+
+    fn refresh_tag_counts(&mut self) {
+        let Some(session) = &self.filter_session else {
+            return;
+        };
+        let counts = self
+            .tag_counts(&session.completed)
+            .into_iter()
+            .map(|(tag, count)| (tag.to_owned(), count))
+            .collect();
+        if let Some(session) = &mut self.filter_session {
+            session.tag_counts = counts;
+        }
+    }
+
+    /// Tags in rows matching the view, the search, and `filter`, ignoring any preview prefix.
+    fn tag_counts(&self, filter: &TaskFilter) -> Vec<(&str, usize)> {
+        let mut counts = HashMap::<&str, usize>::new();
+        for task in self.tasks.visible_tasks().filter(|task| {
+            projection::matches_with(task, &self.projection, |text| filter.matches(text))
+        }) {
+            for tag in metadata::distinct_tags(task.text()) {
+                *counts.entry(tag).or_default() += 1;
+            }
+        }
+        let mut counts = counts.into_iter().collect::<Vec<_>>();
+        counts.sort_unstable_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
+        counts
+    }
+
+    pub(crate) fn order(&self) -> TaskOrder {
+        self.order
+    }
+
+    /// The transient TUI projection, in display order. Storage visibility stays unchanged.
     pub(crate) fn visible_tasks(&self) -> impl Iterator<Item = &Task> {
-        self.tasks.visible_tasks().filter(|task| self.matches(task))
+        self.ordered_live_tasks().filter(|task| self.matches(task))
+    }
+
+    /// Live tasks in display order: canonical, or the cached Priority order.
+    fn ordered_live_tasks(&self) -> impl Iterator<Item = &Task> {
+        let tasks = self.tasks.tasks();
+        let sorted = self.sorted.as_deref();
+        let canonical = sorted.is_none().then(|| self.tasks.visible_tasks());
+        sorted
+            .into_iter()
+            .flatten()
+            .map(move |&index| &tasks[index])
+            .chain(canonical.into_iter().flatten())
+    }
+
+    fn rebuild_order(&mut self) {
+        self.sorted = (self.order == TaskOrder::Priority).then(|| {
+            let mut live = self
+                .tasks
+                .tasks()
+                .iter()
+                .enumerate()
+                .filter(|(_, task)| !task.is_deleted())
+                .collect::<Vec<_>>();
+            // Stable, like `projection::sort_by_priority`: equal keys keep canonical order.
+            live.sort_by_key(|(_, task)| projection::priority_key(task));
+            live.into_iter().map(|(index, _)| index).collect()
+        });
     }
 
     fn matches(&self, task: &Task) -> bool {
-        self.projection.matches(task)
+        match &self.filter_session {
+            Some(session) => projection::matches_with(task, &self.projection, |text| {
+                session.preview.matches(text)
+            }),
+            None => self.projection.matches(task),
+        }
     }
 
     pub(crate) fn tasks(&self) -> &TaskList {
@@ -362,6 +534,10 @@ impl App {
 
     pub(crate) fn editor(&self) -> Option<&Editor> {
         self.editor.as_ref()
+    }
+
+    pub(crate) fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
     }
 
     pub(crate) fn message(&self) -> Option<&str> {
@@ -402,6 +578,8 @@ impl App {
                 | Action::CycleView
                 | Action::PreviousView
                 | Action::ClearSearch
+                | Action::ToggleSort
+                | Action::EditFilter
                 | Action::OpenTrash
                 | Action::OpenHelp
                 | Action::Quit
@@ -424,6 +602,8 @@ impl App {
             Action::CycleView => self.cycle_view(MoveDirection::Down),
             Action::PreviousView => self.cycle_view(MoveDirection::Up),
             Action::ClearSearch => self.clear_search(),
+            Action::ToggleSort => self.toggle_sort(),
+            Action::EditFilter => self.start_filter(),
             Action::OpenTrash => self.open_trash(),
             Action::OpenHelp => self.open_help(),
             Action::Quit => Transition::Quit,
@@ -595,6 +775,170 @@ impl App {
         }
     }
 
+    fn apply_filter(&mut self, action: Action) -> Result<Transition, ListError> {
+        match action {
+            Action::CommitEdit => {
+                let message_was_cleared = self.clear_message();
+                Ok(Self::after_message_clear(
+                    self.commit_filter(),
+                    message_was_cleared,
+                ))
+            }
+            Action::CancelEdit => {
+                if let Some(session) = self.filter_session.take() {
+                    self.selected = session.selected;
+                }
+                self.clear_message();
+                self.mode = Mode::Normal;
+                self.editor = None;
+                self.reconcile_selection();
+                Ok(Transition::Transient)
+            }
+            _ => {
+                let transition = self.apply_insert(action)?;
+                if transition == Transition::Transient {
+                    self.update_filter_preview();
+                }
+                Ok(transition)
+            }
+        }
+    }
+
+    fn start_filter(&mut self) -> Transition {
+        let buffer = if self.filter_text.is_empty() {
+            String::new()
+        } else {
+            // A trailing space keeps every accepted token exact while the editor is open.
+            format!("{} ", self.filter_text)
+        };
+        self.filter_session = Some(FilterSession {
+            selected: self.selected,
+            preview: FilterPreview {
+                exact: self.projection.filter.clone(),
+                trailing_prefix: None,
+            },
+            completed: self.projection.filter.clone(),
+            tag_counts: Vec::new(),
+        });
+        self.refresh_tag_counts();
+        self.editor = Some(Editor {
+            kind: EditKind::Filter,
+            cursor: buffer.len(),
+            buffer,
+            original: None,
+            conflicted: false,
+            invalidated: false,
+        });
+        self.mode = Mode::Filter;
+        Transition::Transient
+    }
+
+    /// Completed tokens are exact; a trailing tag token matches by prefix. An invalid completed
+    /// token keeps the last valid preview and is named in the message slot.
+    fn update_filter_preview(&mut self) {
+        let Some(editor) = &self.editor else {
+            return;
+        };
+        let (tokens, trailing) = split_filter_buffer(&editor.buffer);
+        let completed = match parse_filter_tokens(&tokens) {
+            Ok(filter) => filter,
+            Err(token) => {
+                self.message = Some(invalid_filter(token));
+                return;
+            }
+        };
+        let mut exact = completed.clone();
+        let mut trailing_prefix = None;
+        match trailing.and_then(metadata::parse_filter_token) {
+            Some(FilterToken::Tag(tag)) => trailing_prefix = Some(tag.to_owned()),
+            Some(token) => exact.add(token),
+            None => {}
+        }
+        let mut recount = false;
+        if let Some(session) = &mut self.filter_session {
+            session.preview = FilterPreview {
+                exact,
+                trailing_prefix,
+            };
+            recount = session.completed != completed;
+            session.completed = completed;
+        }
+        if recount {
+            self.refresh_tag_counts();
+        }
+        self.reconcile_selection();
+    }
+
+    /// Enter: a trailing tag that is present is kept, a unique prefix is completed, an ambiguous
+    /// one is refused, and an unknown one is accepted as typed. Other tokens are never changed.
+    fn commit_filter(&mut self) -> Transition {
+        let Some(editor) = &self.editor else {
+            return Transition::Unchanged;
+        };
+        let (tokens, trailing) = split_filter_buffer(&editor.buffer);
+        let completed = match parse_filter_tokens(&tokens) {
+            Ok(filter) => filter,
+            Err(token) => {
+                self.message = Some(invalid_filter(token));
+                return Transition::Transient;
+            }
+        };
+        let mut words = tokens
+            .iter()
+            .map(|token| match metadata::parse_filter_token(token) {
+                Some(FilterToken::Tag(tag)) => tag.to_owned(),
+                _ => (*token).to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let mut filter = completed.clone();
+        if let Some(token) = trailing {
+            match metadata::parse_filter_token(token) {
+                None => {
+                    self.message = Some(invalid_filter(token));
+                    return Transition::Transient;
+                }
+                Some(FilterToken::Tag(tag)) => match self.resolve_tag(&completed, tag) {
+                    Ok(tag) => {
+                        filter.add(FilterToken::Tag(&tag));
+                        words.push(tag);
+                    }
+                    Err(candidates) => {
+                        self.notice = Some(Notice::FinishTag(candidates));
+                        return Transition::Transient;
+                    }
+                },
+                Some(priorities) => {
+                    filter.add(priorities);
+                    words.push(token.to_owned());
+                }
+            }
+        }
+        self.projection.filter = filter;
+        self.filter_text = words.join(" ");
+        self.filter_session = None;
+        self.editor = None;
+        self.mode = Mode::Normal;
+        self.reconcile_selection();
+        Transition::Transient
+    }
+
+    fn resolve_tag(&self, completed: &TaskFilter, tag: &str) -> Result<String, Vec<String>> {
+        let counts = self.tag_counts(completed);
+        if counts.iter().any(|(present, _)| *present == tag) {
+            return Ok(tag.to_owned());
+        }
+        let mut candidates = counts
+            .into_iter()
+            .filter(|(present, _)| present.starts_with(tag))
+            .map(|(present, _)| present.to_owned())
+            .collect::<Vec<_>>();
+        match candidates.len() {
+            0 => Ok(tag.to_owned()),
+            1 => Ok(candidates.remove(0)),
+            _ => Err(candidates),
+        }
+    }
+
     fn start_search(&mut self) -> Transition {
         self.search_session = Some(SearchSession {
             query: self.query.clone(),
@@ -621,43 +965,83 @@ impl App {
         Transition::Transient
     }
 
+    /// Layered: clears the search first; with no search, clears the filter.
     fn clear_search(&mut self) -> Transition {
-        if self.query.is_empty() {
+        if !self.query.is_empty() {
+            self.query.clear();
+            self.projection.lowercase_query.clear();
+        } else if !self.projection.filter.is_empty() {
+            self.projection.filter = TaskFilter::default();
+            self.filter_text.clear();
+        } else {
             return Transition::Unchanged;
         }
-        self.query.clear();
-        self.projection.lowercase_query.clear();
         self.reconcile_selection();
         Transition::Transient
     }
 
-    /// Keep identity when possible, otherwise choose the next match, then the previous one.
+    fn toggle_sort(&mut self) -> Transition {
+        self.order = match self.order {
+            TaskOrder::Manual => TaskOrder::Priority,
+            TaskOrder::Priority => TaskOrder::Manual,
+        };
+        self.rebuild_order();
+        self.reconcile_selection();
+        Transition::Transient
+    }
+
     fn reconcile_selection(&mut self) {
+        self.selected = self.reconciled_selection();
+    }
+
+    /// Keep identity when possible, otherwise choose the next match, then the previous one,
+    /// in display order.
+    fn reconciled_selection(&self) -> Option<TaskId> {
         let mut previous = None;
         let mut passed_selected = self.selected.is_none();
-        for task in self.tasks.visible_tasks() {
+        for task in self.ordered_live_tasks() {
             if Some(task.id()) == self.selected {
                 if self.matches(task) {
-                    return;
+                    return self.selected;
                 }
                 passed_selected = true;
             } else if self.matches(task) {
                 if passed_selected {
-                    self.selected = Some(task.id());
-                    return;
+                    return Some(task.id());
                 }
                 previous = Some(task.id());
             }
         }
-        self.selected = previous;
+        previous
     }
 
+    /// Canonical neighbor in the projection; reorder and the reorder guard use this.
     fn adjacent_visible(&self, selected: TaskId, direction: MoveDirection) -> Option<TaskId> {
         self.projection.adjacent(&self.tasks, selected, direction)
     }
 
+    /// Neighbor in display order, for selection movement.
+    fn adjacent_displayed(&self, selected: TaskId, direction: MoveDirection) -> Option<TaskId> {
+        if self.sorted.is_none() {
+            return self.adjacent_visible(selected, direction);
+        }
+        let mut previous = None;
+        let mut tasks = self.visible_tasks();
+        while let Some(task) = tasks.next() {
+            if task.id() == selected {
+                return match direction {
+                    MoveDirection::Up => previous,
+                    MoveDirection::Down => tasks.next().map(Task::id),
+                };
+            }
+            previous = Some(task.id());
+        }
+        None
+    }
+
     fn clear_message(&mut self) -> bool {
-        self.message.take().is_some()
+        let notice_was_cleared = self.notice.take().is_some();
+        self.message.take().is_some() || notice_was_cleared
     }
 
     fn after_message_clear(transition: Transition, message_was_cleared: bool) -> Transition {
@@ -675,7 +1059,7 @@ impl App {
         let Some(selected) = self.selected else {
             return Transition::Unchanged;
         };
-        let Some(next) = self.adjacent_visible(selected, direction) else {
+        let Some(next) = self.adjacent_displayed(selected, direction) else {
             return Transition::Unchanged;
         };
         self.selected = Some(next);
@@ -692,6 +1076,11 @@ impl App {
     }
 
     fn move_task(&mut self, direction: MoveDirection) -> Result<Transition, ListError> {
+        if self.order == TaskOrder::Priority {
+            // A swap in priority order has no canonical meaning, so no mutation is submitted.
+            self.notice = Some(Notice::ManualOrderRequired);
+            return Ok(Transition::Transient);
+        }
         let Some(id) = self.selected else {
             return Ok(Transition::Unchanged);
         };
@@ -750,6 +1139,8 @@ impl App {
             })
             .unwrap_or(0);
         self.tasks = tasks;
+        self.rebuild_order();
+        self.refresh_tag_counts();
         if !self
             .selected
             .is_some_and(|id| self.tasks.task(id).is_some_and(|task| self.matches(task)))
@@ -848,12 +1239,10 @@ impl App {
                 } else {
                     "Restored"
                 };
-                self.message = Some(format!(
-                    "{action} task is hidden by the current view/search"
-                ));
+                self.message = Some(format!("{action} task is {HIDDEN}"));
             }
         } else if matches!(request, Mutation::EditText { .. }) && !visible {
-            self.message = Some("Edited task is hidden by the current view/search".into());
+            self.message = Some(format!("Edited task is {HIDDEN}"));
         }
         if matches!(request, Mutation::Add(_) | Mutation::EditText { .. }) {
             dirty |= self.editor.is_some();
@@ -993,7 +1382,7 @@ impl App {
     }
 
     fn insert_char(&mut self, character: char) -> Transition {
-        if !matches!(self.mode, Mode::Insert | Mode::Search) {
+        if !matches!(self.mode, Mode::Insert | Mode::Search | Mode::Filter) {
             return Transition::Unchanged;
         }
         let Some(editor) = self.editor.as_mut() else {
@@ -1004,7 +1393,7 @@ impl App {
     }
 
     fn move_cursor_left(&mut self) -> Transition {
-        if !matches!(self.mode, Mode::Insert | Mode::Search) {
+        if !matches!(self.mode, Mode::Insert | Mode::Search | Mode::Filter) {
             return Transition::Unchanged;
         }
         let Some(editor) = self.editor.as_mut() else {
@@ -1018,7 +1407,7 @@ impl App {
     }
 
     fn move_cursor_right(&mut self) -> Transition {
-        if !matches!(self.mode, Mode::Insert | Mode::Search) {
+        if !matches!(self.mode, Mode::Insert | Mode::Search | Mode::Filter) {
             return Transition::Unchanged;
         }
         let Some(editor) = self.editor.as_mut() else {
@@ -1032,7 +1421,7 @@ impl App {
     }
 
     fn move_cursor_start(&mut self) -> Transition {
-        if !matches!(self.mode, Mode::Insert | Mode::Search) {
+        if !matches!(self.mode, Mode::Insert | Mode::Search | Mode::Filter) {
             return Transition::Unchanged;
         }
         let Some(editor) = self.editor.as_mut() else {
@@ -1046,7 +1435,7 @@ impl App {
     }
 
     fn move_cursor_end(&mut self) -> Transition {
-        if !matches!(self.mode, Mode::Insert | Mode::Search) {
+        if !matches!(self.mode, Mode::Insert | Mode::Search | Mode::Filter) {
             return Transition::Unchanged;
         }
         let Some(editor) = self.editor.as_mut() else {
@@ -1082,7 +1471,7 @@ impl App {
     }
 
     fn delete_before_cursor(&mut self) -> Transition {
-        if !matches!(self.mode, Mode::Insert | Mode::Search) {
+        if !matches!(self.mode, Mode::Insert | Mode::Search | Mode::Filter) {
             return Transition::Unchanged;
         }
         let Some(editor) = self.editor.as_mut() else {
@@ -1096,7 +1485,7 @@ impl App {
     }
 
     fn delete_at_cursor(&mut self) -> Transition {
-        if !matches!(self.mode, Mode::Insert | Mode::Search) {
+        if !matches!(self.mode, Mode::Insert | Mode::Search | Mode::Filter) {
             return Transition::Unchanged;
         }
         let Some(editor) = self.editor.as_mut() else {
@@ -1162,7 +1551,7 @@ impl App {
                     original: editor.original.clone(),
                 }
             }
-            EditKind::Search => return Ok(Transition::Unchanged),
+            EditKind::Search | EditKind::Filter => return Ok(Transition::Unchanged),
         };
         Ok(self.submit(request))
     }
@@ -2222,7 +2611,7 @@ mod view_tests {
         assert!(!app.tasks().task(hidden).unwrap().is_deleted());
         assert_eq!(
             app.message(),
-            Some("Restored task is hidden by the current view/search")
+            Some("Restored task is hidden by the current view, search, or filter")
         );
     }
 
@@ -2259,7 +2648,7 @@ mod view_tests {
         assert_eq!(app.tasks().task(hidden).unwrap().text(), "hidden");
         assert_eq!(
             app.message(),
-            Some("Edited task is hidden by the current view/search")
+            Some("Edited task is hidden by the current view, search, or filter")
         );
         app.apply(Action::StartEdit).unwrap();
         replace_buffer(&mut app, "MATCH still here");
@@ -2279,7 +2668,7 @@ mod view_tests {
         assert_eq!(app.selected(), Some(original));
         assert_eq!(
             app.message(),
-            Some("Added task is hidden by the current view/search")
+            Some("Added task is hidden by the current view, search, or filter")
         );
         app.apply(Action::StartAdd).unwrap();
         replace_buffer(&mut app, "match new");
@@ -2370,5 +2759,637 @@ mod view_tests {
         }
         assert_eq!(app.tasks(), &snapshot);
         assert!(app.selected_task().is_none());
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::{App, Mode, Notice, TaskView, Transition};
+    use crate::{
+        action::Action,
+        projection::TaskOrder,
+        task::{ListScope, TaskId, TaskList},
+    };
+
+    fn visible_ids(app: &App) -> Vec<u64> {
+        app.visible_tasks().map(|task| task.id().get()).collect()
+    }
+
+    fn id(value: u64) -> TaskId {
+        TaskId::from_shell_integer(value).unwrap()
+    }
+
+    /// Canonical 1..=5; Priority order is 3, 5, 2, 4, 1.
+    fn prioritized() -> App {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "plain one",
+            "(B) b first",
+            "(A) a open",
+            "(B) b second",
+            "(A) a done",
+        ] {
+            list.add(text).unwrap();
+        }
+        list.set_completed(id(5), true).unwrap();
+        App::new(list)
+    }
+
+    #[test]
+    fn priority_sort_should_follow_displayed_order_and_keep_selection_identity() {
+        let mut app = prioritized();
+        assert_eq!(app.order(), TaskOrder::Manual);
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(2)));
+        let before = app.tasks().clone();
+
+        assert_eq!(
+            app.apply(Action::ToggleSort).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.order(), TaskOrder::Priority);
+        assert_eq!(visible_ids(&app), [3, 5, 2, 4, 1]);
+        assert_eq!(app.selected(), Some(id(2)));
+        for expected in [4, 1] {
+            assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Transient);
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Unchanged);
+        for expected in [4, 2, 5, 3] {
+            app.apply(Action::MoveUp).unwrap();
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Unchanged);
+
+        app.apply(Action::CycleView).unwrap();
+        assert_eq!(visible_ids(&app), [3, 2, 4, 1]);
+        assert_eq!(app.selected(), Some(id(3)));
+        app.apply(Action::StartSearch).unwrap();
+        app.apply(Action::InsertChar('b')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(app.selected(), Some(id(2)));
+
+        assert_eq!(
+            app.apply(Action::ToggleSort).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.order(), TaskOrder::Manual);
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(app.selected(), Some(id(2)));
+        assert_eq!(app.tasks(), &before);
+        assert_eq!(App::new(before).order(), TaskOrder::Manual);
+    }
+
+    #[test]
+    fn priority_sort_should_block_reorder_with_a_notice_and_submit_nothing() {
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        let before = app.tasks().clone();
+        for action in [Action::MoveTaskDown, Action::MoveTaskUp] {
+            assert_eq!(app.prepare(action).unwrap(), Transition::Transient);
+            assert!(app.take_mutation().is_none());
+            assert_eq!(app.notice(), Some(&Notice::ManualOrderRequired));
+            assert_eq!(app.tasks(), &before);
+        }
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Transient);
+        assert_eq!(app.notice(), None);
+        app.apply(Action::MoveTaskDown).unwrap();
+        assert_eq!(app.apply(Action::OpenHelp).unwrap(), Transition::Transient);
+        assert_eq!(app.notice(), None);
+        app.apply(Action::CloseHelp).unwrap();
+
+        app.apply(Action::ToggleSort).unwrap();
+        for _ in 0..4 {
+            app.apply(Action::MoveDown).unwrap();
+        }
+        assert_eq!(app.selected(), Some(id(5)));
+        assert_eq!(app.apply(Action::MoveTaskUp).unwrap(), Transition::Submit);
+        assert_eq!(app.notice(), None);
+        assert_eq!(
+            app.tasks()
+                .tasks()
+                .iter()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 5, 4]
+        );
+    }
+
+    #[test]
+    fn priority_sort_should_fall_back_in_displayed_order_and_follow_reconciled_priorities() {
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        app.apply(Action::MoveUp).unwrap();
+        app.apply(Action::MoveUp).unwrap();
+        assert_eq!(app.selected(), Some(id(2)));
+        assert_eq!(app.apply(Action::Delete).unwrap(), Transition::Submit);
+        assert_eq!(visible_ids(&app), [3, 5, 4, 1]);
+        assert_eq!(app.selected(), Some(id(4)));
+
+        let mut latest = app.tasks().clone();
+        latest.edit(id(1), "(A) promoted").unwrap();
+        latest.add("(C) new").unwrap();
+        assert!(app.reconcile(latest));
+        assert_eq!(visible_ids(&app), [1, 3, 5, 4, 6]);
+        assert_eq!(app.selected(), Some(id(4)));
+
+        assert_eq!(
+            app.apply(Action::RestoreLatest).unwrap(),
+            Transition::Submit
+        );
+        assert_eq!(visible_ids(&app), [1, 3, 5, 2, 4, 6]);
+        assert_eq!(app.selected(), Some(id(2)));
+    }
+
+    #[test]
+    fn sort_should_survive_trash_and_help_and_be_ignored_outside_normal_mode() {
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        for (open, close) in [
+            (Action::OpenTrash, Action::CloseTrash),
+            (Action::OpenHelp, Action::CloseHelp),
+            (Action::StartSearch, Action::CancelEdit),
+            (Action::StartAdd, Action::CancelEdit),
+        ] {
+            app.apply(open).unwrap();
+            if app.mode() != Mode::Insert && app.mode() != Mode::Search {
+                assert_eq!(
+                    app.apply(Action::ToggleSort).unwrap(),
+                    Transition::Unchanged
+                );
+            }
+            app.apply(close).unwrap();
+            assert_eq!(app.mode(), Mode::Normal);
+            assert_eq!(app.order(), TaskOrder::Priority);
+            assert_eq!(app.view(), TaskView::All);
+            assert_eq!(visible_ids(&app), [3, 5, 2, 4, 1]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::{App, EditKind, FilterPreview, Mode, Notice, TaskView, Transition};
+    use crate::{
+        action::Action,
+        metadata::{TaskFilter, parse_filter_token},
+        mutation::Mutation,
+        task::{ListScope, TaskId, TaskList},
+    };
+
+    fn id(value: u64) -> TaskId {
+        TaskId::from_shell_integer(value).unwrap()
+    }
+
+    fn visible_ids(app: &App) -> Vec<u64> {
+        app.visible_tasks().map(|task| task.id().get()).collect()
+    }
+
+    fn filter(tokens: &[&str]) -> TaskFilter {
+        let mut filter = TaskFilter::default();
+        for token in tokens {
+            filter.add(parse_filter_token(token).unwrap());
+        }
+        filter
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            assert_eq!(
+                app.apply(Action::InsertChar(character)).unwrap(),
+                Transition::Transient
+            );
+        }
+    }
+
+    fn clear_buffer(app: &mut App) {
+        while app
+            .editor()
+            .is_some_and(|editor| !editor.buffer().is_empty())
+        {
+            app.apply(Action::DeleteBeforeCursor).unwrap();
+        }
+    }
+
+    fn edit_filter(app: &mut App, text: &str) {
+        assert_eq!(
+            app.apply(Action::EditFilter).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.mode(), Mode::Filter);
+        clear_buffer(app);
+        type_text(app, text);
+    }
+
+    /// 1 `+shtodo`, 2 `+shell @x`, 3 `+other`, 4 `+shtodo @x`, 5 plain.
+    fn tagged() -> App {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "(A) ship +shtodo",
+            "(B) script +shell @x",
+            "other +other",
+            "release +shtodo. @x",
+            "plain",
+        ] {
+            list.add(text).unwrap();
+        }
+        App::new(list)
+    }
+
+    #[test]
+    fn filter_editor_should_preview_trailing_tag_by_prefix_and_accept_exactly() {
+        let mut app = tagged();
+        assert_eq!(
+            app.apply(Action::EditFilter).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.editor().unwrap().kind(), EditKind::Filter);
+        let mut typed = String::new();
+        for character in "+shtodo".chars() {
+            type_text(&mut app, &character.to_string());
+            typed.push(character);
+            assert!(visible_ids(&app).contains(&1), "{typed:?}");
+            assert!(visible_ids(&app).contains(&4), "{typed:?}");
+        }
+        assert_eq!(visible_ids(&app), [1, 4]);
+        clear_buffer(&mut app);
+        type_text(&mut app, "+");
+        assert_eq!(visible_ids(&app), [1, 2, 3, 4, 5]);
+        type_text(&mut app, "sh");
+        assert_eq!(visible_ids(&app), [1, 2, 4]);
+        type_text(&mut app, " ");
+        assert!(visible_ids(&app).is_empty());
+        clear_buffer(&mut app);
+        type_text(&mut app, "+.");
+        assert_eq!(visible_ids(&app), [1, 2, 3, 4, 5]);
+        clear_buffer(&mut app);
+        type_text(&mut app, "@x +sh");
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(
+            app.filter_preview(),
+            Some(&FilterPreview {
+                exact: filter(&["@x"]),
+                trailing_prefix: Some("+sh".into()),
+            })
+        );
+        assert!(app.filter().is_empty());
+
+        clear_buffer(&mut app);
+        type_text(&mut app, "+shtodo.");
+        assert_eq!(
+            app.filter_preview().unwrap().trailing_prefix.as_deref(),
+            Some("+shtodo")
+        );
+        assert_eq!(visible_ids(&app), [1, 4]);
+        assert_eq!(
+            app.apply(Action::CommitEdit).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.editor().is_none());
+        assert!(app.filter_preview().is_none());
+        assert_eq!(app.filter(), &filter(&["+shtodo"]));
+        assert_eq!(app.filter_text(), "+shtodo");
+        assert_eq!(visible_ids(&app), [1, 4]);
+
+        // The preview moved the selection from 1 to 2, then to 4.
+        assert_eq!(app.selected(), Some(id(4)));
+        assert_eq!(app.prepare(Action::MoveTaskUp).unwrap(), Transition::Submit);
+        match app.take_mutation() {
+            Some(Mutation::MoveAdjacent {
+                id: moved,
+                neighbor,
+                projection,
+                ..
+            }) => {
+                assert_eq!(moved, id(4));
+                assert_eq!(neighbor, Some(id(1)));
+                assert_eq!(projection.filter, filter(&["+shtodo"]));
+                assert_eq!(projection.view, TaskView::All);
+            }
+            other => panic!("unexpected mutation {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_editor_enter_should_complete_unique_prefix_refuse_ambiguous_and_accept_unknown() {
+        let mut app = tagged();
+        edit_filter(&mut app, "+sh");
+        let cursor = app.editor().unwrap().cursor();
+        assert_eq!(
+            app.apply(Action::CommitEdit).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.mode(), Mode::Filter);
+        assert_eq!(app.editor().unwrap().buffer(), "+sh");
+        assert_eq!(app.editor().unwrap().cursor(), cursor);
+        assert_eq!(
+            app.notice(),
+            Some(&Notice::FinishTag(vec!["+shtodo".into(), "+shell".into()]))
+        );
+        assert!(app.filter().is_empty());
+
+        type_text(&mut app, "t");
+        assert_eq!(app.notice(), None);
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.filter_text(), "+shtodo");
+        assert_eq!(visible_ids(&app), [1, 4]);
+
+        edit_filter(&mut app, "+shtodo");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.filter(), &filter(&["+shtodo"]));
+
+        edit_filter(&mut app, "+zzz");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.filter_text(), "+zzz");
+        assert!(visible_ids(&app).is_empty());
+        assert_eq!(app.selected(), None);
+
+        edit_filter(&mut app, "+");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Filter);
+        assert_eq!(
+            app.message(),
+            Some("Invalid filter \"+\"; use +project, @context, A, A-C, or none")
+        );
+        clear_buffer(&mut app);
+        type_text(&mut app, "+.");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Filter);
+
+        // Only tags in rows that also match the completed `@x` are candidates.
+        clear_buffer(&mut app);
+        type_text(&mut app, "@x +s");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(
+            app.notice(),
+            Some(&Notice::FinishTag(vec!["+shell".into(), "+shtodo".into()]))
+        );
+        clear_buffer(&mut app);
+        type_text(&mut app, "@x +sht");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.filter_text(), "@x +shtodo");
+        assert_eq!(visible_ids(&app), [4]);
+
+        // The view and search narrow the candidates too.
+        app.apply(Action::StartSearch).unwrap();
+        type_text(&mut app, "script");
+        app.apply(Action::CommitEdit).unwrap();
+        edit_filter(&mut app, "+sh");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.filter_text(), "+shell");
+        assert_eq!(visible_ids(&app), [2]);
+
+        // Completed tokens stay as typed apart from normalization; priorities never complete.
+        edit_filter(&mut app, "+sh @x. a");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.filter_text(), "+sh @x a");
+        assert_eq!(app.filter(), &filter(&["+sh", "@x", "A"]));
+    }
+
+    #[test]
+    fn filter_editor_should_keep_the_last_valid_preview_and_reject_invalid_buffers() {
+        let mut app = tagged();
+        edit_filter(&mut app, "@x");
+        assert_eq!(visible_ids(&app), [2, 4]);
+        type_text(&mut app, " work");
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(app.message(), None);
+        type_text(&mut app, " ");
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(
+            app.message(),
+            Some("Invalid filter \"work\"; use +project, @context, A, A-C, or none")
+        );
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Filter);
+        assert!(app.filter().is_empty());
+
+        clear_buffer(&mut app);
+        assert_eq!(app.message(), None);
+        type_text(&mut app, "A-");
+        assert_eq!(visible_ids(&app), [1, 2, 3, 4, 5]);
+        assert_eq!(app.message(), None);
+        type_text(&mut app, "B");
+        assert_eq!(visible_ids(&app), [1, 2]);
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.filter_text(), "A-B");
+
+        edit_filter(&mut app, "A-");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Filter);
+        assert_eq!(
+            app.message(),
+            Some("Invalid filter \"A-\"; use +project, @context, A, A-C, or none")
+        );
+
+        clear_buffer(&mut app);
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.filter().is_empty());
+        assert_eq!(app.filter_text(), "");
+    }
+
+    #[test]
+    fn filter_editor_should_reopen_with_the_accepted_filter_and_escape_should_restore_it() {
+        let mut app = tagged();
+        edit_filter(&mut app, "@x");
+        app.apply(Action::CommitEdit).unwrap();
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(4)));
+
+        app.apply(Action::EditFilter).unwrap();
+        assert_eq!(app.editor().unwrap().buffer(), "@x ");
+        assert_eq!(app.editor().unwrap().cursor(), 3);
+        assert_eq!(visible_ids(&app), [2, 4]);
+        clear_buffer(&mut app);
+        type_text(&mut app, "+other");
+        assert_eq!(visible_ids(&app), [3]);
+        assert_eq!(app.selected(), Some(id(3)));
+        assert_eq!(
+            app.apply(Action::CancelEdit).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.editor().is_none());
+        assert_eq!(app.filter_text(), "@x");
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(app.selected(), Some(id(4)));
+    }
+
+    #[test]
+    fn layered_escape_should_clear_search_then_filter_one_press_at_a_time() {
+        let mut app = tagged();
+        edit_filter(&mut app, "@x");
+        app.apply(Action::CommitEdit).unwrap();
+        app.apply(Action::StartSearch).unwrap();
+        type_text(&mut app, "release");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(visible_ids(&app), [4]);
+
+        assert_eq!(
+            app.apply(Action::ClearSearch).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.query(), "");
+        assert_eq!(app.filter_text(), "@x");
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(
+            app.apply(Action::ClearSearch).unwrap(),
+            Transition::Transient
+        );
+        assert!(app.filter().is_empty());
+        assert_eq!(app.filter_text(), "");
+        assert_eq!(visible_ids(&app), [1, 2, 3, 4, 5]);
+        assert_eq!(app.selected(), Some(id(4)));
+        assert_eq!(
+            app.apply(Action::ClearSearch).unwrap(),
+            Transition::Unchanged
+        );
+    }
+
+    #[test]
+    fn filter_hint_should_count_tags_in_the_view_narrowed_by_the_trailing_prefix() {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "a +shtodo +shtodo. @x",
+            "b +shtodo @laptop",
+            "c +shell @laptop",
+            "d +shtodo @x",
+            "e +zeta",
+        ] {
+            list.add(text).unwrap();
+        }
+        let done = list.add("f +shell @x").unwrap();
+        list.set_completed(done, true).unwrap();
+        let mut app = App::new(list);
+        assert!(app.filter_hint().is_none());
+        app.apply(Action::EditFilter).unwrap();
+        assert_eq!(
+            app.filter_hint().unwrap(),
+            [
+                ("+shtodo", 3),
+                ("@x", 3),
+                ("+shell", 2),
+                ("@laptop", 2),
+                ("+zeta", 1)
+            ]
+        );
+        type_text(&mut app, "@x +sh");
+        assert_eq!(app.filter_hint().unwrap(), [("+shtodo", 2), ("+shell", 1)]);
+        app.apply(Action::CancelEdit).unwrap();
+        app.apply(Action::CycleView).unwrap();
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "+sh");
+        assert_eq!(app.filter_hint().unwrap(), [("+shtodo", 3), ("+shell", 1)]);
+        type_text(&mut app, "x");
+        assert!(app.filter_hint().unwrap().is_empty());
+    }
+
+    #[test]
+    fn filter_hint_should_recount_after_refresh_and_after_erasing_a_completed_token() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("a +shtodo @x").unwrap();
+        list.add("b +shell").unwrap();
+        let mut app = App::new(list.clone());
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "@x +sh");
+        assert_eq!(app.filter_hint().unwrap(), [("+shtodo", 1)]);
+        list.add("c +shine @x").unwrap();
+        assert!(app.reconcile(list));
+        assert_eq!(app.filter_hint().unwrap(), [("+shine", 1), ("+shtodo", 1)]);
+        for _ in "@x +sh".chars() {
+            app.apply(Action::DeleteBeforeCursor).unwrap();
+        }
+        type_text(&mut app, "+sh");
+        assert_eq!(
+            app.filter_hint().unwrap(),
+            [("+shell", 1), ("+shine", 1), ("+shtodo", 1)]
+        );
+    }
+
+    #[test]
+    fn filter_mode_should_block_mutations_and_hidden_messages_should_mention_the_filter() {
+        let mut app = tagged();
+        let before = app.tasks().clone();
+        app.apply(Action::EditFilter).unwrap();
+        for action in [
+            Action::ToggleComplete,
+            Action::Delete,
+            Action::RestoreLatest,
+            Action::StartAdd,
+            Action::MoveTaskDown,
+            Action::MoveDown,
+            Action::ToggleSort,
+            Action::CycleView,
+            Action::OpenHelp,
+            Action::OpenTrash,
+            Action::EditFilter,
+        ] {
+            assert_eq!(
+                app.apply(action).unwrap(),
+                Transition::Unchanged,
+                "{action:?}"
+            );
+        }
+        assert_eq!(app.tasks(), &before);
+        type_text(&mut app, "+shtodo");
+        app.apply(Action::CommitEdit).unwrap();
+
+        app.apply(Action::StartAdd).unwrap();
+        type_text(&mut app, "untagged");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(
+            app.message(),
+            Some("Added task is hidden by the current view, search, or filter")
+        );
+        assert_eq!(app.selected(), Some(id(1)));
+        app.apply(Action::StartEdit).unwrap();
+        clear_buffer(&mut app);
+        type_text(&mut app, "(A) ship");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(
+            app.message(),
+            Some("Edited task is hidden by the current view, search, or filter")
+        );
+        assert_eq!(app.selected(), Some(id(4)));
+
+        let mut list = app.tasks().clone();
+        list.delete(id(3)).unwrap();
+        app.reconcile(list);
+        app.apply(Action::RestoreLatest).unwrap();
+        assert_eq!(
+            app.message(),
+            Some("Restored task is hidden by the current view, search, or filter")
+        );
+        assert_eq!(app.selected(), Some(id(4)));
+    }
+
+    #[test]
+    fn filter_and_sort_should_survive_trash_and_help_and_compose_with_views() {
+        let mut app = tagged();
+        app.apply(Action::ToggleSort).unwrap();
+        edit_filter(&mut app, "@x");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(visible_ids(&app), [2, 4]);
+        for (open, close) in [
+            (Action::OpenTrash, Action::CloseTrash),
+            (Action::OpenHelp, Action::CloseHelp),
+        ] {
+            app.apply(open).unwrap();
+            app.apply(close).unwrap();
+            assert_eq!(app.filter_text(), "@x");
+            assert_eq!(visible_ids(&app), [2, 4]);
+        }
+        let mut list = app.tasks().clone();
+        list.set_completed(id(4), true).unwrap();
+        list.edit(id(5), "(A) plain now @x").unwrap();
+        app.reconcile(list);
+        assert_eq!(visible_ids(&app), [5, 2, 4]);
+        app.apply(Action::CycleView).unwrap();
+        assert_eq!(visible_ids(&app), [5, 2]);
     }
 }
