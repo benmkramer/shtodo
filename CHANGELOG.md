@@ -19,6 +19,22 @@ All notable changes to shtodo are documented in this file.
   storage is read.
 - JSON task objects include `priority` and `tags`, and JSON listing honors
   every filter and `--sort priority`.
+- TUI rows style the priority marker and tags in place: bold priority, cyan
+  `+project`, magenta `@context`.
+- TUI `s` toggles priority order, sharing the order of `list --sort priority`.
+  `J`/`K` reorder only in manual order and explain how to switch.
+- TUI `f` opens a tag and priority filter editor with a live prefix preview,
+  a hint line listing tags in the current rows with counts, and Enter
+  completion of a unique tag prefix. The status line shows the accepted filter
+  and sort.
+
+### Changed
+
+- TUI Esc in Normal mode clears one layer per press: the accepted search,
+  then the filter.
+- The new `toggle_sort` (`s`) and `edit_filter` (`f`) defaults yield to
+  existing Normal bindings on those keys; such configs load unchanged and the
+  new action is unbound until given a free key.
 
 ## [0.1.0-beta.4] - 2026-10-05
 
