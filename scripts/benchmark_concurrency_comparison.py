@@ -229,58 +229,108 @@ def wait_screen(tui, predicate):
             tui.feed(data)
 
 
+def tagged_tui_fixture(home, size):
+    directory = home / ".shtodo/global"
+    directory.mkdir(parents=True)
+    path = directory / "tasks.json"
+    path.write_text(json.dumps(tagged_fixture(size), indent=2, ensure_ascii=False) + "\n")
+    (directory / "tasks.lock").touch()
+    return path.stat().st_size
+
+
+# TUI cases per fixture: (case label, binary label, keys sent before timing, operations).
+# The priority case and Filter mode need this branch's binary, so they run for it only.
+TUI_CASES = {
+    "mixed": [("baseline", "baseline", b"", ("toggle_to_frame", "help_to_frame", "search_keystroke")),
+              ("current", "current", b"", ("toggle_to_frame", "help_to_frame", "search_keystroke")),
+              ("current_priority", "current", b"s", ("toggle_to_frame",))],
+    "tagged": [("baseline", "baseline", b"", ("toggle_to_frame", "search_keystroke")),
+               ("current", "current", b"", ("toggle_to_frame", "search_keystroke", "filter_keystroke")),
+               ("current_priority", "current", b"s", ("toggle_to_frame",))],
+}
+# Keystroke cases: untimed keys that open the editor, then one timed character, then Esc.
+KEYSTROKES = {
+    ("mixed", "search_keystroke"): (b"/Tas", b"k", "/Task", "SEARCH"),
+    ("tagged", "search_keystroke"): (b"/+", b"p", "/+p", "SEARCH"),
+    ("tagged", "filter_keystroke"): (b"f+", b"p", "f:+p", "FILTER"),
+}
+
+
+def footer(value):
+    return "".join(value.screen[-1])
+
+
 def measure_tui(args, binaries, rng):
     results = []
     with tempfile.TemporaryDirectory(prefix="shtodo-paired-tui-") as directory:
         root = Path(directory)
-        for size in [size for size in args.sizes if size >= 3]:
-            with contextlib.ExitStack() as stack:
-                cases = []
-                labels = list(binaries)
-                rng.shuffle(labels)
-                for label in labels:
-                    home = root / f"{size}-{label}"
-                    size_bytes = fixture(home, size)
-                    with patch.object(test_concurrency, "BINARY", Path(binaries[label])):
-                        tui = stack.enter_context(test_concurrency.Tui(home))
-                    wait_screen(tui, lambda value: "".join(value.screen[-1]).startswith("NORMAL"))
-                    cases.append(dict(binary=label, home=home, tui=tui, records=size,
-                                      snapshot_bytes=size_bytes, completed=False, help=False,
-                                      samples={"toggle_to_frame": [], "help_to_frame": []}))
-                for round_index in range(-args.warmups, args.runs):
-                    order = [(case, operation) for case in cases for operation in case["samples"]]
-                    rng.shuffle(order)
-                    for case, operation in order:
-                        tui = case["tui"]
-                        if operation == "toggle_to_frame":
-                            case["completed"] = not case["completed"]
-                            marker = "✓" if case["completed"] else "○"
-                            predicate = lambda value: any(
-                                marker in "".join(row) and "Task 2 café" in "".join(row)
-                                for row in value.screen)
-                            key = b" "
+        for kind in args.kinds:
+            for size in [size for size in args.sizes if size >= 3]:
+                with contextlib.ExitStack() as stack:
+                    cases = []
+                    specs = list(TUI_CASES[kind])
+                    rng.shuffle(specs)
+                    for label, binary, setup, operations in specs:
+                        home = root / f"{kind}-{size}-{label}"
+                        if kind == "tagged":
+                            size_bytes = tagged_tui_fixture(home, size)
+                            # Task 1 is selected first; sorting keeps it selected, now near the end.
+                            target, marker_text = 1, "task 00000001"
                         else:
-                            predicate = lambda value: "".join(value.screen[-1]).startswith("HELP")
-                            key = b"?"
-                        started = time.perf_counter_ns()
-                        tui.send(key)
-                        wait_screen(tui, predicate)
-                        elapsed = (time.perf_counter_ns() - started) / 1_000_000
-                        if operation == "help_to_frame":
-                            tui.send(b"?")
-                            wait_screen(tui, lambda value: "".join(value.screen[-1]).startswith("NORMAL"))
-                        else:
-                            value = json.loads((case["home"] / ".shtodo/global/tasks.json").read_text())
-                            assert value["tasks"][1]["completed"] == case["completed"]
-                            assert len(value["tasks"]) == size
-                        if round_index >= 0:
-                            case["samples"][operation].append(elapsed)
-                for case in cases:
-                    for operation, samples in case["samples"].items():
-                        results.append(dict(binary=case["binary"], records=size,
-                                            snapshot_bytes=case["snapshot_bytes"], operation=operation,
-                                            samples_ms=samples, statistics=benchmark.summary(samples)))
-            print(f"TUI {size} records complete", flush=True)
+                            size_bytes = fixture(home, size)
+                            target, marker_text = 2, "Task 2 café"
+                        with patch.object(test_concurrency, "BINARY", Path(binaries[binary])):
+                            tui = stack.enter_context(test_concurrency.Tui(home))
+                        wait_screen(tui, lambda value: footer(value).startswith("NORMAL"))
+                        if setup:
+                            tui.send(setup)
+                            wait_screen(tui, lambda value: "by priority" in "".join(value.screen[1]))
+                        value = json.loads((home / ".shtodo/global/tasks.json").read_text())
+                        completed = value["tasks"][target - 1]["completed"]
+                        cases.append(dict(label=label, binary=binary, home=home, tui=tui, kind=kind,
+                                          records=size, snapshot_bytes=size_bytes, target=target,
+                                          marker_text=marker_text, completed=completed,
+                                          samples={operation: [] for operation in operations}))
+                    for round_index in range(-args.warmups, args.runs):
+                        order = [(case, operation) for case in cases for operation in case["samples"]]
+                        rng.shuffle(order)
+                        for case, operation in order:
+                            tui = case["tui"]
+                            if operation == "toggle_to_frame":
+                                case["completed"] = not case["completed"]
+                                marker = "✓" if case["completed"] else "○"
+                                predicate = lambda value, text=case["marker_text"], marker=marker: any(
+                                    marker in "".join(row) and text in "".join(row)
+                                    for row in value.screen)
+                                key = b" "
+                            elif operation == "help_to_frame":
+                                predicate = lambda value: footer(value).startswith("HELP")
+                                key = b"?"
+                            else:
+                                opening, key, status, mode = KEYSTROKES[(case["kind"], operation)]
+                                tui.send(opening)
+                                wait_screen(tui, lambda value, mode=mode, status=status[:-1]: footer(
+                                    value).startswith(mode) and "".join(value.screen[1]).rstrip().endswith(status))
+                                predicate = lambda value, status=status: status in "".join(value.screen[1])
+                            started = time.perf_counter_ns()
+                            tui.send(key)
+                            wait_screen(tui, predicate)
+                            elapsed = (time.perf_counter_ns() - started) / 1_000_000
+                            if operation == "toggle_to_frame":
+                                value = json.loads((case["home"] / ".shtodo/global/tasks.json").read_text())
+                                assert value["tasks"][case["target"] - 1]["completed"] == case["completed"]
+                                assert len(value["tasks"]) == size
+                            else:
+                                tui.send(b"?" if operation == "help_to_frame" else b"\x1b")
+                                wait_screen(tui, lambda value: footer(value).startswith("NORMAL"))
+                            if round_index >= 0:
+                                case["samples"][operation].append(elapsed)
+                    for case in cases:
+                        for operation, samples in case["samples"].items():
+                            results.append(dict(binary=case["label"], fixture=kind, records=size,
+                                                snapshot_bytes=case["snapshot_bytes"], operation=operation,
+                                                samples_ms=samples, statistics=benchmark.summary(samples)))
+                print(f"TUI {kind} {size} records complete", flush=True)
     return results
 
 

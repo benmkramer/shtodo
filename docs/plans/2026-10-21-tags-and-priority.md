@@ -704,7 +704,11 @@ overwriting earlier samples.
 Acceptance: that PR's gates are met, or STOP.
 Status: shell subset DONE in PR 1; see the
 [shell paired report](../benchmarks/2026-10-21-tags-and-priority-cli-comparison.md).
-The TUI subset is pending in PR 2.
+TUI subset: STOP in PR 2. Completion-to-frame passes in Manual order (-2.2%
+at 10,000 on the mixed fixture). Filter keystroke-to-frame misses its gate
+after the viewport mitigation (0.853 ms against 0.574 ms for `/`, +48.7%). See
+the [TUI paired report](../benchmarks/2026-10-21-tags-and-priority-tui-comparison.md).
+The owner decides how to proceed.
 
 ### Stage 5: Docs and final verification
 
