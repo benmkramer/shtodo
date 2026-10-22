@@ -756,6 +756,7 @@ fn text_spans(text: &str, base: Style) -> Vec<Span<'static>> {
     for tag in metadata::tags(text) {
         // Tags borrow `text`, so their offsets come from the slice addresses.
         let start = tag.as_ptr().addr() - text.as_ptr().addr();
+        debug_assert!(start + tag.len() <= text.len() && text.is_char_boundary(start));
         if start > end {
             spans.push(Span::styled(text[end..start].to_owned(), base));
         }
