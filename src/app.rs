@@ -313,7 +313,8 @@ pub(crate) struct App {
     pending: Option<Mutation>,
     storage_error: Option<String>,
     durability_warning: Option<String>,
-    /// The local date shown and used to rewrite `due:today` and `due:tomorrow` on add and edit.
+    /// The local date: used now to rewrite `due:today` and `due:tomorrow` on add and edit, and
+    /// the date the TUI will display once due styling lands (PR 2 of the due dates plan).
     today: Date,
 }
 
