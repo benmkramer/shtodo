@@ -130,7 +130,6 @@ pub(crate) enum TaskOrder {
     #[default]
     Manual,
     Priority,
-    #[expect(dead_code, reason = "`--sort due` selects it in Stage 2a")]
     Due,
 }
 

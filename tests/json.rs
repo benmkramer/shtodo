@@ -45,9 +45,21 @@ fn tagged(
     priority: Option<&str>,
     tags: &[&str],
 ) -> Value {
+    dated(id, text, state, deleted, priority, tags, None)
+}
+
+fn dated(
+    id: u64,
+    text: &str,
+    state: &str,
+    deleted: bool,
+    priority: Option<&str>,
+    tags: &[&str],
+    due: Option<&str>,
+) -> Value {
     json!({
         "id": id, "text": text, "state": state, "deleted": deleted,
-        "priority": priority, "tags": tags
+        "priority": priority, "tags": tags, "due": due
     })
 }
 
@@ -613,17 +625,23 @@ fn json_list_filter_errors_should_be_invalid_arguments_without_storage() {
         ),
         (
             vec!["--json", "list", "--sort"],
-            "--sort requires a value; expected priority",
+            "--sort requires a value; expected priority or due",
         ),
         (
             vec!["--json", "list", "--sort", "manual"],
-            r#"invalid --sort \"manual\"; expected priority"#,
+            r#"invalid --sort \"manual\"; expected priority or due"#,
         ),
-        (vec!["--json", "list", "--sort", "x"], "expected priority"),
-        (vec!["--json", "list", "--sort", ""], "expected priority"),
+        (
+            vec!["--json", "list", "--sort", "x"],
+            "expected priority or due",
+        ),
+        (
+            vec!["--json", "list", "--sort", ""],
+            "expected priority or due",
+        ),
         (
             vec!["--json", "list", "--sort", "--json"],
-            r#"invalid --sort \"--json\"; expected priority"#,
+            r#"invalid --sort \"--json\"; expected priority or due"#,
         ),
         (
             vec!["list", "--json", "--sort", "priority", "--sort", "priority"],
@@ -661,6 +679,52 @@ fn json_list_filter_errors_should_be_invalid_arguments_without_storage() {
             vec!["--json", "list", "--search", "a\rb"],
             "--search requires non-empty single-line text",
         ),
+        (vec!["--json", "list", "--due"], "--due requires a value"),
+        (
+            vec!["--json", "list", "--due", "soon"],
+            r#"invalid --due \"soon\"; expected today, tomorrow, overdue, none, any, YYYY-MM-DD, or START..END"#,
+        ),
+        (
+            vec!["--json", "list", "--due", "week"],
+            r#"invalid --due \"week\""#,
+        ),
+        (vec!["--json", "list", "--due", ""], r#"invalid --due \"\""#),
+        (
+            vec!["--json", "list", "--due", ".."],
+            r#"invalid --due \"..\""#,
+        ),
+        (
+            vec!["--json", "list", "--due", "2026-02-30"],
+            r#"invalid --due \"2026-02-30\""#,
+        ),
+        (
+            vec!["--json", "list", "--due", "2026-1-5"],
+            r#"invalid --due \"2026-1-5\""#,
+        ),
+        (
+            vec!["--json", "list", "--due", "due:today"],
+            r#"invalid --due \"due:today\""#,
+        ),
+        (
+            vec!["list", "--json", "--due", "--json"],
+            r#"invalid --due \"--json\""#,
+        ),
+        (
+            vec!["--json", "list", "--due", "2026-10-22..2026-10-21"],
+            r#"invalid --due \"2026-10-22..2026-10-21\""#,
+        ),
+        (
+            vec!["--json", "list", "--due", "tomorrow..today"],
+            r#"invalid --due \"tomorrow..today\""#,
+        ),
+        (
+            vec!["--json", "list", "--sort", "Due"],
+            r#"invalid --sort \"Due\"; expected priority or due"#,
+        ),
+        (
+            vec!["--json", "list", "--sort", "priority", "--sort", "due"],
+            "--sort may only be specified once",
+        ),
     ] {
         let output = run(home.path(), home.path(), &args);
         assert_eq!(output.status.code(), Some(1), "{args:?}");
@@ -677,7 +741,7 @@ fn json_list_should_reject_non_utf8_filter_values_without_storage() {
     use std::os::unix::ffi::OsStringExt as _;
 
     let home = tempfile::tempdir().unwrap();
-    for flag in ["--tag", "--priority", "--search", "--sort"] {
+    for flag in ["--tag", "--priority", "--search", "--sort", "--due"] {
         let output = Command::new(env!("CARGO_BIN_EXE_shtodo"))
             .args(["--json", "list", flag])
             .arg(std::ffi::OsString::from_vec(vec![b'+', 0xff]))
@@ -727,6 +791,12 @@ fn json_filtered_lists_should_be_empty_for_missing_scopes_and_readable_under_a_w
         &["--json", "list", "--priority", "A", "--sort", "priority"],
     ));
     assert_eq!(ids(&value), [3, 4]);
+    let value = success(&run(
+        home.path(),
+        home.path(),
+        &["--json", "list", "--due", "none", "--sort", "due"],
+    ));
+    assert_eq!(ids(&value), [3, 4, 1, 5, 2, 7]);
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
@@ -766,5 +836,143 @@ fn json_mutation_replies_should_carry_derived_priority_and_tags() {
         arguments.extend(&args);
         let value = success(&run(home.path(), home.path(), &arguments));
         assert_eq!(value["task"], expected, "{args:?}");
+    }
+}
+
+#[test]
+fn json_replies_should_carry_the_derived_due_date() {
+    let home = tempfile::tempdir().unwrap();
+    let text = "(A) Pay rent due:2026-11-01. +home";
+    let with_due = |state, deleted| {
+        dated(
+            1,
+            text,
+            state,
+            deleted,
+            Some("A"),
+            &["+home"],
+            Some("2026-11-01"),
+        )
+    };
+    for (args, expected) in [
+        (vec!["add", text], with_due("open", false)),
+        (vec!["done", "1"], with_due("done", false)),
+        (vec!["reopen", "1"], with_due("open", false)),
+        (vec!["delete", "1"], with_due("open", true)),
+        (vec!["restore", "1"], with_due("open", false)),
+        (
+            vec!["edit", "1", "x due:2026-02-30 due:2026-12-01"],
+            dated(
+                1,
+                "x due:2026-02-30 due:2026-12-01",
+                "open",
+                false,
+                None,
+                &[],
+                Some("2026-12-01"),
+            ),
+        ),
+        (
+            vec!["edit", "1", "x Due:2026-11-01 overdue:2026-11-01"],
+            task(1, "x Due:2026-11-01 overdue:2026-11-01", "open", false),
+        ),
+    ] {
+        let mut arguments = vec!["--json"];
+        arguments.extend(&args);
+        let value = success(&run(home.path(), home.path(), &arguments));
+        assert_eq!(value["task"], expected, "{args:?}");
+    }
+}
+
+/// Five tasks with absolute dates, so no command here reads the clock: 2 is done, 4 is deleted.
+fn seed_dated_tasks(home: &Path) {
+    for text in [
+        "(B) Pay rent due:2026-10-20 +home",
+        "(A) File taxes due:2026-10-01",
+        "Plain errand",
+        "deleted due:2026-10-21",
+        "(A) Call bank due:2026-10-20",
+    ] {
+        success(&run(home, home, &["--json", "add", text]));
+    }
+    success(&run(home, home, &["--json", "done", "2"]));
+    success(&run(home, home, &["--json", "delete", "4"]));
+}
+
+#[test]
+fn json_list_due_filters_and_sort_should_return_the_text_mode_rows_and_same_objects() {
+    let home = tempfile::tempdir().unwrap();
+    seed_dated_tasks(home.path());
+    let all = success(&run(home.path(), home.path(), &["--json", "list"]));
+    assert_eq!(
+        all["tasks"],
+        json!([
+            dated(
+                1,
+                "(B) Pay rent due:2026-10-20 +home",
+                "open",
+                false,
+                Some("B"),
+                &["+home"],
+                Some("2026-10-20")
+            ),
+            dated(
+                2,
+                "(A) File taxes due:2026-10-01",
+                "done",
+                false,
+                Some("A"),
+                &[],
+                Some("2026-10-01")
+            ),
+            task(3, "Plain errand", "open", false),
+            dated(
+                5,
+                "(A) Call bank due:2026-10-20",
+                "open",
+                false,
+                Some("A"),
+                &[],
+                Some("2026-10-20")
+            ),
+        ])
+    );
+    for (filters, expected) in [
+        (vec!["--due", "2026-10-20"], vec![1, 5]),
+        (vec!["--due", "any"], vec![1, 2, 5]),
+        (vec!["--due", "none"], vec![3]),
+        (vec!["--due", "..2026-10-19", "--done"], vec![2]),
+        (vec!["--due", "2026-10-02..", "--tag", "+home"], vec![1]),
+        (vec!["--sort", "due"], vec![2, 5, 1, 3]),
+        (vec!["--sort", "due", "--open"], vec![5, 1, 3]),
+        (
+            vec!["--due", "any", "--sort", "due", "--priority", "A"],
+            vec![2, 5],
+        ),
+    ] {
+        let mut text_args = vec!["list"];
+        text_args.extend(&filters);
+        let text = run(home.path(), home.path(), &text_args);
+        let text_ids: Vec<u64> = String::from_utf8_lossy(&text.stdout)
+            .lines()
+            .map(|line| line.split("  ").next().unwrap().parse().unwrap())
+            .collect();
+        let mut json_args = vec!["--json"];
+        json_args.extend(&text_args);
+        let value = success(&run(home.path(), home.path(), &json_args));
+
+        assert_eq!(ids(&value), expected, "{filters:?}");
+        assert_eq!(text_ids, expected, "{filters:?}");
+        for task in value["tasks"].as_array().unwrap() {
+            assert_eq!(
+                all["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t["id"] == task["id"]),
+                Some(task),
+                "{filters:?}"
+            );
+        }
     }
 }

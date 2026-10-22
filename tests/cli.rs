@@ -21,8 +21,10 @@ fn help_should_exit_successfully_without_starting_tui() {
     assert!(stdout.contains(
         "shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]...\n"
     ));
-    assert!(stdout.contains("[--search <TEXT>] [--sort priority]"));
+    assert!(stdout.contains("[--due <WHEN>]... [--search <TEXT>] [--sort priority|due]"));
     assert!(stdout.contains("shtodo list --open --tag +work --sort priority"));
+    assert!(stdout.contains("shtodo list --open --due overdue --due today --sort due"));
+    assert!(stdout.contains("--sort due lists"));
     assert!(stdout.contains("shtodo delete <ID>"));
     assert!(stdout.contains("shtodo --local delete <ID>"));
     for command in ["done", "reopen", "restore"] {
@@ -571,23 +573,23 @@ fn list_filter_usage_errors_should_exit_one_with_usage_and_create_no_storage() {
         ),
         (
             vec!["list", "--sort"],
-            "--sort requires a value; expected priority",
+            "--sort requires a value; expected priority or due",
         ),
         (
             vec!["list", "--sort", "manual"],
-            r#"invalid --sort "manual"; expected priority"#,
+            r#"invalid --sort "manual"; expected priority or due"#,
         ),
         (
             vec!["list", "--sort", "x"],
-            r#"invalid --sort "x"; expected priority"#,
+            r#"invalid --sort "x"; expected priority or due"#,
         ),
         (
             vec!["list", "--sort", "--json"],
-            r#"invalid --sort "--json"; expected priority"#,
+            r#"invalid --sort "--json"; expected priority or due"#,
         ),
         (
             vec!["list", "--sort", ""],
-            r#"invalid --sort ""; expected priority"#,
+            r#"invalid --sort ""; expected priority or due"#,
         ),
         (
             vec!["list", "--open", "--open"],
@@ -608,6 +610,56 @@ fn list_filter_usage_errors_should_exit_one_with_usage_and_create_no_storage() {
         (
             vec!["--local", "list", "--sort", "manual"],
             r#"invalid --sort "manual""#,
+        ),
+        (vec!["list", "--due"], "--due requires a value"),
+        (
+            vec!["list", "--due", "soon"],
+            r#"invalid --due "soon"; expected today, tomorrow, overdue, none, any, YYYY-MM-DD, or START..END"#,
+        ),
+        (
+            vec!["list", "--due", "week"],
+            r#"invalid --due "week"; expected"#,
+        ),
+        (vec!["list", "--due", ""], r#"invalid --due ""; expected"#),
+        (
+            vec!["list", "--due", ".."],
+            r#"invalid --due ".."; expected"#,
+        ),
+        (
+            vec!["list", "--due", "2026-02-30"],
+            r#"invalid --due "2026-02-30"; expected"#,
+        ),
+        (
+            vec!["list", "--due", "2026-1-5"],
+            r#"invalid --due "2026-1-5"; expected"#,
+        ),
+        (
+            vec!["list", "--due", "due:today"],
+            r#"invalid --due "due:today"; expected"#,
+        ),
+        (
+            vec!["list", "--due", "--json"],
+            r#"invalid --due "--json"; expected"#,
+        ),
+        (
+            vec!["list", "--due", "2026-10-22..2026-10-21"],
+            r#"invalid --due "2026-10-22..2026-10-21"; expected"#,
+        ),
+        (
+            vec!["list", "--due", "tomorrow..today"],
+            r#"invalid --due "tomorrow..today"; expected"#,
+        ),
+        (
+            vec!["list", "--sort", "Due"],
+            r#"invalid --sort "Due"; expected priority or due"#,
+        ),
+        (
+            vec!["list", "--sort", "priority", "--sort", "due"],
+            "--sort may only be specified once",
+        ),
+        (
+            vec!["list", "--sort", "due", "--sort", "due"],
+            "--sort may only be specified once",
         ),
     ] {
         let output = run_with_home(home.path(), &arguments);
@@ -639,6 +691,197 @@ fn list_should_reject_non_utf8_filter_values_before_creating_storage() {
         String::from_utf8_lossy(&output.stderr).contains("invalid --tag value; expected UTF-8")
     );
     assert!(!home.path().join(".shtodo").exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_shtodo"))
+        .args(["list", "--due"])
+        .arg(std::ffi::OsString::from_vec(vec![b't', 0xff]))
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid --due value; expected UTF-8")
+    );
+    assert!(!home.path().join(".shtodo").exists());
+}
+
+fn utc_today() -> jiff::civil::Date {
+    jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date()
+}
+
+/// Runs `body` on today's UTC date, again if the date changed while it ran (a midnight crossing).
+fn on_stable_utc_day<T>(mut body: impl FnMut(jiff::civil::Date) -> T) -> (jiff::civil::Date, T) {
+    for _ in 0..2 {
+        let day = utc_today();
+        let result = body(day);
+        if utc_today() == day {
+            return (day, result);
+        }
+    }
+    panic!("the UTC date changed twice while the test ran");
+}
+
+fn run_in_zone(
+    home: &std::path::Path,
+    zone: Option<&str>,
+    arguments: &[&str],
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shtodo"));
+    command
+        .args(arguments)
+        .env("HOME", home)
+        .stdin(Stdio::null());
+    match zone {
+        Some(zone) => command.env("TZ", zone),
+        None => command.env_remove("TZ"),
+    };
+    command.output().unwrap()
+}
+
+fn run_utc(home: &std::path::Path, arguments: &[&str]) -> std::process::Output {
+    run_in_zone(home, Some("UTC0"), arguments)
+}
+
+/// Nine tasks around `day`: 3 is done, 8 is deleted, 2 and 7 have no valid due date.
+fn dated_texts(day: jiff::civil::Date) -> Vec<String> {
+    let yesterday = day.yesterday().unwrap();
+    let tomorrow = day.tomorrow().unwrap();
+    let next_week = day.checked_add(jiff::Span::new().days(7)).unwrap();
+    vec![
+        format!("(B) Pay rent due:{yesterday} +home"),
+        "Plain errand".to_owned(),
+        format!("(A) File taxes due:{yesterday}"),
+        format!("(A) Call bank due:{day}."),
+        format!("Water plants due:{tomorrow}"),
+        format!("(C) Renew passport due:{next_week}"),
+        "Invalid due:2026-02-30 date".to_owned(),
+        format!("(B) deleted due:{day}"),
+        format!("(A) Pay rent too due:{yesterday}"),
+    ]
+}
+
+fn seed_dated_tasks(home: &std::path::Path, texts: &[String]) {
+    for text in texts {
+        assert!(run_utc(home, &["add", text]).status.success());
+    }
+    assert!(run_utc(home, &["done", "3"]).status.success());
+    assert!(run_utc(home, &["delete", "8"]).status.success());
+}
+
+fn dated_rows(texts: &[String], ids: &[usize]) -> String {
+    ids.iter()
+        .map(|&id| {
+            let state = if id == 3 { "done" } else { "open" };
+            format!("{id}  {state}  {}\n", texts[id - 1])
+        })
+        .collect()
+}
+
+#[test]
+fn list_due_should_filter_on_the_local_date_and_compose_with_every_flag() {
+    let (day, results) = on_stable_utc_day(|day| {
+        let home = tempfile::tempdir().unwrap();
+        let texts = dated_texts(day);
+        seed_dated_tasks(home.path(), &texts);
+        let yesterday = day.yesterday().unwrap().to_string();
+        let tomorrow = day.tomorrow().unwrap().to_string();
+        let today = day.to_string();
+        let cases: Vec<(Vec<String>, Vec<usize>)> = [
+            (vec!["--due", "today"], vec![4]),
+            (vec!["--due", "TODAY"], vec![4]),
+            (vec!["--due", "tomorrow"], vec![5]),
+            (vec!["--due", "overdue"], vec![1, 9]),
+            (vec!["--due", "none"], vec![2, 7]),
+            (vec!["--due", "any"], vec![1, 3, 4, 5, 6, 9]),
+            (vec!["--due", &today], vec![4]),
+            (
+                vec!["--due", &format!("{yesterday}..{tomorrow}")],
+                vec![1, 3, 4, 5, 9],
+            ),
+            (vec!["--due", &format!("..{yesterday}")], vec![1, 3, 9]),
+            (vec!["--due", "today.."], vec![4, 5, 6]),
+            (vec!["--due", "..tomorrow"], vec![1, 3, 4, 5, 9]),
+            (vec!["--due", "overdue", "--due", "today"], vec![1, 4, 9]),
+            (vec!["--due", "today", "--due", "today"], vec![4]),
+            (vec!["--open", "--due", "overdue"], vec![1, 9]),
+            (vec!["--done", "--due", "overdue"], vec![]),
+            (vec!["--done", "--due", &format!("..{yesterday}")], vec![3]),
+            (vec!["--due", "any", "--tag", "+home"], vec![1]),
+            (vec!["--priority", "A", "--due", "today"], vec![4]),
+            (vec!["--due", "none", "--search", "PLAIN"], vec![2]),
+            (vec!["--due", "2000-01-01"], vec![]),
+            (vec![], vec![1, 2, 3, 4, 5, 6, 7, 9]),
+        ]
+        .into_iter()
+        .map(|(filters, ids)| (filters.into_iter().map(str::to_owned).collect(), ids))
+        .collect();
+        let outputs: Vec<_> = cases
+            .iter()
+            .map(|(filters, _)| {
+                let mut arguments = vec!["list"];
+                arguments.extend(filters.iter().map(String::as_str));
+                run_utc(home.path(), &arguments)
+            })
+            .collect();
+        (texts, cases, outputs)
+    });
+    let (texts, cases, outputs) = results;
+    for ((filters, ids), output) in cases.iter().zip(&outputs) {
+        assert_eq!(output.status.code(), Some(0), "{day} {filters:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            dated_rows(&texts, ids),
+            "{day} {filters:?}"
+        );
+        assert!(output.stderr.is_empty(), "{filters:?}");
+    }
+}
+
+#[test]
+fn list_sort_due_should_order_dates_then_undated_with_priority_and_canonical_ties() {
+    let (_, (texts, outputs)) = on_stable_utc_day(|day| {
+        let home = tempfile::tempdir().unwrap();
+        let texts = dated_texts(day);
+        seed_dated_tasks(home.path(), &texts);
+        let outputs: Vec<_> = [
+            vec!["list", "--sort", "due"],
+            vec!["list", "--open", "--sort", "due"],
+            vec!["list", "--sort", "due", "--due", "any", "--open"],
+            vec!["list", "--sort", "due", "--due", "none"],
+            vec!["list", "--tag", "+missing", "--sort", "due"],
+        ]
+        .iter()
+        .map(|arguments| run_utc(home.path(), arguments))
+        .collect();
+        (texts, outputs)
+    });
+    for (output, ids) in outputs.iter().zip([
+        vec![3, 9, 1, 4, 5, 6, 2, 7],
+        vec![9, 1, 4, 5, 6, 2, 7],
+        vec![9, 1, 4, 5, 6],
+        vec![2, 7],
+        vec![],
+    ]) {
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            dated_rows(&texts, &ids)
+        );
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    seed_tagged_tasks(home.path());
+    let sorted = run_with_home(home.path(), &["list", "--sort", "due"]);
+    assert_eq!(
+        String::from_utf8_lossy(&sorted.stdout),
+        tagged_rows(&[3, 4, 1, 5, 2, 7]),
+        "undated rows fall back to priority order"
+    );
+    let output = run_with_home(home.path(), &["--local", "list", "--sort", "due"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
 }
 
 #[test]

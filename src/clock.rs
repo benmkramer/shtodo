@@ -9,13 +9,6 @@ use jiff::{Timestamp, tz::TimeZone};
 use crate::metadata::Date;
 
 /// Today's date in the local time zone, which is resolved once per process.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "shell list filters and add/edit use it in Stage 2"
-    )
-)]
 pub(crate) fn today() -> Date {
     let date = zone().to_datetime(Timestamp::now()).date();
     // jiff's civil years run from -9999 to 9999, so only a clock set before 1 BCE fails to

@@ -153,9 +153,11 @@ fn task_text_from_argument(value: OsString) -> Result<String> {
 
 fn list_tasks(
     choice: cli::ScopeChoice,
-    list: cli::ListFilter,
+    mut list: cli::ListFilter,
     format: cli::OutputFormat,
 ) -> Result<()> {
+    // Reads the clock only for a relative term such as `today` or `overdue`.
+    list.filter.due.resolve(clock::today);
     let projection = projection::Projection {
         view: list.view,
         lowercase_query: list

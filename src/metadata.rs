@@ -60,10 +60,6 @@ impl Date {
         month: 1,
         day: 1,
     };
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "shell list filters use it in Stage 2a")
-    )]
     pub(crate) const MAX: Self = Self {
         year: 9999,
         month: 12,
@@ -89,20 +85,12 @@ impl Date {
         Self::new(year, u8::try_from(month).ok()?, u8::try_from(day).ok()?)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "shell list filters use it in Stage 2a")
-    )]
     pub(crate) fn succ(self) -> Option<Self> {
         Self::new(self.year, self.month, self.day + 1)
             .or_else(|| Self::new(self.year, self.month + 1, 1))
             .or_else(|| Self::new(self.year.checked_add(1)?, 1, 1))
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "shell list filters use it in Stage 2a")
-    )]
     pub(crate) fn pred(self) -> Option<Self> {
         if self.day > 1 {
             return Some(Self {
@@ -209,10 +197,6 @@ pub(crate) fn normalize_due(text: &str, mut today: impl FnMut() -> Date) -> Cow<
 }
 
 /// One `--due` value, or the value of a `due:` filter-editor token, before `today` is known.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "shell list filters use it in Stage 2a")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DueTerm {
     /// No valid due token.
@@ -228,10 +212,6 @@ pub(crate) enum DueTerm {
     },
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "shell list filters use it in Stage 2a")
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DueBound {
     Today,
@@ -239,10 +219,6 @@ pub(crate) enum DueBound {
     Date(Date),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "shell list filters use it in Stage 2a")
-)]
 impl DueBound {
     fn parse(value: &str) -> Option<Self> {
         if value.eq_ignore_ascii_case("today") {
@@ -272,10 +248,6 @@ impl DueBound {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "shell list filters use it in Stage 2a")
-)]
 pub(crate) fn parse_due_term(value: &str) -> Option<DueTerm> {
     for (word, term) in [
         ("none", DueTerm::None),
@@ -326,10 +298,6 @@ impl DueFilter {
         self.terms.is_empty()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "shell list filters use it in Stage 2a")
-    )]
     pub(crate) fn add(&mut self, term: DueTerm) {
         if !self.terms.contains(&term) {
             self.terms.push(term);
@@ -337,10 +305,6 @@ impl DueFilter {
         self.spans = None;
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "shell list filters use it in Stage 2a")
-    )]
     /// Calls `today` only when a term depends on it, so absolute filters never read the clock.
     pub(crate) fn resolve(&mut self, today: impl FnOnce() -> Date) {
         let relative = |bound: Option<DueBound>| !matches!(bound, None | Some(DueBound::Date(_)));
