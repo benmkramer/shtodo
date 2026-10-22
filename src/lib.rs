@@ -1,6 +1,7 @@
 mod action;
 mod app;
 mod cli;
+mod clock;
 mod config;
 mod input;
 mod json;
@@ -75,6 +76,7 @@ fn execute(command: cli::Command, format: cli::OutputFormat) -> Result<()> {
         }
         cli::Command::Edit(choice, id, argument) => {
             let text = task_text_from_argument(argument)?;
+            let text = metadata::normalize_due(&text, clock::today);
             mutate_task(choice, id, TaskMutation::Edit(&text), format)?;
         }
         cli::Command::Restore(choice, id) => {
@@ -117,6 +119,8 @@ fn add_task(
         return Err(missing_task_text());
     }
 
+    // Stored text never holds a relative word, so its date cannot drift.
+    let text = metadata::normalize_due(&text, clock::today).into_owned();
     let home = storage::home_from_environment()?;
     let scope = storage::scope_from_environment(choice)?;
     let store = storage::Store::open(&home, scope)?;
@@ -152,9 +156,11 @@ fn task_text_from_argument(value: OsString) -> Result<String> {
 
 fn list_tasks(
     choice: cli::ScopeChoice,
-    list: cli::ListFilter,
+    mut list: cli::ListFilter,
     format: cli::OutputFormat,
 ) -> Result<()> {
+    // Reads the clock only for a relative term such as `today` or `overdue`.
+    list.filter.due.resolve(clock::today);
     let projection = projection::Projection {
         view: list.view,
         lowercase_query: list
@@ -176,6 +182,11 @@ fn list_tasks(
         projection::TaskOrder::Priority => {
             let mut sorted: Vec<&task::Task> = rows.collect();
             projection::sort_by_priority(&mut sorted);
+            write_list_rows(tasks.scope(), sorted.into_iter(), format)
+        }
+        projection::TaskOrder::Due => {
+            let mut sorted: Vec<&task::Task> = rows.collect();
+            projection::sort_by_due(&mut sorted);
             write_list_rows(tasks.scope(), sorted.into_iter(), format)
         }
     }

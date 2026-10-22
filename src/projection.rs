@@ -74,18 +74,20 @@ impl Projection {
 
 /// Checks run cheapest first: tombstone, view, filter, then the lowercase search.
 pub(crate) fn matches(task: &Task, projection: &Projection) -> bool {
-    matches_with(task, projection, |text| projection.filter.matches(text))
+    matches_with(task, projection, |text, completed| {
+        projection.filter.matches(text, completed)
+    })
 }
 
 /// The shared predicate with `filter` in place of `projection.filter`, for the TUI filter preview.
 pub(crate) fn matches_with(
     task: &Task,
     projection: &Projection,
-    filter: impl Fn(&str) -> bool,
+    filter: impl Fn(&str, bool) -> bool,
 ) -> bool {
     !task.is_deleted()
         && projection.view.matches(task)
-        && filter(task.text())
+        && filter(task.text(), task.completed())
         && (projection.lowercase_query.is_empty()
             || task
                 .text()
@@ -128,6 +130,7 @@ pub(crate) enum TaskOrder {
     #[default]
     Manual,
     Priority,
+    Due,
 }
 
 /// Priority order's sort key: `A` to `Z`, then no priority.
@@ -139,6 +142,23 @@ pub(crate) fn priority_key(task: &Task) -> (bool, Option<metadata::Priority>) {
 /// Stable: `A` to `Z`, then no priority; equal keys keep canonical order.
 pub(crate) fn sort_by_priority(tasks: &mut [&Task]) {
     tasks.sort_by_key(|task| priority_key(task));
+}
+
+type DueKey = (
+    bool,
+    Option<metadata::Date>,
+    (bool, Option<metadata::Priority>),
+);
+
+/// Due order's sort key: earliest date first, then no due date; priority breaks date ties.
+pub(crate) fn due_key(task: &Task) -> DueKey {
+    let due = metadata::due(task.text());
+    (due.is_none(), due, priority_key(task))
+}
+
+/// Stable, and parses each task once: equal keys keep canonical order.
+pub(crate) fn sort_by_due(tasks: &mut [&Task]) {
+    tasks.sort_by_cached_key(|task| due_key(task));
 }
 
 #[cfg(test)]
@@ -230,6 +250,78 @@ mod tests {
             Projection::default().adjacent(&list, first, MoveDirection::Down),
             Some(hidden)
         );
+    }
+
+    #[test]
+    fn due_filters_should_see_completion_and_count_as_filtering() {
+        let mut list = TaskList::new(ListScope::Global);
+        let late = list.add("late due:2026-10-20").unwrap();
+        let done_late = list.add("done late due:2026-10-19").unwrap();
+        let future = list.add("future due:2026-10-30").unwrap();
+        let late_again = list.add("late again due:2026-10-01.").unwrap();
+        list.set_completed(done_late, true).unwrap();
+        let mut overdue = TaskFilter::default();
+        overdue
+            .due
+            .add(metadata::parse_due_term("overdue").unwrap());
+        overdue
+            .due
+            .resolve(|| metadata::Date::new(2026, 10, 21).unwrap());
+        let projection = Projection {
+            filter: overdue,
+            ..Projection::default()
+        };
+        assert!(!projection.is_unfiltered());
+        assert_eq!(
+            ids(list.tasks().iter().filter(|task| projection.matches(task))),
+            [late.get(), late_again.get()]
+        );
+        assert_eq!(
+            projection.adjacent(&list, late, MoveDirection::Down),
+            Some(late_again)
+        );
+        assert_eq!(
+            projection.adjacent(&list, late_again, MoveDirection::Up),
+            Some(late)
+        );
+        assert_eq!(
+            Projection::default().adjacent(&list, late, MoveDirection::Down),
+            Some(done_late)
+        );
+        assert_ne!(future, late);
+    }
+
+    #[test]
+    fn sort_by_due_should_order_dates_then_undated_with_priority_ties() {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "undated first",
+            "(B) b due:2026-11-01",
+            "late due:2026-10-01",
+            "(A) a due:2026-11-01",
+            "plain due:2026-11-01",
+            "(A) undated a",
+            "(B) second b due:2026-11-01.",
+            "invalid due:2026-02-30",
+            "first token wins due:2026-12-01 due:2026-01-01",
+        ] {
+            list.add(text).unwrap();
+        }
+        let sorted = |list: &TaskList| {
+            let mut tasks: Vec<&Task> = list.visible_tasks().collect();
+            sort_by_due(&mut tasks);
+            ids(tasks.into_iter())
+        };
+
+        assert_eq!(sorted(&list), [3, 4, 2, 7, 5, 9, 6, 1, 8]);
+        let mut ordered = TaskList::new(ListScope::Global);
+        for text in ["x due:2026-01-01", "(A) y due:2026-01-02", "(A) z", "w"] {
+            ordered.add(text).unwrap();
+        }
+        assert_eq!(sorted(&ordered), [1, 2, 3, 4]);
+        sort_by_due(&mut []);
+        let task = list.visible_tasks().next().unwrap();
+        assert_eq!(due_key(task), (true, None, (true, None)));
     }
 
     #[test]

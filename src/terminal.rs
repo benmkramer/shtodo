@@ -6,6 +6,7 @@ use crossterm::event::{self, Event, KeyEventKind};
 use crate::{
     action::Action,
     app::{App, Mode},
+    clock,
     input::Keymap,
     session::Session,
     storage::{Snapshot, Store},
@@ -90,7 +91,7 @@ fn handle_celebration_event(app: &mut App, keymap: &Keymap, event: Event) -> boo
 }
 
 pub(crate) fn run(snapshot: Snapshot, store: &Store, keymap: &Keymap) -> Result<()> {
-    let mut session = Session::new(snapshot, std::time::Instant::now());
+    let mut session = Session::new(snapshot, std::time::Instant::now(), clock::today());
     let mut terminal = TerminalGuard::init().wrap_err("could not initialize terminal")?;
     let mut dirty = true;
     let mut animation_deadline = std::time::Instant::now() + CELEBRATION_FRAME_INTERVAL;
@@ -173,6 +174,7 @@ mod tests {
         let mut session = Session::new(
             store.read_snapshot(ScopePresence::RequireExisting).unwrap(),
             std::time::Instant::now(),
+            crate::app::test_today(),
         );
         let before = std::fs::read(&store.paths().data_file).unwrap();
         for key in ['t', 'j', 'r'] {
@@ -191,6 +193,7 @@ mod tests {
         let mut session = Session::new(
             store.read_snapshot(ScopePresence::RequireExisting).unwrap(),
             std::time::Instant::now(),
+            crate::app::test_today(),
         );
         let restored = session.app.tasks().task(older).unwrap();
         assert_eq!(restored.text(), "completed older");

@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use color_eyre::eyre::{Report, Result};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::{cli, metadata, mutation::Outcome, storage::TransactionError, task};
 
@@ -34,6 +34,19 @@ struct Task<'a> {
     /// A one-character string such as `"A"`, or `null`.
     priority: Option<char>,
     tags: Vec<&'a str>,
+    /// A `"YYYY-MM-DD"` string, or `null`.
+    #[serde(serialize_with = "serialize_due")]
+    due: Option<metadata::Date>,
+}
+
+fn serialize_due<S: Serializer>(
+    due: &Option<metadata::Date>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    match due {
+        Some(date) => serializer.collect_str(date),
+        None => serializer.serialize_none(),
+    }
 }
 
 impl<'a> From<&'a task::Task> for Task<'a> {
@@ -45,6 +58,7 @@ impl<'a> From<&'a task::Task> for Task<'a> {
             deleted: task.is_deleted(),
             priority: metadata::priority(task.text()).map(metadata::Priority::letter),
             tags: metadata::distinct_tags(task.text()),
+            due: metadata::due(task.text()),
         }
     }
 }
@@ -202,13 +216,37 @@ mod tests {
             serde_json::to_value(Task::from(list.task(tagged).unwrap())).unwrap(),
             serde_json::json!({
                 "id": 1, "text": "(A) Fix the bug +shtodo @laptop +shtodo.", "state": "open",
-                "deleted": false, "priority": "A", "tags": ["+shtodo", "@laptop"]
+                "deleted": false, "priority": "A", "tags": ["+shtodo", "@laptop"], "due": null
             })
         );
         let deleted = serde_json::to_string(&Task::from(list.task(plain).unwrap())).unwrap();
         assert!(
-            deleted.ends_with(r#""deleted":true,"priority":null,"tags":[]}"#),
+            deleted.ends_with(r#""deleted":true,"priority":null,"tags":[],"due":null}"#),
             "{deleted}"
         );
+    }
+
+    #[test]
+    fn task_objects_should_carry_the_derived_due_date_after_tags() {
+        let mut list = task::TaskList::new(task::ListScope::Global);
+        let dated = list.add("(A) Pay rent due:2026-11-01. +home").unwrap();
+        let deleted = list.add("old due:0007-03-09 due:2026-01-01").unwrap();
+        let invalid = list
+            .add("x due:2026-02-30 due:today Due:2026-11-01")
+            .unwrap();
+        list.delete(deleted).unwrap();
+
+        let json = |id| serde_json::to_string(&Task::from(list.task(id).unwrap())).unwrap();
+        assert_eq!(
+            json(dated),
+            r#"{"id":1,"text":"(A) Pay rent due:2026-11-01. +home","state":"open","deleted":false,"priority":"A","tags":["+home"],"due":"2026-11-01"}"#
+        );
+        assert!(
+            json(deleted)
+                .ends_with(r#""deleted":true,"priority":null,"tags":[],"due":"0007-03-09"}"#),
+            "{}",
+            json(deleted)
+        );
+        assert!(json(invalid).ends_with(r#""tags":[],"due":null}"#));
     }
 }

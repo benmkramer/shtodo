@@ -7,6 +7,8 @@ use color_eyre::eyre::{Result, eyre};
 use crate::{
     action::Action,
     app::{App, Transition},
+    clock,
+    metadata::Date,
     mutation::{Mutation, Outcome},
     storage::{
         INTERACTIVE_LOCK_BUDGET, MutationReply, ScopePresence, Snapshot, SnapshotToken, Store,
@@ -44,17 +46,20 @@ pub(crate) struct Session {
     token: SnapshotToken,
     initialized: bool,
     refresh: RetryDeadline,
+    /// When the local date is next read; successful mutations postpone `refresh`, not this.
+    date_check: Instant,
     recovery: Option<RetryDeadline>,
     pending_sync: Option<Outcome>,
 }
 
 impl Session {
-    pub(crate) fn new(snapshot: Snapshot, now: Instant) -> Self {
+    pub(crate) fn new(snapshot: Snapshot, now: Instant, today: Date) -> Self {
         Self {
             initialized: matches!(snapshot.token, SnapshotToken::Present(_)),
-            app: App::new(snapshot.list),
+            app: App::with_today(snapshot.list, today),
             token: snapshot.token,
             refresh: RetryDeadline::new(now),
+            date_check: now + REFRESH_INTERVAL,
             recovery: None,
             pending_sync: None,
         }
@@ -69,11 +74,10 @@ impl Session {
     }
 
     pub(crate) fn next_deadline(&self) -> Instant {
+        let next = self.refresh.next.min(self.date_check);
         self.recovery
             .as_ref()
-            .map_or(self.refresh.next, |recovery| {
-                recovery.next.min(self.refresh.next)
-            })
+            .map_or(next, |recovery| recovery.next.min(next))
     }
 
     pub(crate) fn action(&mut self, store: &Store, action: Action) -> Result<(bool, bool)> {
@@ -182,13 +186,29 @@ impl Session {
     }
 
     pub(crate) fn tick(&mut self, store: &Store, now: Instant) -> bool {
-        self.tick_using(store, now, Instant::now)
+        self.tick_using(store, now, Instant::now, clock::today)
     }
 
-    fn tick_using(&mut self, store: &Store, now: Instant, clock: impl Fn() -> Instant) -> bool {
+    /// Refreshes on its deadline and reads the local date at that deadline, or at its own deadline
+    /// when successful mutations have postponed the refresh, so writes cannot starve date reads.
+    fn tick_using(
+        &mut self,
+        store: &Store,
+        now: Instant,
+        clock: impl Fn() -> Instant,
+        today: impl Fn() -> Date,
+    ) -> bool {
         let mut dirty = false;
-        if now >= self.refresh.next {
-            dirty |= self.refresh_using(store, &clock);
+        let refresh_due = now >= self.refresh.next;
+        if refresh_due || now >= self.date_check {
+            dirty |= self.app.set_today(today());
+            if refresh_due {
+                dirty |= self.refresh_using(store, &clock);
+            }
+            // The next read is at the current refresh deadline, so idle and backed-off refreshes
+            // share one wakeup; successful mutations later postpone only the refresh. The date is
+            // read at least once a second, or with the refresh while storage errors back it off.
+            self.date_check = self.refresh.next;
         }
         if self
             .recovery
@@ -205,7 +225,7 @@ impl Session {
 mod tests {
     use super::*;
     use crate::{
-        app::{EditKind, Mode},
+        app::{EditKind, Mode, test_today},
         task::{ListScope, MoveDirection, TaskId},
     };
 
@@ -230,6 +250,7 @@ mod tests {
         let session = Session::new(
             store.read_snapshot(ScopePresence::AllowMissing).unwrap(),
             now,
+            test_today(),
         );
         (home, store, session, now)
     }
@@ -267,6 +288,97 @@ mod tests {
     }
 
     #[test]
+    fn the_date_should_be_read_once_per_second_without_parsing_or_redrawing() {
+        let (_home, store, mut session, now) = fixture();
+        let reads = std::cell::Cell::new(0);
+        let date = std::cell::Cell::new(test_today());
+        let today = || {
+            reads.set(reads.get() + 1);
+            date.get()
+        };
+
+        for millis in [0, 300, 999] {
+            let at = now + Duration::from_millis(millis);
+            assert!(!session.tick_using(&store, at, || at, today));
+        }
+        assert_eq!(reads.get(), 0, "no read before the deadline");
+
+        let before = store.counts();
+        for step in 1..=3 {
+            let at = now + Duration::from_secs(step);
+            assert!(!session.tick_using(&store, at, || at, today));
+            assert!(
+                !session.tick_using(&store, at, || at, today),
+                "not due again yet"
+            );
+        }
+        assert_eq!(reads.get(), 3, "one read per deadline");
+        assert_eq!(
+            session.next_deadline(),
+            now + Duration::from_secs(4),
+            "idle date checks share the refresh wakeup"
+        );
+        let after = store.counts();
+        assert_eq!(after.1, before.1, "unchanged bytes and date parse nothing");
+
+        // In PR 1 nothing shown depends on the date: a new day is stored without a redraw.
+        let tomorrow = test_today().succ().unwrap();
+        date.set(tomorrow);
+        let at = now + Duration::from_secs(4);
+        assert!(!session.tick_using(&store, at, || at, today));
+        assert_eq!(session.app.today(), tomorrow);
+        assert_eq!(reads.get(), 4);
+        assert_eq!(store.counts().1, before.1);
+    }
+
+    #[test]
+    fn the_date_should_be_read_every_second_while_successful_mutations_postpone_the_refresh() {
+        let (_home, store, mut session, now) = fixture();
+        let reads = std::cell::Cell::new(0);
+        let date = std::cell::Cell::new(test_today());
+        let today = || {
+            reads.set(reads.get() + 1);
+            date.get()
+        };
+        let tomorrow = test_today().succ().unwrap();
+
+        // A successful write every 500 ms keeps pushing the refresh deadline out by a second.
+        for step in 1..=20 {
+            let at = now + Duration::from_millis(step * 500);
+            if step == 11 {
+                date.set(tomorrow);
+            }
+            let request = Mutation::Add(format!("write {step}"));
+            let reply = store.mutate(
+                &request,
+                ScopePresence::RequireExisting,
+                INTERACTIVE_LOCK_BUDGET,
+            );
+            session.receive(&request, reply, at);
+            session.tick_using(&store, at, || at, today);
+            assert!(session.next_deadline() <= at + REFRESH_INTERVAL);
+        }
+        assert!(
+            reads.get() >= 9,
+            "{} date reads in ten seconds",
+            reads.get()
+        );
+        assert_eq!(session.app.today(), tomorrow);
+
+        session.action(&store, Action::StartAdd).unwrap();
+        for character in "x due:today".chars() {
+            session
+                .action(&store, Action::InsertChar(character))
+                .unwrap();
+        }
+        session.action(&store, Action::CommitEdit).unwrap();
+        assert_eq!(
+            store.load().unwrap().visible_tasks().last().unwrap().text(),
+            format!("x due:{tomorrow}")
+        );
+    }
+
+    #[test]
     fn refresh_should_rebuild_sorted_order_and_unchanged_bytes_should_not_parse_while_sorted() {
         let (_home, store, mut session, now) = fixture();
         session.action(&store, Action::ToggleSort).unwrap();
@@ -290,7 +402,7 @@ mod tests {
         let before = store.counts();
         for step in 1..=5 {
             let at = now + Duration::from_secs(step);
-            assert!(!session.tick_using(&store, at, || at));
+            assert!(!session.tick_using(&store, at, || at, test_today));
         }
         let after = store.counts();
         assert_eq!(after.0 - before.0, 5);
@@ -343,7 +455,7 @@ mod tests {
         let before = store.counts();
         for step in 1..=5 {
             let at = now + Duration::from_secs(step);
-            assert!(!session.tick_using(&store, at, || at));
+            assert!(!session.tick_using(&store, at, || at, test_today));
         }
         let after = store.counts();
         assert_eq!(after.0 - before.0, 5);
@@ -550,10 +662,12 @@ mod tests {
         let before = store.counts();
         for step in 1..=20 {
             session.action(&store, Action::MoveDown).unwrap();
-            assert!(
-                !session.tick_using(&store, now + Duration::from_millis(step * 100), || now
-                    + Duration::from_millis(step * 100))
-            );
+            assert!(!session.tick_using(
+                &store,
+                now + Duration::from_millis(step * 100),
+                || now + Duration::from_millis(step * 100),
+                test_today
+            ));
         }
         let after = store.counts();
         assert_eq!(after.0 - before.0, 2);
@@ -565,14 +679,18 @@ mod tests {
     fn slow_refresh_should_advance_from_now_without_a_catchup_burst() {
         let (_home, store, mut session, now) = fixture();
         let before = store.counts();
-        assert!(
-            !session.tick_using(&store, now + Duration::from_secs(10), || now
-                + Duration::from_secs(12))
-        );
-        assert!(
-            !session.tick_using(&store, now + Duration::from_secs(12), || now
-                + Duration::from_secs(12))
-        );
+        assert!(!session.tick_using(
+            &store,
+            now + Duration::from_secs(10),
+            || now + Duration::from_secs(12),
+            test_today
+        ));
+        assert!(!session.tick_using(
+            &store,
+            now + Duration::from_secs(12),
+            || now + Duration::from_secs(12),
+            test_today
+        ));
         assert_eq!(store.counts().0, before.0 + 1);
         assert_eq!(session.next_deadline(), now + Duration::from_secs(13));
     }
@@ -609,9 +727,12 @@ mod tests {
             .unwrap();
         // The terminal processes input before the overdue refresh, through action().
         session.action(&store, Action::ToggleComplete).unwrap();
-        session.tick_using(&store, now + Duration::from_secs(1), || {
-            now + Duration::from_secs(1)
-        });
+        session.tick_using(
+            &store,
+            now + Duration::from_secs(1),
+            || now + Duration::from_secs(1),
+            test_today,
+        );
         assert_eq!(session.app.selected(), Some(id(2)));
         assert!(session.app.tasks().task(id(1)).unwrap().is_deleted());
         assert!(!session.app.tasks().task(id(2)).unwrap().completed());
@@ -655,6 +776,7 @@ mod tests {
         let mut second = Session::new(
             store.read_snapshot(ScopePresence::RequireExisting).unwrap(),
             now,
+            test_today(),
         );
         first.action(&store, Action::StartEdit).unwrap();
         first.action(&store, Action::InsertChar('é')).unwrap();
@@ -718,10 +840,12 @@ mod tests {
                 INTERACTIVE_LOCK_BUDGET,
             )
             .unwrap();
-        assert!(
-            session.tick_using(&store, now + Duration::from_secs(1), || now
-                + Duration::from_secs(1))
-        );
+        assert!(session.tick_using(
+            &store,
+            now + Duration::from_secs(1),
+            || now + Duration::from_secs(1),
+            test_today
+        ));
         assert_eq!(session.app.editor().unwrap(), &before);
         assert!(session.app.celebration().is_none());
         session.action(&store, Action::CancelEdit).unwrap();
@@ -733,9 +857,12 @@ mod tests {
                 INTERACTIVE_LOCK_BUDGET,
             )
             .unwrap();
-        session.tick_using(&store, now + Duration::from_secs(2), || {
-            now + Duration::from_secs(2)
-        });
+        session.tick_using(
+            &store,
+            now + Duration::from_secs(2),
+            || now + Duration::from_secs(2),
+            test_today,
+        );
         assert_eq!(session.app.mode(), Mode::Help);
     }
 
@@ -785,9 +912,12 @@ mod tests {
                 INTERACTIVE_LOCK_BUDGET,
             )
             .unwrap();
-        session.tick_using(&store, now + Duration::from_secs(1), || {
-            now + Duration::from_secs(1)
-        });
+        session.tick_using(
+            &store,
+            now + Duration::from_secs(1),
+            || now + Duration::from_secs(1),
+            test_today,
+        );
         assert_eq!(session.app.selected(), Some(id(2)));
         assert_eq!(session.app.editor().unwrap().kind(), EditKind::Edit(id(1)));
         store
@@ -797,9 +927,12 @@ mod tests {
                 INTERACTIVE_LOCK_BUDGET,
             )
             .unwrap();
-        session.tick_using(&store, now + Duration::from_secs(2), || {
-            now + Duration::from_secs(2)
-        });
+        session.tick_using(
+            &store,
+            now + Duration::from_secs(2),
+            || now + Duration::from_secs(2),
+            test_today,
+        );
         session.action(&store, Action::CommitEdit).unwrap();
         assert_eq!(session.app.mode(), Mode::Insert);
         assert_eq!(
@@ -891,28 +1024,36 @@ mod tests {
         let good = std::fs::read(&store.paths().data_file).unwrap();
         let before = session.app.tasks().clone();
         std::fs::write(&store.paths().data_file, b"{").unwrap();
-        assert!(
-            session.tick_using(&store, now + Duration::from_secs(1), || now
-                + Duration::from_secs(1))
-        );
+        assert!(session.tick_using(
+            &store,
+            now + Duration::from_secs(1),
+            || now + Duration::from_secs(1),
+            test_today
+        ));
         assert_eq!(session.app.tasks(), &before);
         assert_eq!(session.next_deadline(), now + Duration::from_secs(3));
-        assert!(
-            !session.tick_using(&store, now + Duration::from_secs(3), || now
-                + Duration::from_secs(3))
-        );
+        assert!(!session.tick_using(
+            &store,
+            now + Duration::from_secs(3),
+            || now + Duration::from_secs(3),
+            test_today
+        ));
         assert_eq!(session.next_deadline(), now + Duration::from_secs(7));
-        assert!(
-            !session.tick_using(&store, now + Duration::from_secs(7), || now
-                + Duration::from_secs(7))
-        );
+        assert!(!session.tick_using(
+            &store,
+            now + Duration::from_secs(7),
+            || now + Duration::from_secs(7),
+            test_today
+        ));
         assert_eq!(session.next_deadline(), now + Duration::from_secs(12));
         std::fs::write(&store.paths().data_file, good).unwrap();
         let parses = store.counts().1;
-        assert!(
-            session.tick_using(&store, now + Duration::from_secs(12), || now
-                + Duration::from_secs(12))
-        );
+        assert!(session.tick_using(
+            &store,
+            now + Duration::from_secs(12),
+            || now + Duration::from_secs(12),
+            test_today
+        ));
         assert!(session.app.message().is_none());
         assert_eq!(store.counts().1, parses);
     }
@@ -939,9 +1080,12 @@ mod tests {
         let (_home, store, mut session, now) = fixture();
         std::fs::remove_file(&store.paths().data_file).unwrap();
         std::fs::remove_file(&store.paths().lock_file).unwrap();
-        session.tick_using(&store, now + Duration::from_secs(1), || {
-            now + Duration::from_secs(1)
-        });
+        session.tick_using(
+            &store,
+            now + Duration::from_secs(1),
+            || now + Duration::from_secs(1),
+            test_today,
+        );
         session.action(&store, Action::Delete).unwrap();
         assert!(!store.paths().data_file.exists());
         assert!(!store.paths().lock_file.exists());
@@ -975,10 +1119,14 @@ mod tests {
         let mut session = Session::new(
             store.read_snapshot(ScopePresence::AllowMissing).unwrap(),
             now,
+            test_today(),
         );
-        session.tick_using(&store, now + Duration::from_secs(1), || {
-            now + Duration::from_secs(1)
-        });
+        session.tick_using(
+            &store,
+            now + Duration::from_secs(1),
+            || now + Duration::from_secs(1),
+            test_today,
+        );
         assert!(!home.path().join(".shtodo").exists());
         session.action(&store, Action::StartAdd).unwrap();
         session.action(&store, Action::InsertChar('a')).unwrap();
@@ -1043,9 +1191,12 @@ mod tests {
             .open(&store.paths().lock_file)
             .unwrap();
         lock.try_lock().unwrap();
-        session.tick_using(&store, now + Duration::from_secs(1), || {
-            now + Duration::from_secs(1)
-        });
+        session.tick_using(
+            &store,
+            now + Duration::from_secs(1),
+            || now + Duration::from_secs(1),
+            test_today,
+        );
         assert_eq!(
             session.recovery.as_ref().unwrap().next,
             now + Duration::from_secs(3)
@@ -1060,9 +1211,12 @@ mod tests {
         assert_eq!(session.app.mode(), Mode::Normal);
         assert!(session.app.needs_sync());
         drop(lock);
-        session.tick_using(&store, now + Duration::from_secs(3), || {
-            now + Duration::from_secs(3)
-        });
+        session.tick_using(
+            &store,
+            now + Duration::from_secs(3),
+            || now + Duration::from_secs(3),
+            test_today,
+        );
         assert!(!session.app.needs_sync());
     }
 
@@ -1143,7 +1297,10 @@ mod tests {
 #[cfg(test)]
 mod measurements {
     use super::*;
-    use crate::task::{ListScope, TaskList};
+    use crate::{
+        app::test_today,
+        task::{ListScope, TaskList},
+    };
 
     struct Group {
         _home: tempfile::TempDir,
@@ -1206,6 +1363,7 @@ mod measurements {
                         Session::new(
                             store.read_snapshot(ScopePresence::RequireExisting).unwrap(),
                             Instant::now(),
+                            test_today(),
                         )
                     })
                     .collect();

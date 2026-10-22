@@ -12,6 +12,7 @@ specified verification gates, and update its status only after completion.
 | [004](./004-browsable-trash.md) | Add browsable TUI trash and selective restoration | P1 | M | 001 | DONE |
 | [Concurrent usage](./concurrent-usage.md) | Short storage transactions and safe TUI refresh | P1 | L | Plan 001; see integration order | DONE |
 | [Tags and priority](./2026-10-21-tags-and-priority.md) | Derived todo.txt priority and tags with TUI and shell list filtering | P1 | L | Concurrent usage; JSON output | DONE |
+| [Due dates](./2026-10-21-due-dates.md) | Derived todo.txt `due:` dates with shell `--due`/`--sort due`, JSON `due`, and TUI styling and sort | P2 | L | Tags and priority | IN PROGRESS |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a short reason, or REJECTED
 with a short rationale.

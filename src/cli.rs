@@ -1,7 +1,7 @@
 use std::{error::Error, ffi::OsString, fmt};
 
 use crate::{
-    metadata::{FilterToken, TaskFilter, parse_filter_token},
+    metadata::{FilterToken, TaskFilter, parse_due_term, parse_filter_token},
     projection::{TaskOrder, TaskView},
 };
 
@@ -80,7 +80,7 @@ impl fmt::Display for CliError {
                 )?;
             }
             Self::MissingFilterValue { flag: "--sort" } => {
-                formatter.write_str("--sort requires a value; expected priority")?;
+                formatter.write_str("--sort requires a value; expected priority or due")?;
             }
             Self::MissingFilterValue { flag } => write!(formatter, "{flag} requires a value")?,
             Self::InvalidFilterValue { flag, value } => match (*flag, value.to_str()) {
@@ -92,7 +92,8 @@ impl fmt::Display for CliError {
                     let expected = match flag {
                         "--tag" => "+project or @context",
                         "--priority" => "a letter A-Z, a range such as A-C, or none",
-                        _ => "priority",
+                        "--due" => "today, tomorrow, overdue, none, any, YYYY-MM-DD, or START..END",
+                        _ => "priority or due",
                     };
                     write!(formatter, "invalid {flag} {value:?}; expected {expected}")?;
                 }
@@ -267,7 +268,7 @@ where
 fn takes_list_value(argument: &OsString) -> bool {
     matches!(
         argument.to_str(),
-        Some("--tag" | "--priority" | "--search" | "--sort")
+        Some("--tag" | "--priority" | "--due" | "--search" | "--sort")
     )
 }
 
@@ -308,6 +309,12 @@ fn parse_list_args(arguments: &[OsString]) -> Result<ListFilter, CliError> {
                     _ => return Err(invalid_list_value("--priority", value)),
                 }
             }
+            Some("--due") => {
+                let (value, text) = list_value(&mut arguments, "--due")?;
+                let term =
+                    parse_due_term(text).ok_or_else(|| invalid_list_value("--due", value))?;
+                list.filter.due.add(term);
+            }
             Some("--search") => {
                 if list.search.is_some() {
                     return Err(CliError::DuplicateListFlag { flag: "--search" });
@@ -323,11 +330,12 @@ fn parse_list_args(arguments: &[OsString]) -> Result<ListFilter, CliError> {
                     return Err(CliError::DuplicateListFlag { flag: "--sort" });
                 }
                 let (value, text) = list_value(&mut arguments, "--sort")?;
-                if text != "priority" {
-                    return Err(invalid_list_value("--sort", value));
-                }
+                list.order = match text {
+                    "priority" => TaskOrder::Priority,
+                    "due" => TaskOrder::Due,
+                    _ => return Err(invalid_list_value("--sort", value)),
+                };
                 sorted = true;
-                list.order = TaskOrder::Priority;
             }
             _ => {
                 return Err(CliError::UnsupportedArguments {
@@ -415,7 +423,7 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo list\n",
         "  shtodo --local list\n",
         "  shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]...\n",
-        "              [--search <TEXT>] [--sort priority]\n",
+        "              [--due <WHEN>]... [--search <TEXT>] [--sort priority|due]\n",
         "  shtodo delete <ID>\n",
         "  shtodo --local delete <ID>\n",
         "  shtodo [--local] done <ID>\n",
@@ -433,8 +441,12 @@ pub(crate) fn usage() -> &'static str {
         "  list        List non-deleted tasks with their IDs and states.\n",
         "              --open or --done keeps one state. --tag +project or @context\n",
         "              (repeat: all must match). --priority A, A-C, or none (repeat:\n",
-        "              any may match). --search TEXT matches case-insensitively.\n",
-        "              --sort priority lists A to Z, then unprioritized tasks.\n",
+        "              any may match). --due today, tomorrow, overdue, none, any,\n",
+        "              YYYY-MM-DD, or START..END such as today..2026-10-31 (repeat:\n",
+        "              any may match; overdue is open tasks due before today).\n",
+        "              --search TEXT matches case-insensitively. --sort priority\n",
+        "              lists A to Z, then unprioritized tasks; --sort due lists\n",
+        "              the earliest date first, then undated tasks.\n",
         "              Each flag value is the next argument, even if it starts with -.\n",
         "  delete <ID> Soft-delete one task by its scope-local ID.\n",
         "  done <ID>   Mark one live task done (safe to repeat).\n",
@@ -465,6 +477,7 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo --local list\n",
         "  shtodo list --json\n",
         "  shtodo list --open --tag +work --sort priority\n",
+        "  shtodo list --open --due overdue --due today --sort due\n",
         "  shtodo --json list --priority A-B --search release\n",
         "  shtodo --local --json add \"Run the tests\"\n",
         "  shtodo delete 3\n",
@@ -489,7 +502,7 @@ mod tests {
         CliError, Command, ListFilter, OutputFormat, ScopeChoice, parse_args, parse_invocation,
     };
     use crate::{
-        metadata::{TaskFilter, parse_filter_token},
+        metadata::{TaskFilter, parse_due_term, parse_filter_token},
         projection::{TaskOrder, TaskView},
     };
 
@@ -799,7 +812,23 @@ mod tests {
             (vec!["--tag"], "--tag requires a value"),
             (vec!["--priority"], "--priority requires a value"),
             (vec!["--search"], "--search requires a value"),
-            (vec!["--sort"], "--sort requires a value; expected priority"),
+            (
+                vec!["--sort"],
+                "--sort requires a value; expected priority or due",
+            ),
+            (vec!["--due"], "--due requires a value"),
+            (
+                vec!["--sort", "Due"],
+                r#"invalid --sort "Due"; expected priority or due"#,
+            ),
+            (
+                vec!["--sort", "priority", "--sort", "due"],
+                "--sort may only be specified once",
+            ),
+            (
+                vec!["--sort", "due", "--sort", "due"],
+                "--sort may only be specified once",
+            ),
             (
                 vec!["--tag", "work"],
                 r#"invalid --tag "work"; expected +project or @context"#,
@@ -859,23 +888,23 @@ mod tests {
             ),
             (
                 vec!["--sort", "manual"],
-                r#"invalid --sort "manual"; expected priority"#,
+                r#"invalid --sort "manual"; expected priority or due"#,
             ),
             (
                 vec!["--sort", "x"],
-                r#"invalid --sort "x"; expected priority"#,
+                r#"invalid --sort "x"; expected priority or due"#,
             ),
             (
                 vec!["--sort", "Priority"],
-                r#"invalid --sort "Priority"; expected priority"#,
+                r#"invalid --sort "Priority"; expected priority or due"#,
             ),
             (
                 vec!["--sort", ""],
-                r#"invalid --sort ""; expected priority"#,
+                r#"invalid --sort ""; expected priority or due"#,
             ),
             (
                 vec!["--sort", "--json"],
-                r#"invalid --sort "--json"; expected priority"#,
+                r#"invalid --sort "--json"; expected priority or due"#,
             ),
             (
                 vec!["--open", "--open"],
@@ -902,14 +931,108 @@ mod tests {
             vec!["--sort", "manual"],
             vec!["--sort", "--json"],
         ] {
-            assert!(list_error(&values).contains("expected priority"));
+            assert!(list_error(&values).contains("expected priority or due"));
+        }
+    }
+
+    #[test]
+    fn parse_list_args_should_accept_due_values_as_a_union_with_every_flag() {
+        let due = |values: &[&str]| {
+            let mut filter = TaskFilter::default();
+            for value in values {
+                filter.due.add(parse_due_term(value).unwrap());
+            }
+            filter
+        };
+        for value in [
+            "today",
+            "tomorrow",
+            "overdue",
+            "none",
+            "any",
+            "2026-10-21",
+            "2026-10-01..2026-10-31",
+            "..2026-10-31",
+            "today..",
+            "today..tomorrow",
+            "2026-10-25..today",
+            "TODAY",
+            "None",
+        ] {
+            assert_eq!(list(&["--due", value]).unwrap().filter, due(&[value]));
+        }
+        assert_eq!(
+            list(&["--due", "overdue", "--due", "today", "--due", "overdue"])
+                .unwrap()
+                .filter,
+            due(&["overdue", "today"])
+        );
+        let mut expected_filter = task_filter(&["+work", "A"]);
+        for value in ["overdue", "today"] {
+            expected_filter.due.add(parse_due_term(value).unwrap());
+        }
+        assert_eq!(
+            list(&[
+                "--due",
+                "overdue",
+                "--open",
+                "--tag",
+                "+work",
+                "--sort",
+                "due",
+                "--search",
+                "pay",
+                "--priority",
+                "A",
+                "--due",
+                "today",
+            ]),
+            Ok(ListFilter {
+                view: TaskView::Open,
+                filter: expected_filter,
+                search: Some("pay".into()),
+                order: TaskOrder::Due,
+            })
+        );
+        assert_eq!(list(&["--sort", "due"]).unwrap().order, TaskOrder::Due);
+        assert_eq!(
+            list(&["--sort", "priority"]).unwrap().order,
+            TaskOrder::Priority
+        );
+        assert_eq!(
+            list(&["--search", "--due"]).unwrap().search.as_deref(),
+            Some("--due")
+        );
+    }
+
+    #[test]
+    fn parse_list_args_should_reject_invalid_due_values_with_the_value_table() {
+        for value in [
+            "soon",
+            "week",
+            "",
+            "..",
+            "2026-02-30",
+            "2026-1-5",
+            "due:today",
+            "--json",
+            "2026-10-22..2026-10-21",
+            "tomorrow..today",
+            " today",
+        ] {
+            let error = list_error(&["--due", value]);
+            let message = format!(
+                "invalid --due {value:?}; expected today, tomorrow, overdue, none, any, \
+                 YYYY-MM-DD, or START..END"
+            );
+            assert!(error.starts_with(&message), "{value:?}: {error}");
         }
     }
 
     #[cfg(unix)]
     #[test]
     fn parse_list_args_should_reject_non_utf8_filter_values() {
-        for flag in ["--tag", "--priority", "--search", "--sort"] {
+        for flag in ["--tag", "--priority", "--search", "--sort", "--due"] {
             let error = parse_args(vec![
                 OsString::from("list"),
                 OsString::from(flag),
@@ -977,6 +1100,18 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .starts_with(r#"invalid --sort "--json""#)
+        );
+        assert_eq!(
+            invoke(&["list", "--due", "today", "--json", "--sort", "due"]).0,
+            OutputFormat::Json
+        );
+        let (format, error) = invoke(&["list", "--due", "--json"]);
+        assert_eq!(format, OutputFormat::Text);
+        assert!(
+            error
+                .unwrap_err()
+                .to_string()
+                .starts_with(r#"invalid --due "--json""#)
         );
         for values in [
             vec!["list", "--wat", "--json"],

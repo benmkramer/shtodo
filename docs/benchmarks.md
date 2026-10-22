@@ -17,14 +17,17 @@ list, delete, done, reopen, edit, and restore, with optional `add --print-id`
 output for scripts. Shell listing has state, tag, priority, and text filters
 and an optional priority sort; their cost is in the
 [tags and priority shell comparison](./benchmarks/2026-10-21-tags-and-priority-cli-comparison.md).
+Due-date filters, `--sort due`, the JSON `due` field, and relative-word
+rewriting are measured in the
+[due dates shell comparison](./benchmarks/2026-10-21-due-dates-cli-comparison.md).
 The unreleased TUI priority styling, sort, and filter editor are measured in
 the [tags and priority TUI comparison](./benchmarks/2026-10-21-tags-and-priority-tui-comparison.md).
 The current measurements
 use a local beta.3 release build with the unreleased concurrency implementation.
 The fuller lifecycle commands and TUI behavior are measured in a separate
 [paired beta.3 comparison](./benchmarks/concurrent-usage-comparison.md).
-Priorities and tags are only todo.txt tokens in the task text. It has no
-scheduling, recurrence,
+Priorities, tags, and due dates are only todo.txt tokens in the task text. It
+has no reminders, recurrence,
 sync, supported import/export, or structured JSON output. See the
 [current scope](./usage.md#version-one-limits) and
 [feature comparison](#feature-comparison).
@@ -143,6 +146,19 @@ fields. The owner's decision on accepting it is recorded as question 12 in the
 [plan's decisions table](./plans/2026-10-21-tags-and-priority.md#decisions-before-stage-0-exits).
 Text listing does no token work. Filtered and sorted cases are recorded for
 information.
+
+## Due dates shell commands: October 21, 2026
+
+The [paired shell comparison](./benchmarks/2026-10-21-due-dates-cli-comparison.md)
+measures derived due dates against `a33b687` in two runs with different seeds.
+At 10,000 records, text `list` is within 1% on the plain, mixed, and dated
+fixtures. `list --json` is +2.7% to +5.7% on the plain, mixed, and tagged
+fixtures and +9.0% to +10.6% (+0.65 to +0.76 ms) on a fixture where half the
+tasks have a due date, within the 1.5 ms absolute bound. The cost is the
+always-present `due` field, which adds 9% to 12% to the output bytes. The
+first clock read in `add "x due:today"` and `list --due today` is not
+measurable against the same build's plain `add` and `--due DATE`. Due filters
+and `--sort due` are recorded for information.
 
 ## Tags and priority TUI: October 21, 2026
 
@@ -459,7 +475,7 @@ and the fuller shell lifecycle have their own
 | Interaction | Built-in keyboard TUI and small CLI | Rich CLI | Bash CLI |
 | Shell task lifecycle | Add, list, done, reopen, edit, delete, restore | Add, list, modify, done, delete | Add, list, replace, do, delete |
 | Organization | Global and exact-directory lists; TUI text search and All/Open/Done tabs; todo.txt `+project`/`@context` tags with shell `list` filters | Projects, tags, contexts, filters | Text files, `+projects`, `@contexts`, text filtering |
-| Priority and scheduling | todo.txt letter priorities with `list --sort priority`; no scheduling | Priority, due dates, recurrence | Letter priorities; dates/text conventions, no core recurrence scheduler |
+| Priority and scheduling | todo.txt letter priorities and `due:YYYY-MM-DD` due dates, with `list --due`, `--sort priority`, and `--sort due`; no reminders or recurrence | Priority, due dates, recurrence | Letter priorities; dates/text conventions, no core recurrence scheduler |
 | Data and integration | Local versioned JSON; no supported import/export | TaskChampion storage; JSON import/export and hooks | Human-editable text; add-ons |
 | Sync | None | Configured TaskChampion sync | External file tooling; no core sync engine |
 | Delete recovery | Retained tombstones; shell restore by ID or latest/selective restoration in TUI | Deleted status and undo | No equivalent core undo command |

@@ -19,6 +19,14 @@ All notable changes to shtodo are documented in this file.
   storage is read.
 - JSON task objects include `priority` and `tags`, and JSON listing honors
   every filter and `--sort priority`.
+- Due dates derived from a todo.txt `due:YYYY-MM-DD` token in the task text.
+  Nothing new is stored. On add and edit, in the shell and the TUI,
+  `due:today` and `due:tomorrow` are rewritten to the date in the process's
+  time zone, so saved text always holds an absolute date.
+- `shtodo list --due` with `today`, `tomorrow`, `overdue`, `none`, `any`, a
+  date, or an inclusive `START..END` range, repeatable as OR, and
+  `--sort due` (earliest first, then undated tasks).
+- JSON task objects include `due`, a `"YYYY-MM-DD"` string or `null`.
 - TUI rows style the priority marker and tags in place: bold priority, cyan
   `+project`, magenta `@context`.
 - TUI `s` toggles priority order, sharing the order of `list --sort priority`.
