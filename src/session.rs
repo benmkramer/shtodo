@@ -258,6 +258,46 @@ mod tests {
         session.action(store, Action::CommitEdit).unwrap();
     }
 
+    fn displayed(session: &Session) -> Vec<u64> {
+        session
+            .app
+            .visible_tasks()
+            .map(|task| task.id().get())
+            .collect()
+    }
+
+    #[test]
+    fn refresh_should_rebuild_sorted_order_and_unchanged_bytes_should_not_parse_while_sorted() {
+        let (_home, store, mut session, now) = fixture();
+        session.action(&store, Action::ToggleSort).unwrap();
+        session.action(&store, Action::MoveDown).unwrap();
+        assert_eq!(displayed(&session), [1, 2]);
+        assert_eq!(session.app.selected(), Some(id(2)));
+        write(&store, Mutation::Add("(B) shell arrival".into()));
+        write(
+            &store,
+            Mutation::EditText {
+                id: id(1),
+                text: "(C) base 東京".into(),
+                original: None,
+            },
+        );
+        assert!(session.refresh_using(&store, || now));
+        assert_eq!(displayed(&session), [3, 1, 2]);
+        assert_eq!(session.app.selected(), Some(id(2)));
+        assert_eq!(session.app.order(), crate::projection::TaskOrder::Priority);
+
+        let before = store.counts();
+        for step in 1..=5 {
+            let at = now + Duration::from_secs(step);
+            assert!(!session.tick_using(&store, at, || at));
+        }
+        let after = store.counts();
+        assert_eq!(after.0 - before.0, 5);
+        assert_eq!(after.1, before.1);
+        assert_eq!(displayed(&session), [3, 1, 2]);
+    }
+
     #[test]
     fn refresh_should_preserve_live_search_editor_and_reconcile_the_active_projection() {
         let (_home, store, mut session, now) = fixture();

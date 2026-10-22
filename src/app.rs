@@ -1,7 +1,7 @@
 use crate::{
     action::Action,
     mutation::{ConflictKind, Mutation, Outcome, TaskObservation},
-    projection::Projection,
+    projection::{self, Projection, TaskOrder},
     task::{ListError, MoveDirection, Task, TaskId, TaskList},
 };
 
@@ -226,6 +226,13 @@ struct TrashState {
     selected: Option<TaskId>,
 }
 
+/// A footer notice that names a configured key, so the UI renders its text from the keymap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Notice {
+    /// Reorder was requested while the list is sorted by priority.
+    ManualOrderRequired,
+}
+
 pub(crate) struct App {
     tasks: TaskList,
     mode: Mode,
@@ -233,9 +240,13 @@ pub(crate) struct App {
     trash: Option<TrashState>,
     editor: Option<Editor>,
     message: Option<String>,
+    notice: Option<Notice>,
     celebration: Option<Celebration>,
     query: String,
     projection: Projection,
+    order: TaskOrder,
+    /// Canonical indices of live tasks in Priority order; rebuilt when tasks or order change.
+    sorted: Option<Vec<usize>>,
     search_session: Option<SearchSession>,
     pending: Option<Mutation>,
     storage_error: Option<String>,
@@ -257,9 +268,12 @@ impl App {
             trash: None,
             editor: None,
             message: None,
+            notice: None,
             celebration: None,
             query: String::new(),
             projection: Projection::default(),
+            order: TaskOrder::Manual,
+            sorted: None,
             search_session: None,
             pending: None,
             storage_error: None,
@@ -347,9 +361,37 @@ impl App {
         &self.query
     }
 
-    /// The transient TUI projection, in canonical order. Storage visibility stays unchanged.
+    pub(crate) fn order(&self) -> TaskOrder {
+        self.order
+    }
+
+    /// The transient TUI projection, in display order. Storage visibility stays unchanged.
     pub(crate) fn visible_tasks(&self) -> impl Iterator<Item = &Task> {
-        self.tasks.visible_tasks().filter(|task| self.matches(task))
+        self.ordered_live_tasks().filter(|task| self.matches(task))
+    }
+
+    /// Live tasks in display order: canonical, or the cached Priority order.
+    fn ordered_live_tasks(&self) -> impl Iterator<Item = &Task> {
+        let tasks = self.tasks.tasks();
+        let sorted = self.sorted.as_deref();
+        let canonical = sorted.is_none().then(|| self.tasks.visible_tasks());
+        sorted
+            .into_iter()
+            .flatten()
+            .map(move |&index| &tasks[index])
+            .chain(canonical.into_iter().flatten())
+    }
+
+    fn rebuild_order(&mut self) {
+        self.sorted = (self.order == TaskOrder::Priority).then(|| {
+            let start = self.tasks.tasks().as_ptr().addr();
+            let mut live = self.tasks.visible_tasks().collect::<Vec<_>>();
+            projection::sort_by_priority(&mut live);
+            // The sorted references point into the canonical slice, so their offsets are indices.
+            live.into_iter()
+                .map(|task| (std::ptr::from_ref(task).addr() - start) / size_of::<Task>())
+                .collect()
+        });
     }
 
     fn matches(&self, task: &Task) -> bool {
@@ -362,6 +404,10 @@ impl App {
 
     pub(crate) fn editor(&self) -> Option<&Editor> {
         self.editor.as_ref()
+    }
+
+    pub(crate) fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
     }
 
     pub(crate) fn message(&self) -> Option<&str> {
@@ -402,6 +448,7 @@ impl App {
                 | Action::CycleView
                 | Action::PreviousView
                 | Action::ClearSearch
+                | Action::ToggleSort
                 | Action::OpenTrash
                 | Action::OpenHelp
                 | Action::Quit
@@ -424,6 +471,7 @@ impl App {
             Action::CycleView => self.cycle_view(MoveDirection::Down),
             Action::PreviousView => self.cycle_view(MoveDirection::Up),
             Action::ClearSearch => self.clear_search(),
+            Action::ToggleSort => self.toggle_sort(),
             Action::OpenTrash => self.open_trash(),
             Action::OpenHelp => self.open_help(),
             Action::Quit => Transition::Quit,
@@ -631,33 +679,68 @@ impl App {
         Transition::Transient
     }
 
-    /// Keep identity when possible, otherwise choose the next match, then the previous one.
+    fn toggle_sort(&mut self) -> Transition {
+        self.order = match self.order {
+            TaskOrder::Manual => TaskOrder::Priority,
+            TaskOrder::Priority => TaskOrder::Manual,
+        };
+        self.rebuild_order();
+        self.reconcile_selection();
+        Transition::Transient
+    }
+
     fn reconcile_selection(&mut self) {
+        self.selected = self.reconciled_selection();
+    }
+
+    /// Keep identity when possible, otherwise choose the next match, then the previous one,
+    /// in display order.
+    fn reconciled_selection(&self) -> Option<TaskId> {
         let mut previous = None;
         let mut passed_selected = self.selected.is_none();
-        for task in self.tasks.visible_tasks() {
+        for task in self.ordered_live_tasks() {
             if Some(task.id()) == self.selected {
                 if self.matches(task) {
-                    return;
+                    return self.selected;
                 }
                 passed_selected = true;
             } else if self.matches(task) {
                 if passed_selected {
-                    self.selected = Some(task.id());
-                    return;
+                    return Some(task.id());
                 }
                 previous = Some(task.id());
             }
         }
-        self.selected = previous;
+        previous
     }
 
+    /// Canonical neighbor in the projection; reorder and the reorder guard use this.
     fn adjacent_visible(&self, selected: TaskId, direction: MoveDirection) -> Option<TaskId> {
         self.projection.adjacent(&self.tasks, selected, direction)
     }
 
+    /// Neighbor in display order, for selection movement.
+    fn adjacent_displayed(&self, selected: TaskId, direction: MoveDirection) -> Option<TaskId> {
+        if self.sorted.is_none() {
+            return self.adjacent_visible(selected, direction);
+        }
+        let mut previous = None;
+        let mut tasks = self.visible_tasks();
+        while let Some(task) = tasks.next() {
+            if task.id() == selected {
+                return match direction {
+                    MoveDirection::Up => previous,
+                    MoveDirection::Down => tasks.next().map(Task::id),
+                };
+            }
+            previous = Some(task.id());
+        }
+        None
+    }
+
     fn clear_message(&mut self) -> bool {
-        self.message.take().is_some()
+        let notice_was_cleared = self.notice.take().is_some();
+        self.message.take().is_some() || notice_was_cleared
     }
 
     fn after_message_clear(transition: Transition, message_was_cleared: bool) -> Transition {
@@ -675,7 +758,7 @@ impl App {
         let Some(selected) = self.selected else {
             return Transition::Unchanged;
         };
-        let Some(next) = self.adjacent_visible(selected, direction) else {
+        let Some(next) = self.adjacent_displayed(selected, direction) else {
             return Transition::Unchanged;
         };
         self.selected = Some(next);
@@ -692,6 +775,11 @@ impl App {
     }
 
     fn move_task(&mut self, direction: MoveDirection) -> Result<Transition, ListError> {
+        if self.order == TaskOrder::Priority {
+            // A swap in priority order has no canonical meaning, so no mutation is submitted.
+            self.notice = Some(Notice::ManualOrderRequired);
+            return Ok(Transition::Transient);
+        }
         let Some(id) = self.selected else {
             return Ok(Transition::Unchanged);
         };
@@ -750,6 +838,7 @@ impl App {
             })
             .unwrap_or(0);
         self.tasks = tasks;
+        self.rebuild_order();
         if !self
             .selected
             .is_some_and(|id| self.tasks.task(id).is_some_and(|task| self.matches(task)))
@@ -2370,5 +2459,171 @@ mod view_tests {
         }
         assert_eq!(app.tasks(), &snapshot);
         assert!(app.selected_task().is_none());
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::{App, Mode, Notice, TaskView, Transition};
+    use crate::{
+        action::Action,
+        projection::TaskOrder,
+        task::{ListScope, TaskId, TaskList},
+    };
+
+    fn visible_ids(app: &App) -> Vec<u64> {
+        app.visible_tasks().map(|task| task.id().get()).collect()
+    }
+
+    fn id(value: u64) -> TaskId {
+        TaskId::from_shell_integer(value).unwrap()
+    }
+
+    /// Canonical 1..=5; Priority order is 3, 5, 2, 4, 1.
+    fn prioritized() -> App {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "plain one",
+            "(B) b first",
+            "(A) a open",
+            "(B) b second",
+            "(A) a done",
+        ] {
+            list.add(text).unwrap();
+        }
+        list.set_completed(id(5), true).unwrap();
+        App::new(list)
+    }
+
+    #[test]
+    fn priority_sort_should_follow_displayed_order_and_keep_selection_identity() {
+        let mut app = prioritized();
+        assert_eq!(app.order(), TaskOrder::Manual);
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(2)));
+        let before = app.tasks().clone();
+
+        assert_eq!(
+            app.apply(Action::ToggleSort).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.order(), TaskOrder::Priority);
+        assert_eq!(visible_ids(&app), [3, 5, 2, 4, 1]);
+        assert_eq!(app.selected(), Some(id(2)));
+        for expected in [4, 1] {
+            assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Transient);
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Unchanged);
+        for expected in [4, 2, 5, 3] {
+            app.apply(Action::MoveUp).unwrap();
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Unchanged);
+
+        app.apply(Action::CycleView).unwrap();
+        assert_eq!(visible_ids(&app), [3, 2, 4, 1]);
+        assert_eq!(app.selected(), Some(id(3)));
+        app.apply(Action::StartSearch).unwrap();
+        app.apply(Action::InsertChar('b')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(app.selected(), Some(id(2)));
+
+        assert_eq!(
+            app.apply(Action::ToggleSort).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.order(), TaskOrder::Manual);
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(app.selected(), Some(id(2)));
+        assert_eq!(app.tasks(), &before);
+        assert_eq!(App::new(before).order(), TaskOrder::Manual);
+    }
+
+    #[test]
+    fn priority_sort_should_block_reorder_with_a_notice_and_submit_nothing() {
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        let before = app.tasks().clone();
+        for action in [Action::MoveTaskDown, Action::MoveTaskUp] {
+            assert_eq!(app.prepare(action).unwrap(), Transition::Transient);
+            assert!(app.take_mutation().is_none());
+            assert_eq!(app.notice(), Some(&Notice::ManualOrderRequired));
+            assert_eq!(app.tasks(), &before);
+        }
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Transient);
+        assert_eq!(app.notice(), None);
+        app.apply(Action::MoveTaskDown).unwrap();
+        assert_eq!(app.apply(Action::OpenHelp).unwrap(), Transition::Transient);
+        assert_eq!(app.notice(), None);
+        app.apply(Action::CloseHelp).unwrap();
+
+        app.apply(Action::ToggleSort).unwrap();
+        for _ in 0..4 {
+            app.apply(Action::MoveDown).unwrap();
+        }
+        assert_eq!(app.selected(), Some(id(5)));
+        assert_eq!(app.apply(Action::MoveTaskUp).unwrap(), Transition::Submit);
+        assert_eq!(app.notice(), None);
+        assert_eq!(
+            app.tasks()
+                .tasks()
+                .iter()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 5, 4]
+        );
+    }
+
+    #[test]
+    fn priority_sort_should_fall_back_in_displayed_order_and_follow_reconciled_priorities() {
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        app.apply(Action::MoveUp).unwrap();
+        app.apply(Action::MoveUp).unwrap();
+        assert_eq!(app.selected(), Some(id(2)));
+        assert_eq!(app.apply(Action::Delete).unwrap(), Transition::Submit);
+        assert_eq!(visible_ids(&app), [3, 5, 4, 1]);
+        assert_eq!(app.selected(), Some(id(4)));
+
+        let mut latest = app.tasks().clone();
+        latest.edit(id(1), "(A) promoted").unwrap();
+        latest.add("(C) new").unwrap();
+        assert!(app.reconcile(latest));
+        assert_eq!(visible_ids(&app), [1, 3, 5, 4, 6]);
+        assert_eq!(app.selected(), Some(id(4)));
+
+        assert_eq!(
+            app.apply(Action::RestoreLatest).unwrap(),
+            Transition::Submit
+        );
+        assert_eq!(visible_ids(&app), [1, 3, 5, 2, 4, 6]);
+        assert_eq!(app.selected(), Some(id(2)));
+    }
+
+    #[test]
+    fn sort_should_survive_trash_and_help_and_be_ignored_outside_normal_mode() {
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        for (open, close) in [
+            (Action::OpenTrash, Action::CloseTrash),
+            (Action::OpenHelp, Action::CloseHelp),
+            (Action::StartSearch, Action::CancelEdit),
+            (Action::StartAdd, Action::CancelEdit),
+        ] {
+            app.apply(open).unwrap();
+            if app.mode() != Mode::Insert && app.mode() != Mode::Search {
+                assert_eq!(
+                    app.apply(Action::ToggleSort).unwrap(),
+                    Transition::Unchanged
+                );
+            }
+            app.apply(close).unwrap();
+            assert_eq!(app.mode(), Mode::Normal);
+            assert_eq!(app.order(), TaskOrder::Priority);
+            assert_eq!(app.view(), TaskView::All);
+            assert_eq!(visible_ids(&app), [3, 5, 2, 4, 1]);
+        }
     }
 }

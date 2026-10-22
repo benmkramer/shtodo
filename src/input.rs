@@ -19,6 +19,7 @@ pub(crate) enum BindingId {
     CycleView,
     PreviousView,
     ClearSearch,
+    ToggleSort,
     OpenTrash,
     TrashMoveDown,
     TrashMoveUp,
@@ -51,7 +52,11 @@ impl BindingId {
         // Existing user bindings must keep working when upgrading.
         matches!(
             self,
-            Self::StartSearch | Self::CycleView | Self::PreviousView | Self::ClearSearch
+            Self::StartSearch
+                | Self::CycleView
+                | Self::PreviousView
+                | Self::ClearSearch
+                | Self::ToggleSort
         )
     }
 
@@ -70,6 +75,7 @@ impl BindingId {
             (Mode::Normal, "cycle_view") => Self::CycleView,
             (Mode::Normal, "previous_view") => Self::PreviousView,
             (Mode::Normal, "clear_search") => Self::ClearSearch,
+            (Mode::Normal, "toggle_sort") => Self::ToggleSort,
             (Mode::Normal, "open_trash") => Self::OpenTrash,
             (Mode::Trash, "move_down") => Self::TrashMoveDown,
             (Mode::Trash, "move_up") => Self::TrashMoveUp,
@@ -111,6 +117,7 @@ impl BindingId {
             Self::CycleView => Some("cycle_view"),
             Self::PreviousView => Some("previous_view"),
             Self::ClearSearch => Some("clear_search"),
+            Self::ToggleSort => Some("toggle_sort"),
             Self::OpenTrash => Some("open_trash"),
             Self::TrashMoveDown => Some("move_down"),
             Self::TrashMoveUp => Some("move_up"),
@@ -152,6 +159,7 @@ impl BindingId {
             | Self::CycleView
             | Self::PreviousView
             | Self::ClearSearch
+            | Self::ToggleSort
             | Self::OpenTrash
             | Self::OpenHelp
             | Self::NormalQuit => Mode::Normal,
@@ -724,6 +732,14 @@ static DEFINITIONS: &[Definition] = &[
         description: "previous view",
         footer_priority: Some(1),
         defaults: &[chord(KeyCode::BackTab, KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::ToggleSort,
+        action: Action::ToggleSort,
+        description: "toggle priority sort",
+        footer_priority: Some(1),
+        defaults: &[chord(KeyCode::Char('s'), KeyModifiers::NONE)],
         fixed: &[],
     },
 ];
@@ -1390,8 +1406,8 @@ mod tests {
     #[test]
     fn keymap_should_expose_configurable_and_active_binding_counts() {
         let keymap = Keymap::defaults();
-        assert_eq!(keymap.configurable_action_count(), 35);
-        assert_eq!(keymap.active_binding_count(), 48);
+        assert_eq!(keymap.configurable_action_count(), 36);
+        assert_eq!(keymap.active_binding_count(), 49);
         assert_eq!(
             BindingId::from_config(Mode::Normal, "move_down"),
             Some(BindingId::MoveDown)
@@ -1604,8 +1620,8 @@ mod tests {
                 BindingId::PreviousView,
             ]
         );
-        assert_eq!(keymap.configurable_action_count(), 35);
-        assert_eq!(keymap.active_binding_count(), 46);
+        assert_eq!(keymap.configurable_action_count(), 36);
+        assert_eq!(keymap.active_binding_count(), 47);
         assert!(keymap.unbound_actions_for(Mode::Insert).next().is_none());
         for mode in [Mode::Normal, Mode::Insert, Mode::Search, Mode::Help] {
             assert_eq!(
@@ -1791,5 +1807,79 @@ mod tests {
             Some(Action::CommitEdit)
         );
         assert!(keymap.unbound_actions_for(Mode::Normal).next().is_none());
+    }
+
+    #[test]
+    fn toggle_sort_should_default_to_s_in_normal_only_and_yield_to_explicit_bindings() {
+        let s = pressed(KeyCode::Char('s'), KeyModifiers::NONE);
+        let keymap = Keymap::defaults();
+        assert_eq!(keymap.map_key(Mode::Normal, s), Some(Action::ToggleSort));
+        assert_eq!(
+            keymap.map_key(Mode::Insert, s),
+            Some(Action::InsertChar('s'))
+        );
+        assert_eq!(
+            keymap.map_key(Mode::Search, s),
+            Some(Action::InsertChar('s'))
+        );
+        for mode in [Mode::Help, Mode::Trash] {
+            assert_eq!(keymap.map_key(mode, s), None);
+        }
+        assert_eq!(
+            BindingId::from_config(Mode::Normal, "toggle_sort"),
+            Some(BindingId::ToggleSort)
+        );
+        for mode in [Mode::Insert, Mode::Help, Mode::Trash] {
+            assert_eq!(BindingId::from_config(mode, "toggle_sort"), None);
+        }
+
+        let claimed = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.start_search".into(),
+            id: BindingId::StartSearch,
+            keys: vec!["s".into()],
+        }])
+        .unwrap();
+        assert_eq!(claimed.map_key(Mode::Normal, s), Some(Action::StartSearch));
+        assert_eq!(
+            claimed
+                .unbound_actions_for(Mode::Normal)
+                .collect::<Vec<_>>(),
+            vec![BindingId::ToggleSort]
+        );
+
+        let moved = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.toggle_sort".into(),
+            id: BindingId::ToggleSort,
+            keys: vec!["o".into()],
+        }])
+        .unwrap();
+        assert_eq!(moved.map_key(Mode::Normal, s), None);
+        assert_eq!(
+            moved.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('o'), KeyModifiers::NONE)
+            ),
+            Some(Action::ToggleSort)
+        );
+
+        let issues = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.toggle_sort".into(),
+            id: BindingId::ToggleSort,
+            keys: vec!["d".into(), "ctrl-c".into()],
+        }])
+        .unwrap_err()
+        .into_iter()
+        .map(|issue| issue.message)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            issues,
+            vec![
+                "Ctrl-C is reserved and cannot be configured",
+                "\"d\" conflicts with delete_task"
+            ]
+        );
     }
 }

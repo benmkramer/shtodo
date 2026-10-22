@@ -400,8 +400,8 @@ mod tests {
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::Defaults);
-        assert_eq!(loaded.keymap().configurable_action_count(), 35);
-        assert_eq!(loaded.keymap().active_binding_count(), 48);
+        assert_eq!(loaded.keymap().configurable_action_count(), 36);
+        assert_eq!(loaded.keymap().active_binding_count(), 49);
         assert!(!home.path().join(".shtodo").exists());
     }
 
@@ -417,7 +417,7 @@ move_down = ["x", "ctrl-n"]
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::File);
-        assert_eq!(loaded.keymap().active_binding_count(), 48);
+        assert_eq!(loaded.keymap().active_binding_count(), 49);
         assert_eq!(
             labels_for(loaded.keymap(), BindingId::MoveDown),
             vec!["x", "Ctrl-n"]
@@ -780,6 +780,30 @@ commit_edit = ["ctrl-s"]
             .find(|binding| binding.id() == BindingId::CommitEdit)
             .unwrap();
         assert_eq!(commit.preferred_label(), "Ctrl-s");
+        assert!(
+            loaded
+                .keymap()
+                .unbound_actions_for(crate::app::Mode::Normal)
+                .any(|id| id == BindingId::ToggleSort)
+        );
+    }
+
+    #[test]
+    fn load_should_accept_toggle_sort_only_in_normal_mode() {
+        let home = configured_home("[keybindings.normal]\ntoggle_sort = [\"o\"]\n");
+        let loaded = load(home.path()).unwrap();
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::ToggleSort),
+            vec!["o"]
+        );
+        assert_eq!(loaded.keymap().configurable_action_count(), 36);
+        for mode in ["insert", "help", "trash"] {
+            let home = configured_home(&format!("[keybindings.{mode}]\ntoggle_sort = [\"o\"]\n"));
+            assert_eq!(
+                diagnostic_paths(load(home.path()).unwrap_err()),
+                vec![format!("keybindings.{mode}.toggle_sort")]
+            );
+        }
     }
 
     #[test]
@@ -800,7 +824,7 @@ commit_edit = ["ctrl-s"]
                 labels_for(loaded.keymap(), BindingId::ToggleComplete),
                 vec![label]
             );
-            assert_eq!(loaded.keymap().configurable_action_count(), 35);
+            assert_eq!(loaded.keymap().configurable_action_count(), 36);
             assert!(!home.path().join(".shtodo/global").exists());
         }
     }

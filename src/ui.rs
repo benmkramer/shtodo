@@ -9,9 +9,10 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, EditKind, Mode, TaskView},
+    app::{App, EditKind, Mode, Notice, TaskView},
     input::{BindingId, Keymap, ResolvedBinding},
     metadata,
+    projection::TaskOrder,
     task::{ListScope, Task},
 };
 
@@ -247,7 +248,8 @@ fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let area = columns[1];
     let matches = app.visible_tasks().count();
     let Some(editor) = app.editor().filter(|_| app.mode() == Mode::Search) else {
-        let status = status_line(matches, app.query(), None, false, area.width);
+        let sorted = app.order() == TaskOrder::Priority;
+        let status = status_line(matches, app.query(), None, sorted, area.width);
         frame.render_widget(Paragraph::new(status), area);
         return;
     };
@@ -457,10 +459,11 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
     } else {
         None
     };
+    let notice = app.notice().map(|notice| notice_text(notice, keymap));
     let message = if app.needs_sync() || app.storage_unavailable() {
         app.message()
     } else {
-        conflict.as_deref().or(app.message())
+        conflict.as_deref().or(app.message()).or(notice.as_deref())
     };
     let detail = match (message, hints.is_empty()) {
         (Some(message), false) => format!("{message} · {hints}"),
@@ -470,6 +473,17 @@ fn render_footer(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App, 
     let text = format!("{}  {detail}", mode_label(app.mode()));
 
     frame.render_widget(Paragraph::new(text), area);
+}
+
+fn notice_text(notice: &Notice, keymap: &Keymap) -> String {
+    match notice {
+        Notice::ManualOrderRequired => {
+            match binding_label(keymap, Mode::Normal, BindingId::ToggleSort) {
+                Some(key) => format!("Reorder uses manual order; press {key} to switch"),
+                None => "Reorder uses manual order".into(),
+            }
+        }
+    }
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) {
@@ -482,14 +496,17 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) 
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let mut normal = help_lines(keymap, if trash { Mode::Trash } else { Mode::Normal });
+    let normal = help_lines(keymap, if trash { Mode::Trash } else { Mode::Normal });
+    let mut insert_and_help = Vec::new();
     if !trash {
+        insert_and_help = help_lines(keymap, Mode::Insert);
+        // The search editor shares the Insert keys; listing it here keeps the Normal column short.
         for id in [BindingId::CommitEdit, BindingId::CancelEdit] {
             if let Some(binding) = keymap
                 .bindings_for(Mode::Search)
                 .find(|binding| binding.id() == id)
             {
-                normal.push(Line::from(format!(
+                insert_and_help.push(Line::from(format!(
                     "{} {}",
                     binding.labels().collect::<Vec<_>>().join(" / "),
                     if id == BindingId::CommitEdit {
@@ -500,13 +517,6 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) 
                 )));
             }
         }
-    }
-    let mut insert_and_help = if trash {
-        Vec::new()
-    } else {
-        help_lines(keymap, Mode::Insert)
-    };
-    if !trash {
         insert_and_help.push(Line::default());
     }
     insert_and_help.extend(help_lines(keymap, Mode::Help));
@@ -1594,6 +1604,71 @@ mod tests {
             status_line(10_000, "query", None, true, 10),
             " · 10000 matches · /query"
         );
+    }
+
+    fn prioritized() -> App {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in ["plain one", "(B) b first", "(A) a open"] {
+            list.add(text).unwrap();
+        }
+        App::new(list)
+    }
+
+    #[test]
+    fn priority_sort_should_render_sorted_rows_and_a_status_segment_dropped_first_when_narrow() {
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        assert!(
+            buffer_row(&buffer, 80, 1).contains("[All]│ Open │ Done  · 3 matches · by priority"),
+            "{}",
+            buffer_row(&buffer, 80, 1)
+        );
+        assert!(buffer_row(&buffer, 80, 2).contains("○ (A) a open"));
+        assert!(buffer_row(&buffer, 80, 3).contains("○ (B) b first"));
+        assert!(buffer_row(&buffer, 80, 4).contains("› ○ plain one"));
+
+        let narrow = render_app(&app, 40, 8);
+        let status = buffer_row(&narrow, 40, 1);
+        assert!(status.contains(" · 3 matches"), "{status}");
+        assert!(!status.contains("by priority"));
+        assert!(!status.contains('/'));
+        app.apply(Action::ToggleSort).unwrap();
+        assert!(buffer_row(&render_app(&app, 80, 12), 80, 1).contains(" · 3 matches · /"));
+    }
+
+    #[test]
+    fn sorted_reorder_notice_and_help_should_name_the_configured_sort_key() {
+        for (keymap, key) in [
+            (Keymap::defaults(), "s"),
+            (
+                Keymap::with_overrides(&[override_for(BindingId::ToggleSort, &["o"])]).unwrap(),
+                "o",
+            ),
+        ] {
+            let mut app = prioritized();
+            app.apply(Action::ToggleSort).unwrap();
+            app.apply(Action::MoveTaskUp).unwrap();
+            let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+            assert!(
+                footer.contains(&format!(
+                    "NORMAL  Reorder uses manual order; press {key} to switch"
+                )),
+                "{footer}"
+            );
+            app.apply(Action::OpenHelp).unwrap();
+            let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+            assert!(
+                help.contains(&format!("{key} toggle priority sort")),
+                "{help}"
+            );
+        }
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::StartSearch, &["s"])]).unwrap();
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+        assert!(help.contains("Unbound: toggle_sort (config)"));
     }
 
     #[test]

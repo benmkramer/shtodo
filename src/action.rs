@@ -13,6 +13,7 @@ pub(crate) enum Action {
     CycleView,
     PreviousView,
     ClearSearch,
+    ToggleSort,
     OpenTrash,
     CloseTrash,
     RestoreSelected,
