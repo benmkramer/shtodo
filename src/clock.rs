@@ -13,12 +13,17 @@ pub(crate) fn today() -> Date {
     today_at(SystemTime::now(), zone())
 }
 
-/// The date of `now` in `zone`. A clock outside jiff's years -9999 to 9999, or before 1 BCE,
-/// clamps to `Date::MIN`, so `today` has no panic path.
+/// The date of `now` in `zone`, so `today` has no panic path. A clock past jiff's last
+/// timestamp (9999-12-30T22:00:00Z) clamps to `Date::MAX`; one before 1 BCE, or before jiff's
+/// first timestamp, clamps to `Date::MIN`.
 fn today_at(now: SystemTime, zone: &TimeZone) -> Date {
     // Not `Timestamp::now()`, which panics when the system clock is outside jiff's range.
     let Ok(now) = Timestamp::try_from(now) else {
-        return Date::MIN;
+        return if now > SystemTime::UNIX_EPOCH {
+            Date::MAX
+        } else {
+            Date::MIN
+        };
     };
     let date = zone.to_datetime(now).date();
     u16::try_from(date.year())
@@ -179,22 +184,30 @@ mod tests {
     }
 
     #[test]
-    fn clocks_outside_the_civil_range_should_clamp_to_the_minimum_date() {
+    fn clocks_outside_the_civil_range_should_clamp_to_the_nearest_end() {
         use std::time::Duration;
-        // About year 14,600: past jiff's range, so the timestamp conversion itself fails.
-        let future = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(400_000_000_000));
-        // About 1 BCE: inside jiff's range, but a negative year.
-        let ancient = SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(62_200_000_000));
-        for now in [future, ancient].into_iter().flatten() {
-            assert_eq!(today_at(now, &TimeZone::UTC), Date::MIN, "{now:?}");
-        }
+        let at = |seconds: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+        let utc = |now: SystemTime| today_at(now, &TimeZone::UTC);
+        // jiff's timestamps end at 9999-12-30T22:00:00Z, before its last civil date.
         assert_eq!(
-            today_at(
-                SystemTime::UNIX_EPOCH + Duration::from_secs(1_792_584_000),
-                &TimeZone::UTC
-            ),
-            Date::new(2026, 10, 21).unwrap()
+            utc(at(253_402_214_400 - 43_200)),
+            Date::new(9999, 12, 30).unwrap(),
+            "noon on the last day jiff can represent in UTC"
         );
+        assert_eq!(utc(at(253_402_214_400)), Date::MAX, "9999-12-31T00:00:00Z");
+        // About year 14,600 (unrepresentable on some platforms, which skip it).
+        if let Some(future) =
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(400_000_000_000))
+        {
+            assert_eq!(utc(future), Date::MAX);
+        }
+        // About 1 BCE: inside jiff's range, but a negative year.
+        if let Some(ancient) =
+            SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(62_200_000_000))
+        {
+            assert_eq!(utc(ancient), Date::MIN);
+        }
+        assert_eq!(utc(at(1_792_584_000)), Date::new(2026, 10, 21).unwrap());
     }
 
     #[test]
