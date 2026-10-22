@@ -3,7 +3,7 @@
 import argparse
 import contextlib
 import copy
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -43,16 +43,64 @@ def tagged_fixture(size):
                     deletion_sequence=None) for index in range(1, size + 1)])
 
 
+# The isolated environment pins TZ=UTC, so the binaries' "today" is the UTC date.
+RUN_DATE = datetime.now(timezone.utc).date()
+
+
+def dated_text(index):
+    # Every other task carries a priority, two tags, and a due date from 30 days before to 30
+    # days after the run date; with every third task done, about a sixth are open and overdue.
+    if index % 2:
+        return benchmark.task_text(index)
+    return f"{tagged_text(index)} due:{RUN_DATE + timedelta(days=index // 2 % 61 - 30)}"
+
+
+def dated_fixture(size):
+    return dict(schema_version=1, scope=dict(kind="global"), next_task_id=size + 1,
+                next_deletion_sequence=1, tasks=[dict(
+                    id=index, text=dated_text(index), completed=index % 3 == 0,
+                    deletion_sequence=None) for index in range(1, size + 1)])
+
+
+MONTH_START = RUN_DATE.replace(day=1)
+MONTH_END = (MONTH_START + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+
 # Read-only operations; the info cases need filter flags, so they run for the current binary only.
 READ_OPERATIONS = {
     "list": ["list"], "list_json": ["list", "--json"],
     "list_tag": ["list", "--tag", "+proj1"], "list_priority": ["list", "--priority", "A-C"],
     "list_search": ["list", "--search", "x"], "list_sort": ["list", "--sort", "priority"],
     "list_json_sort": ["list", "--json", "--sort", "priority"],
+    "list_due_today": ["list", "--due", "today"],
+    "list_due_date": ["list", "--due", str(RUN_DATE)],
+    "list_overdue": ["list", "--open", "--due", "overdue"],
+    "list_due_month": ["list", "--due", f"{MONTH_START}..{MONTH_END}"],
+    "list_sort_due": ["list", "--sort", "due"],
+    "list_json_sort_due": ["list", "--json", "--sort", "due"],
 }
 INFO_OPERATIONS = {"list_tag": (1000, 10000), "list_priority": (1000, 10000),
                    "list_search": (1000, 10000), "list_sort": (10000,),
                    "list_json_sort": (10000,)}
+# Current-only due cases on the dated fixture: two gated first-clock-read pairs, then info.
+DUE_OPERATIONS = {"list_due_today": (1000, 10000), "list_due_date": (1000, 10000),
+                  "list_overdue": (1000, 10000), "list_due_month": (1000, 10000),
+                  "list_sort_due": (1000, 10000), "list_json_sort_due": (1000, 10000)}
+ADDED_DUE_TASK = f"{benchmark.ADDED_TASK} due:today"
+
+
+def due(text):
+    """The first valid `due:YYYY-MM-DD` token, as the shell contract defines it."""
+    for token in text.split():
+        if not token.startswith("due:"):
+            continue
+        value = token[4:].rstrip(".,;:!?")
+        if len(value) == 10 and value[4] == value[7] == "-" and (value[:4] + value[5:7] + value[8:]).isascii() \
+                and (value[:4] + value[5:7] + value[8:]).isdigit():
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                continue
+    return None
 
 
 def expected_rows(value, operation):
@@ -70,17 +118,31 @@ def expected_rows(value, operation):
                 found.append(tag)
         return found
 
+    def priority_key(task):
+        return (priority(task["text"]) is None, priority(task["text"]) or "")
+
     if operation == "list_tag":
         tasks = [task for task in tasks if "+proj1" in tags(task["text"])]
+    elif operation in ("list_due_today", "list_due_date"):
+        tasks = [task for task in tasks if due(task["text"]) == RUN_DATE]
+    elif operation == "list_overdue":
+        tasks = [task for task in tasks
+                 if not task["completed"] and (due(task["text"]) or RUN_DATE) < RUN_DATE]
+    elif operation == "list_due_month":
+        tasks = [task for task in tasks if MONTH_START <= (due(task["text"]) or date.min) <= MONTH_END]
+    elif operation in ("list_sort_due", "list_json_sort_due"):
+        tasks = sorted(tasks, key=lambda task: (due(task["text"]) is None, due(task["text"]) or date.min,
+                                                priority_key(task)))
     elif operation == "list_priority":
         tasks = [task for task in tasks if priority(task["text"]) in ("A", "B", "C")]
     elif operation == "list_search":
         tasks = [task for task in tasks if "x" in task["text"].lower()]
     elif operation in ("list_sort", "list_json_sort"):
-        tasks = sorted(tasks, key=lambda task: (priority(task["text"]) is None, priority(task["text"]) or ""))
+        tasks = sorted(tasks, key=priority_key)
     if operation.startswith("list_json"):
         return [dict(id=task["id"], text=task["text"], state="done" if task["completed"] else "open",
-                     deleted=False, priority=priority(task["text"]), tags=tags(task["text"]))
+                     deleted=False, priority=priority(task["text"]), tags=tags(task["text"]),
+                     due=str(due(task["text"])) if due(task["text"]) else None)
                 for task in tasks]
     return "".join(f"{task['id']}  {'done' if task['completed'] else 'open'}  {task['text']}\n"
                    for task in tasks)
@@ -92,13 +154,15 @@ def cli_case(value, kind, operation):
     active_id = 1 if kind == "plain" else 2
     commands = READ_OPERATIONS | {
         "add": ["add", benchmark.ADDED_TASK],
+        "add_due_today": ["add", ADDED_DUE_TASK],
         "delete": ["delete", str(active_id)], "done": ["done", "2"],
         "reopen": ["reopen", "3"], "edit": ["edit", "2", "Changed café 東京"],
         "restore": ["restore", "1"], "noop_done": ["done", "3"],
         "noop_delete": ["delete", "1"], "version": ["--version"],
     }
-    if operation == "add":
-        tasks.append(dict(id=expected["next_task_id"], text=benchmark.ADDED_TASK,
+    if operation in ("add", "add_due_today"):
+        text = benchmark.ADDED_TASK if operation == "add" else f"{benchmark.ADDED_TASK} due:{RUN_DATE}"
+        tasks.append(dict(id=expected["next_task_id"], text=text,
                           completed=False, deletion_sequence=None))
         expected["next_task_id"] += 1
     elif operation == "delete":
@@ -138,6 +202,8 @@ def measure_cli(args, binaries, rng):
                         value = plain_fixture(size)
                     elif kind == "tagged":
                         value = tagged_fixture(size)
+                    elif kind == "dated":
+                        value = dated_fixture(size)
                     else:
                         value = fixtures[size]
                     data = (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode()
@@ -149,6 +215,11 @@ def measure_cli(args, binaries, rng):
                     if kind == "tagged" and label == "current":
                         operations += [operation for operation, sizes in INFO_OPERATIONS.items()
                                        if size in sizes]
+                    if kind == "dated" and label == "current":
+                        operations += [operation for operation, sizes in DUE_OPERATIONS.items()
+                                       if size in sizes]
+                    if kind == "mixed" and label == "current":
+                        operations.append("add_due_today")
                     if args.operations:
                         operations = [operation for operation in operations if operation in args.operations]
                     for operation in operations:
@@ -189,9 +260,9 @@ def measure_cli(args, binaries, rng):
                 if case["operation"].startswith("list_json"):
                     output = json.loads(output)["tasks"]
                     if case["label"] == "baseline":
-                        # The control predates the derived priority and tags fields.
+                        # The control predates the derived due field.
                         expected = [{key: value for key, value in task.items()
-                                     if key not in ("priority", "tags")} for task in expected]
+                                     if key != "due"} for task in expected]
                 assert output == expected, (case["label"], case["kind"], case["operation"], case["records"])
             verify(case, before)
         print(f"Preflight passed for {len(cases)} paired CLI cases", flush=True)
@@ -368,7 +439,7 @@ def main():
     parser.add_argument("--current", default=str(ROOT / "target/release/shtodo"))
     parser.add_argument("--mode", choices=("cli", "tui", "idle"), required=True)
     parser.add_argument("--sizes", type=int, nargs="+", default=[0, 100, 1000, 10000])
-    parser.add_argument("--kinds", nargs="+", choices=("plain", "mixed", "tagged"),
+    parser.add_argument("--kinds", nargs="+", choices=("plain", "mixed", "tagged", "dated"),
                         default=["plain", "mixed"])
     parser.add_argument("--operations", nargs="+",
                         help="CLI operations to time (default: all for each fixture)")

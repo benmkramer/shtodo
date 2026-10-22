@@ -56,6 +56,48 @@ class BenchmarkTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "content mismatch"):
                     app.verify("list", 2, output)
 
+    def test_dated_fixture_mixes_dates_around_the_run_date(self):
+        import benchmark_concurrency_comparison as comparison
+
+        value = comparison.dated_fixture(600)
+        tasks = value["tasks"]
+        dates = [comparison.due(task["text"]) for task in tasks]
+        self.assertEqual(sum(day is not None for day in dates), 300)
+        self.assertTrue(all(day is None for day in dates[::2]), "odd IDs have no date")
+        offsets = {(day - comparison.RUN_DATE).days for day in dates if day}
+        self.assertEqual(offsets, set(range(-30, 31)))
+        overdue = comparison.expected_rows(value, "list_overdue").count("\n")
+        self.assertTrue(0.14 < overdue / len(tasks) < 0.19, overdue)
+        self.assertTrue(all(comparison.due(task["text"]) for task in tasks[1::2]))
+
+    def test_due_model_matches_the_token_grammar_and_new_operations(self):
+        import benchmark_concurrency_comparison as comparison
+
+        day = comparison.RUN_DATE
+        self.assertEqual(comparison.due("(A) x due:2026-11-01. +p"), comparison.date(2026, 11, 1))
+        for text in ("x due:2026-02-30", "x Due:2026-11-01", "x overdue:2026-11-01",
+                     "x due:2026-1-05", "x due:today", "x due:", "x due:２０２６-11-01"):
+            self.assertIsNone(comparison.due(text), text)
+        self.assertEqual(comparison.due("x due:bad due:2026-11-02 due:2026-11-03"),
+                         comparison.date(2026, 11, 2))
+        value = dict(tasks=[
+            dict(id=1, text="(B) late due:2000-01-01", completed=False, deletion_sequence=None),
+            dict(id=2, text=f"(A) now due:{day}", completed=False, deletion_sequence=None),
+            dict(id=3, text="plain", completed=False, deletion_sequence=None),
+            dict(id=4, text="(A) done late due:2000-01-01", completed=True, deletion_sequence=None),
+            dict(id=5, text=f"gone due:{day}", completed=False, deletion_sequence=1),
+        ])
+        ids = lambda output: [int(line.split()[0]) for line in output.splitlines()]
+        self.assertEqual(ids(comparison.expected_rows(value, "list_due_today")), [2])
+        self.assertEqual(ids(comparison.expected_rows(value, "list_due_date")), [2])
+        self.assertEqual(ids(comparison.expected_rows(value, "list_overdue")), [1])
+        self.assertEqual(ids(comparison.expected_rows(value, "list_sort_due")), [4, 1, 2, 3])
+        rows = comparison.expected_rows(value, "list_json_sort_due")
+        self.assertEqual([row["due"] for row in rows], ["2000-01-01", "2000-01-01", str(day), None])
+        command, expected = comparison.cli_case(value | dict(next_task_id=6), "mixed", "add_due_today")
+        self.assertEqual(command, ["add", f"{benchmark.ADDED_TASK} due:today"])
+        self.assertEqual(expected["tasks"][-1]["text"], f"{benchmark.ADDED_TASK} due:{day}")
+
     @unittest.skipUnless((benchmark.ROOT / "target/benchmark-tools/taskbook/node_modules/.bin/tb").exists(),
                          "optional Taskbook installation unavailable")
     def test_taskbook_delete_can_be_restored_and_reset_clears_archive(self):
