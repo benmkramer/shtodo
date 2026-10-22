@@ -1,6 +1,7 @@
 mod action;
 mod app;
 mod cli;
+mod clock;
 mod config;
 mod input;
 mod json;
@@ -176,6 +177,11 @@ fn list_tasks(
         projection::TaskOrder::Priority => {
             let mut sorted: Vec<&task::Task> = rows.collect();
             projection::sort_by_priority(&mut sorted);
+            write_list_rows(tasks.scope(), sorted.into_iter(), format)
+        }
+        projection::TaskOrder::Due => {
+            let mut sorted: Vec<&task::Task> = rows.collect();
+            projection::sort_by_due(&mut sorted);
             write_list_rows(tasks.scope(), sorted.into_iter(), format)
         }
     }

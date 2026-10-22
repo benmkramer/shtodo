@@ -249,8 +249,8 @@ pub(crate) struct FilterPreview {
 }
 
 impl FilterPreview {
-    fn matches(&self, text: &str) -> bool {
-        self.exact.matches(text)
+    fn matches(&self, text: &str, completed: bool) -> bool {
+        self.exact.matches(text, completed)
             && self
                 .trailing_prefix
                 .as_deref()
@@ -472,7 +472,9 @@ impl App {
     fn tag_counts(&self, filter: &TaskFilter) -> Vec<(&str, usize)> {
         let mut counts = HashMap::<&str, usize>::new();
         for task in self.tasks.visible_tasks().filter(|task| {
-            projection::matches_with(task, &self.projection, |text| filter.matches(text))
+            projection::matches_with(task, &self.projection, |text, completed| {
+                filter.matches(text, completed)
+            })
         }) {
             for tag in metadata::distinct_tags(task.text()) {
                 *counts.entry(tag).or_default() += 1;
@@ -521,8 +523,8 @@ impl App {
 
     fn matches(&self, task: &Task) -> bool {
         match &self.filter_session {
-            Some(session) => projection::matches_with(task, &self.projection, |text| {
-                session.preview.matches(text)
+            Some(session) => projection::matches_with(task, &self.projection, |text, completed| {
+                session.preview.matches(text, completed)
             }),
             None => self.projection.matches(task),
         }
@@ -983,7 +985,7 @@ impl App {
     fn toggle_sort(&mut self) -> Transition {
         self.order = match self.order {
             TaskOrder::Manual => TaskOrder::Priority,
-            TaskOrder::Priority => TaskOrder::Manual,
+            TaskOrder::Priority | TaskOrder::Due => TaskOrder::Manual,
         };
         self.rebuild_order();
         self.reconcile_selection();

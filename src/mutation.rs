@@ -308,6 +308,57 @@ mod tests {
     }
 
     #[test]
+    fn due_filtered_reorder_should_compare_rows_on_the_projection_date() {
+        let mut filter = crate::metadata::TaskFilter::default();
+        filter
+            .due
+            .add(crate::metadata::parse_due_term("today").unwrap());
+        // Resolved for the day the user saw; the guard never reads the clock again.
+        filter
+            .due
+            .resolve(|| crate::metadata::Date::new(2026, 10, 21).unwrap());
+        let projection = Projection {
+            filter,
+            ..Projection::default()
+        };
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first due:2026-10-21").unwrap();
+        let between = list.add("between due:2026-10-22").unwrap();
+        let second = list.add("second due:2026-10-21").unwrap();
+        let request = Mutation::MoveAdjacent {
+            id: first,
+            direction: MoveDirection::Down,
+            neighbor: Some(second),
+            projection,
+        };
+        let conflicts = |list: &mut TaskList| {
+            let before = list.clone();
+            let conflicted = matches!(
+                request.apply(list),
+                Outcome::Conflict {
+                    kind: ConflictKind::OrderChanged,
+                    ..
+                }
+            );
+            assert_eq!(*list, before);
+            conflicted
+        };
+
+        let mut left = list.clone();
+        left.edit(second, "second due:2026-10-23").unwrap();
+        assert!(conflicts(&mut left), "the neighbor's date left the filter");
+        let mut joined = list.clone();
+        joined.edit(between, "between due:2026-10-21.").unwrap();
+        assert!(conflicts(&mut joined), "a newly due row between the pair");
+
+        assert!(request.apply(&mut list).changed());
+        assert_eq!(
+            list.tasks().iter().map(Task::id).collect::<Vec<_>>(),
+            [second, between, first]
+        );
+    }
+
+    #[test]
     fn selective_restore_should_reject_a_new_deletion_sequence_but_allow_already_live() {
         let mut list = TaskList::new(ListScope::Global);
         let id = list.add("task").unwrap();
