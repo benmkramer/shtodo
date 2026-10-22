@@ -265,22 +265,22 @@ class ConcurrentUsage(unittest.TestCase):
                 self.fail(f"filtered reorder did not preserve hidden slots: {rows!r}")
             tui.wait_absent(b"hidden row")
 
+    def wait_rows(self, tui, expected, words=("plain", "alpha", "beta", "gamma")):
+        # Rows that mention a fixture word, top to bottom, must equal `expected` exactly.
+        deadline = time.monotonic() + 4
+        while True:
+            rows = ["".join(row) for row in tui.screen[2:-1]]
+            found = [word for row in rows for word in words if word in row]
+            if found == expected:
+                return
+            if time.monotonic() >= deadline:
+                self.fail(f"rows {found!r} != {expected!r}: {tui.text()}")
+            tui.drain(0.05)
+
     def test_tag_filter_and_priority_sort_follow_idle_refresh_and_hide_untagged_rows(self):
         for text in ["plain first", "(B) beta +x", "(C) gamma +x"]:
             self.assertEqual(cli(self.home, "add", text).returncode, 0)
-
-        def wait_rows(tui, expected):
-            # Rows that mention a fixture word, top to bottom, must equal `expected` exactly.
-            words = ("plain", "alpha", "beta", "gamma")
-            deadline = time.monotonic() + 4
-            while True:
-                rows = ["".join(row) for row in tui.screen[2:-1]]
-                found = [word for row in rows for word in words if word in row]
-                if found == expected:
-                    return
-                if time.monotonic() >= deadline:
-                    self.fail(f"rows {found!r} != {expected!r}: {tui.text()}")
-                tui.drain(0.05)
+        wait_rows = self.wait_rows
 
         with Tui(self.home) as tui:
             tui.send(b"f")
@@ -298,6 +298,35 @@ class ConcurrentUsage(unittest.TestCase):
             wait_rows(tui, ["alpha", "beta"])
             tui.wait_for(b"2 matches")
             self.assertIn(b"3  open  (C) gamma", cli(self.home, "list").stdout)
+
+    def test_due_filter_and_due_order_follow_idle_refresh_of_shell_writes(self):
+        # Fixed past and far-future dates are overdue or not whatever the run date and zone.
+        for text in ["alpha due:2021-03-01", "beta due:2020-06-01", "plain", "future due:2099-01-01"]:
+            self.assertEqual(cli(self.home, "add", text).returncode, 0)
+        words = ("alpha", "beta", "gamma", "plain", "future")
+        with Tui(self.home) as tui:
+            tui.send(b"f")
+            tui.wait_for(b"FILTER")
+            tui.send(b"due:overdue\r")
+            tui.wait_for(b"f:due:overdue")
+            tui.send(b"s")
+            tui.wait_for(b"by priority")
+            tui.send(b"s")
+            tui.wait_for(b"by due")
+            self.wait_rows(tui, ["beta", "alpha"], words)
+            reply = cli(self.home, "add", "gamma due:2020-01-01")
+            self.assertEqual(reply.returncode, 0, reply.stderr)
+            self.wait_rows(tui, ["gamma", "beta", "alpha"], words)
+            tui.wait_for(b"3 matches")
+            self.assertEqual(cli(self.home, "done", "5").returncode, 0)
+            self.wait_rows(tui, ["beta", "alpha"], words)
+            self.assertEqual(cli(self.home, "reopen", "5").returncode, 0)
+            self.wait_rows(tui, ["gamma", "beta", "alpha"], words)
+            self.assertEqual(cli(self.home, "edit", "5", "gamma due:2099-02-01").returncode, 0)
+            self.wait_rows(tui, ["beta", "alpha"], words)
+            tui.wait_for(b"2 matches")
+            tui.wait_for(b"by due")
+            self.assertIn(b"5  open  gamma due:2099-02-01", cli(self.home, "list").stdout)
 
     def test_trash_stays_open_and_refreshes_external_restoration_and_new_deletion(self):
         self.seed()

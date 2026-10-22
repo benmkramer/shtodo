@@ -2238,6 +2238,34 @@ mod tests {
     }
 
     #[test]
+    fn a_due_filter_should_show_its_words_in_the_status_and_tags_only_in_the_hint() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("now due:2026-10-21 +x").unwrap();
+        list.add("soon due:2026-10-22 @y").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "due:today");
+        let buffer = render_app(&app, 40, 8);
+        // Counts follow completed tokens, as for a trailing priority token.
+        assert_eq!(display_row(&buffer, 6).trim_end(), "+x 1 · @y 1");
+        let status = buffer_row(&render_app(&app, 80, 12), 80, 1);
+        assert!(status.contains(" · 1 matches · f:due:today"), "{status}");
+        type_text(&mut app, " ");
+        let buffer = render_app(&app, 40, 8);
+        assert_eq!(display_row(&buffer, 6).trim_end(), "+x 1");
+        app.apply(Action::CommitEdit).unwrap();
+        let status = buffer_row(&render_app(&app, 80, 12), 80, 1);
+        assert!(
+            status.contains("Done  · 1 matches · f:due:today"),
+            "{status}"
+        );
+        assert!(app.set_today(crate::metadata::Date::new(2026, 10, 22).unwrap()));
+        let buffer = render_app(&app, 80, 12);
+        assert!(buffer_row(&buffer, 80, 1).contains(" · 1 matches · f:due:today"));
+        assert!(buffer_row(&buffer, 80, 2).contains("soon due:2026-10-22 @y"));
+    }
+
+    #[test]
     fn filter_footer_and_help_should_use_the_configured_filter_keys() {
         let mut app = App::new(TaskList::new(ListScope::Global));
         app.apply(Action::OpenHelp).unwrap();
