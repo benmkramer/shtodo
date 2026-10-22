@@ -1794,6 +1794,7 @@ fn add_and_edit_should_rewrite_relative_words_to_the_local_date() {
 fn add_should_resolve_today_in_the_process_zone_for_posix_rules_and_iana_names() {
     let home = tempfile::tempdir().unwrap();
     for (east, west) in [("<+14>-14", "<-12>12"), ("Etc/GMT-14", "Etc/GMT+12")] {
+        let mut asserted = false;
         for _ in 0..2 {
             let before = (date_at_offset(14), date_at_offset(-12));
             let east_due = added_due(&run_in_zone(
@@ -1817,8 +1818,13 @@ fn add_should_resolve_today_in_the_process_zone_for_posix_rules_and_iana_names()
                 (1..=2).contains(&days),
                 "{east} {east_due} vs {west} {west_due}"
             );
+            asserted = true;
             break;
         }
+        assert!(
+            asserted,
+            "the date changed twice while {east} and {west} ran"
+        );
     }
 
     let output = run_in_zone(home.path(), None, &["--json", "add", "x due:today"]);
