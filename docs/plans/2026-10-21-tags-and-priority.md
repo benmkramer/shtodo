@@ -66,7 +66,7 @@ the PR 1 benchmark review and is pending.
 | 9 | Filter editor key to cycle ambiguous matches | Deferred (Enter completion makes it mostly moot) | PR 2 | Deferred |
 | 10 | Read-only `shtodo tags [--json]` command | Deferred; would be its own follow-up PR | None | Deferred |
 | 11 | Config key for the default sort order | Not in this slice | PR 2 | Not in this slice |
-| 12 | Tagged-fixture `list --json` +15.2% (over 10% relative, inside 1.5 ms absolute) | Accept; cost is the approved always-present fields | PR 1 | Pending owner |
+| 12 | Tagged-fixture `list --json` +15.2% (over 10% relative, inside 1.5 ms absolute) | Accept; cost is the approved always-present fields | PR 1 | Accepted by owner 2026-10-21 |
 
 The mapping matches the reviewer's reading. Question 8 gates PR 1 only
 through the reserved-name text in usage.md's schema policy. With question 4
