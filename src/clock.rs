@@ -1,8 +1,8 @@
 //! The process's local calendar date: the only reader of the system clock and time zone.
 
-use std::sync::OnceLock;
 #[cfg(unix)]
 use std::{env, fs, path::PathBuf};
+use std::{sync::OnceLock, time::SystemTime};
 
 use jiff::{Timestamp, tz::TimeZone};
 
@@ -10,9 +10,17 @@ use crate::metadata::Date;
 
 /// Today's date in the local time zone, which is resolved once per process.
 pub(crate) fn today() -> Date {
-    let date = zone().to_datetime(Timestamp::now()).date();
-    // jiff's civil years run from -9999 to 9999, so only a clock set before 1 BCE fails to
-    // convert; the guard keeps `today` free of panics.
+    today_at(SystemTime::now(), zone())
+}
+
+/// The date of `now` in `zone`. A clock outside jiff's years -9999 to 9999, or before 1 BCE,
+/// clamps to `Date::MIN`, so `today` has no panic path.
+fn today_at(now: SystemTime, zone: &TimeZone) -> Date {
+    // Not `Timestamp::now()`, which panics when the system clock is outside jiff's range.
+    let Ok(now) = Timestamp::try_from(now) else {
+        return Date::MIN;
+    };
+    let date = zone.to_datetime(now).date();
     u16::try_from(date.year())
         .ok()
         .zip(u8::try_from(date.month()).ok())
@@ -168,6 +176,25 @@ mod tests {
             assert_today(Some(&format!("../Etc/{name}")), Some(&zones), UTC);
             assert_today(Some(&made_up.replace('/', "//")), Some(&zones), UTC);
         }
+    }
+
+    #[test]
+    fn clocks_outside_the_civil_range_should_clamp_to_the_minimum_date() {
+        use std::time::Duration;
+        // About year 14,600: past jiff's range, so the timestamp conversion itself fails.
+        let future = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(400_000_000_000));
+        // About 1 BCE: inside jiff's range, but a negative year.
+        let ancient = SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(62_200_000_000));
+        for now in [future, ancient].into_iter().flatten() {
+            assert_eq!(today_at(now, &TimeZone::UTC), Date::MIN, "{now:?}");
+        }
+        assert_eq!(
+            today_at(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_792_584_000),
+                &TimeZone::UTC
+            ),
+            Date::new(2026, 10, 21).unwrap()
+        );
     }
 
     #[test]
