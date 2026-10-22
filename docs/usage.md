@@ -140,8 +140,9 @@ shtodo edit 3 "Pay rent due:2026-12-01"     # change the date by editing the tex
   follows `TZ` (a zone name such as `America/New_York`, `:America/New_York`,
   a zone file path, or a POSIX rule such as `<-05>5`) and otherwise the
   system zone. An unknown or empty `TZ` uses UTC. The TUI reads the date when
-  it starts and again each second with its refresh, and uses the date it has
-  when you press Enter.
+  it starts and at least once a second after that, even while you keep making
+  changes, or up to every five seconds while storage errors slow its refresh.
+  It uses the date it has when you press Enter.
 - Completing a task keeps its due token. A done task is never overdue.
 - Search still matches the full literal text, so `/due:2026-11` finds those
   tokens as text.
