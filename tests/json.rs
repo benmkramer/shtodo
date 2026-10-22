@@ -34,7 +34,47 @@ fn failure(output: &Output, code: &str) -> Value {
 }
 
 fn task(id: u64, text: &str, state: &str, deleted: bool) -> Value {
-    json!({"id": id, "text": text, "state": state, "deleted": deleted})
+    tagged(id, text, state, deleted, None, &[])
+}
+
+fn tagged(
+    id: u64,
+    text: &str,
+    state: &str,
+    deleted: bool,
+    priority: Option<&str>,
+    tags: &[&str],
+) -> Value {
+    json!({
+        "id": id, "text": text, "state": state, "deleted": deleted,
+        "priority": priority, "tags": tags
+    })
+}
+
+fn ids(value: &Value) -> Vec<u64> {
+    value["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["id"].as_u64().unwrap())
+        .collect()
+}
+
+/// Seven tasks: 3 is done, 6 is deleted, and 7 has a lowercase (non-)priority.
+fn seed_tagged_tasks(home: &Path) {
+    for text in [
+        "(B) Write docs +shtodo",
+        "Plain errand @home",
+        "(A) Fix the bug +shtodo @laptop.",
+        "(A) Ship release +shtodo",
+        "(C) Call bob @home",
+        "(A) deleted +shtodo",
+        "(b) lowercase +shtodo",
+    ] {
+        success(&run(home, home, &["--json", "add", text]));
+    }
+    success(&run(home, home, &["--json", "done", "3"]));
+    success(&run(home, home, &["--json", "delete", "6"]));
 }
 
 #[test]
@@ -405,5 +445,326 @@ fn json_should_report_non_utf8_arguments_without_unstructured_diagnostics() {
             .unwrap();
         failure(&output, code);
         assert!(!home.path().join(".shtodo").exists());
+    }
+}
+
+#[test]
+fn json_list_filters_should_return_the_text_mode_rows_with_derived_fields() {
+    let home = tempfile::tempdir().unwrap();
+    seed_tagged_tasks(home.path());
+
+    assert_eq!(
+        success(&run(
+            home.path(),
+            home.path(),
+            &["list", "--json", "--tag", "+shtodo", "--open"]
+        )),
+        json!({
+            "schema_version": 1, "command": "list", "scope": {"kind": "global"},
+            "tasks": [
+                tagged(1, "(B) Write docs +shtodo", "open", false, Some("B"), &["+shtodo"]),
+                tagged(4, "(A) Ship release +shtodo", "open", false, Some("A"), &["+shtodo"]),
+                tagged(7, "(b) lowercase +shtodo", "open", false, None, &["+shtodo"]),
+            ]
+        })
+    );
+    let all = success(&run(home.path(), home.path(), &["--json", "list"]));
+    assert_eq!(
+        all["tasks"][2],
+        tagged(
+            3,
+            "(A) Fix the bug +shtodo @laptop.",
+            "done",
+            false,
+            Some("A"),
+            &["+shtodo", "@laptop"]
+        )
+    );
+    for filters in [
+        vec!["--done"],
+        vec!["--tag", "@laptop."],
+        vec!["--priority", "a-b", "--priority", "none"],
+        vec!["--search", "SHIP"],
+        vec![
+            "--priority",
+            "C",
+            "--tag",
+            "@home",
+            "--open",
+            "--search",
+            "bob",
+        ],
+        vec!["--tag", "+missing"],
+    ] {
+        let mut text_args = vec!["list"];
+        text_args.extend(&filters);
+        let text = run(home.path(), home.path(), &text_args);
+        let text_ids: Vec<u64> = String::from_utf8_lossy(&text.stdout)
+            .lines()
+            .map(|line| line.split("  ").next().unwrap().parse().unwrap())
+            .collect();
+        let mut json_args = vec!["--json"];
+        json_args.extend(&text_args);
+        let value = success(&run(home.path(), home.path(), &json_args));
+
+        assert_eq!(ids(&value), text_ids, "{filters:?}");
+        for task in value["tasks"].as_array().unwrap() {
+            assert_eq!(
+                all["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t["id"] == task["id"]),
+                Some(task)
+            );
+        }
+    }
+}
+
+#[test]
+fn json_list_sort_priority_should_reorder_the_same_task_objects() {
+    let home = tempfile::tempdir().unwrap();
+    seed_tagged_tasks(home.path());
+
+    for (filters, expected) in [
+        (vec![], vec![3, 4, 1, 5, 2, 7]),
+        (vec!["--open", "--tag", "+shtodo"], vec![4, 1, 7]),
+        (vec!["--priority", "none", "--priority", "C"], vec![5, 2, 7]),
+        (vec!["--search", "CA"], vec![5, 7]),
+    ] {
+        let mut unsorted_args = vec!["--json", "list"];
+        unsorted_args.extend(&filters);
+        let unsorted = success(&run(home.path(), home.path(), &unsorted_args));
+        let mut sorted_args = unsorted_args.clone();
+        sorted_args.extend(["--sort", "priority"]);
+        let sorted = success(&run(home.path(), home.path(), &sorted_args));
+        let text_args = sorted_args[1..].to_vec();
+        let text = run(home.path(), home.path(), &text_args);
+        let text_ids: Vec<u64> = String::from_utf8_lossy(&text.stdout)
+            .lines()
+            .map(|line| line.split("  ").next().unwrap().parse().unwrap())
+            .collect();
+
+        assert_eq!(ids(&sorted), expected, "{filters:?}");
+        assert_eq!(text_ids, expected, "{filters:?}");
+        let mut reordered: Vec<Value> = unsorted["tasks"].as_array().unwrap().clone();
+        reordered.sort_by_key(|task| expected.iter().position(|id| task["id"] == *id).unwrap());
+        assert_eq!(sorted["tasks"], Value::Array(reordered), "{filters:?}");
+        assert_eq!(sorted["command"], "list");
+    }
+}
+
+#[test]
+fn json_list_filter_errors_should_be_invalid_arguments_without_storage() {
+    let home = tempfile::tempdir().unwrap();
+    for (args, message) in [
+        (
+            vec!["--json", "list", "extra"],
+            "unsupported shtodo arguments",
+        ),
+        (
+            vec!["list", "--wat", "--json"],
+            "unsupported shtodo arguments",
+        ),
+        (
+            vec!["--json", "list", "--tag=+x"],
+            "unsupported shtodo arguments",
+        ),
+        (vec!["--json", "list", "--tag"], "--tag requires a value"),
+        (
+            vec!["--json", "list", "--priority"],
+            "--priority requires a value",
+        ),
+        (
+            vec!["--json", "list", "--search"],
+            "--search requires a value",
+        ),
+        (
+            vec!["--json", "list", "--tag", "work"],
+            "expected +project or @context",
+        ),
+        (
+            vec!["list", "--json", "--tag", "+."],
+            "expected +project or @context",
+        ),
+        (
+            vec!["--json", "list", "--priority", "C-A"],
+            "expected a letter A-Z",
+        ),
+        (
+            vec!["--json", "list", "--search", ""],
+            "--search requires non-empty single-line text",
+        ),
+        (
+            vec!["--json", "list", "--open", "--done"],
+            "--open and --done cannot be combined",
+        ),
+        (
+            vec!["--json", "list", "--open", "--open"],
+            "--open may only be specified once",
+        ),
+        (
+            vec!["--json", "list", "--search", "a", "--search", "a"],
+            "--search may only be specified once",
+        ),
+        (
+            vec!["--json", "list", "--open", "--json"],
+            "--json may only be specified once",
+        ),
+        (
+            vec!["--json", "list", "--sort"],
+            "--sort requires a value; expected priority",
+        ),
+        (
+            vec!["--json", "list", "--sort", "manual"],
+            r#"invalid --sort \"manual\"; expected priority"#,
+        ),
+        (vec!["--json", "list", "--sort", "x"], "expected priority"),
+        (vec!["--json", "list", "--sort", ""], "expected priority"),
+        (
+            vec!["--json", "list", "--sort", "--json"],
+            r#"invalid --sort \"--json\"; expected priority"#,
+        ),
+        (
+            vec!["list", "--json", "--sort", "priority", "--sort", "priority"],
+            "--sort may only be specified once",
+        ),
+        (
+            vec!["--json", "list", "--done", "--done"],
+            "--done may only be specified once",
+        ),
+        (
+            vec!["--json", "list", "--tag", "+"],
+            r#"invalid --tag \"+\"; expected +project or @context"#,
+        ),
+        (
+            vec!["--json", "list", "--tag", "+a b"],
+            r#"invalid --tag \"+a b\"; expected +project or @context"#,
+        ),
+        (
+            vec!["--json", "list", "--priority", "AA"],
+            r#"invalid --priority \"AA\"; expected a letter A-Z, a range such as A-C, or none"#,
+        ),
+        (
+            vec!["--json", "list", "--priority", ""],
+            r#"invalid --priority \"\"; expected a letter A-Z"#,
+        ),
+        (
+            vec!["--json", "list", "--search", " \t "],
+            "--search requires non-empty single-line text",
+        ),
+        (
+            vec!["--json", "list", "--search", "a\nb"],
+            "--search requires non-empty single-line text",
+        ),
+        (
+            vec!["--json", "list", "--search", "a\rb"],
+            "--search requires non-empty single-line text",
+        ),
+    ] {
+        let output = run(home.path(), home.path(), &args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let value = failure(&output, "invalid_arguments");
+        let error = serde_json::to_string(&value["error"]["message"]).unwrap();
+        assert!(error.contains(message), "{args:?}: {error}");
+        assert!(!home.path().join(".shtodo").exists(), "{args:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn json_list_should_reject_non_utf8_filter_values_without_storage() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let home = tempfile::tempdir().unwrap();
+    for flag in ["--tag", "--priority", "--search", "--sort"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_shtodo"))
+            .args(["--json", "list", flag])
+            .arg(std::ffi::OsString::from_vec(vec![b'+', 0xff]))
+            .env("HOME", home.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{flag}");
+        let value = failure(&output, "invalid_arguments");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("invalid {flag} value; expected UTF-8")),
+            "{value}"
+        );
+        assert!(!home.path().join(".shtodo").exists(), "{flag}");
+    }
+}
+
+#[test]
+fn json_filtered_lists_should_be_empty_for_missing_scopes_and_readable_under_a_writer_lock() {
+    let home = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--json", "list", "--tag", "+x", "--sort", "priority"],
+        vec!["--json", "--local", "list", "--open", "--priority", "A"],
+    ] {
+        let value = success(&run(home.path(), directory.path(), &args));
+        assert_eq!(value["tasks"], json!([]), "{args:?}");
+        assert!(!home.path().join(".shtodo").exists(), "{args:?}");
+    }
+
+    seed_tagged_tasks(home.path());
+    let path = home.path().join(".shtodo/global/tasks.json");
+    let before = std::fs::read(&path).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path.with_extension("lock"))
+        .unwrap();
+    lock.lock().unwrap();
+
+    let value = success(&run(
+        home.path(),
+        home.path(),
+        &["--json", "list", "--priority", "A", "--sort", "priority"],
+    ));
+    assert_eq!(ids(&value), [3, 4]);
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn json_mutation_replies_should_carry_derived_priority_and_tags() {
+    let home = tempfile::tempdir().unwrap();
+    let text = "(A) Fix +shtodo @laptop +shtodo!";
+    let tags = ["+shtodo", "@laptop"];
+    for (args, expected) in [
+        (
+            vec!["add", text],
+            tagged(1, text, "open", false, Some("A"), &tags),
+        ),
+        (
+            vec!["done", "1"],
+            tagged(1, text, "done", false, Some("A"), &tags),
+        ),
+        (
+            vec!["reopen", "1"],
+            tagged(1, text, "open", false, Some("A"), &tags),
+        ),
+        (
+            vec!["delete", "1"],
+            tagged(1, text, "open", true, Some("A"), &tags),
+        ),
+        (
+            vec!["restore", "1"],
+            tagged(1, text, "open", false, Some("A"), &tags),
+        ),
+        (
+            vec!["edit", "1", "(B) moved @desk"],
+            tagged(1, "(B) moved @desk", "open", false, Some("B"), &["@desk"]),
+        ),
+        (vec!["edit", "1", "plain"], task(1, "plain", "open", false)),
+    ] {
+        let mut arguments = vec!["--json"];
+        arguments.extend(&args);
+        let value = success(&run(home.path(), home.path(), &arguments));
+        assert_eq!(value["task"], expected, "{args:?}");
     }
 }

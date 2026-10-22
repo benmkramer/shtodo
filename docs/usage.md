@@ -9,6 +9,7 @@ shtodo add "Fix the bug"
 shtodo --local add "Run the tests"
 shtodo list
 shtodo --local list
+shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]... [--search <TEXT>] [--sort priority]
 shtodo delete 3
 shtodo --local delete 3
 shtodo [--local] done 3
@@ -70,6 +71,92 @@ lock. Snapshot validation errors still fail the command without changing the
 snapshot. This readable text is a display contract, not a serialization
 format.
 
+### Priority and tags
+
+Priority and tags are written in the task text with
+[todo.txt](https://github.com/todotxt/todo.txt) syntax. shtodo derives them
+whenever it needs them; nothing extra is stored, so lists written by earlier
+versions work unchanged and older binaries still read new lists.
+
+```sh
+shtodo add "(A) Fix the bug +shtodo @laptop"
+shtodo edit 3 "(B) Fix the bug +shtodo"   # change the priority, drop @laptop
+```
+
+- **Priority** is a leading `(A) ` through `(Z) `: an opening parenthesis, one
+  uppercase ASCII letter, a closing parenthesis, and a space, at the very start
+  of the text. `(A)` alone, `(a) x`, `(AA) x`, `(A)x`, and a marker later in
+  the text are not priorities. `A` is the highest.
+- **Tags** are words that start with `+` (a project) or `@` (a context), split
+  on Unicode whitespace. Trailing `.`, `,`, `;`, `:`, `!`, and `?` are not part
+  of the tag, so `Ship it +shtodo.` has the tag `+shtodo`. At least one
+  character must remain after the sigil: `+`, `@`, and `+.` are not tags.
+  Other punctuation stays (`+a.b`, `+x)`), and a sigil inside a word
+  (`C++`, `bob@example.com`) does not start a tag. Tags are case-sensitive.
+- Stripping trailing punctuation goes beyond strict todo.txt, where
+  `+shtodo.` is the project `shtodo.`. It matches what `todo.sh ls +shtodo`
+  already finds, since that is a substring search. The text itself is never
+  changed.
+- Completion is still the task's state, not a todo.txt `x ` prefix, and
+  completing a task keeps its priority.
+
+To change a priority or tag, edit the text. There is no separate priority
+command.
+
+### Filtering and sorting the list
+
+`shtodo list` accepts filters after `list`, in any order. They combine with
+AND across kinds:
+
+| Flag | Shows |
+| --- | --- |
+| `--open` or `--done` | Only open or only done tasks; at most one of them |
+| `--tag <TAG>` | Tasks with that exact `+project` or `@context` tag. Repeat to require every listed tag |
+| `--priority <P>` | Tasks whose priority is the letter `A` to `Z`, in the inclusive range `A-C`, or `none` for no priority. ASCII case-insensitive (`a-c`, `NONE`). Repeat to accept any of them |
+| `--search <TEXT>` | Tasks whose full text contains TEXT, ignoring case, like TUI `/` search. At most once |
+| `--sort priority` | All matching tasks ordered `A` to `Z`, then tasks without a priority. The value is case-sensitive: only `priority` is accepted. At most once |
+
+```sh
+shtodo list --open --tag +shtodo
+shtodo list --tag +shtodo --tag @laptop --priority A-B
+shtodo --local list --priority none --search "release notes"
+shtodo list --open --sort priority
+```
+
+Without `--sort`, filtered output keeps the saved order and the same
+`ID  state  text` lines. `--sort priority` filters first and then sorts; tasks
+with the same priority, and tasks without one, keep their saved order. It is
+the only sort; reordering stays in the TUI. A `--tag` value is normalized like
+a derived tag, so `--tag +shtodo.` means `--tag +shtodo`. A filter that
+matches nothing prints nothing and exits 0.
+
+Each flag value is the next argument, exactly as given, even if it starts with
+`-`. So `shtodo list --search --json` searches for the text `--json`, and
+`shtodo list --sort --json` fails because `--json` is not a sort. Put `--json`
+before `list` (`shtodo --json list --search ...`) to avoid this.
+`--flag=value` forms are not supported.
+
+Filter errors are usage errors. They exit with status 1, print the message
+and usage, and are detected before any storage is read. With `--json`, the
+error code is `invalid_arguments`:
+
+| Case | Message |
+| --- | --- |
+| Unknown flag, `--flag=value`, or extra argument | `unsupported shtodo arguments: "--wat"` |
+| `--tag`, `--priority`, or `--search` with no value | `--tag requires a value` |
+| `--tag work`, `--tag +`, `--tag "+a b"` | `invalid --tag "work"; expected +project or @context` |
+| `--priority AA`, `--priority C-A`, `--priority ""` | `invalid --priority "AA"; expected a letter A-Z, a range such as A-C, or none` |
+| Empty, whitespace-only, or multiline `--search` | `--search requires non-empty single-line text` |
+| `--open` with `--done` | `--open and --done cannot be combined` |
+| `--sort` with no value | `--sort requires a value; expected priority` |
+| `--sort manual`, `--sort x`, `--sort ""`, `--sort --json` | `invalid --sort "manual"; expected priority` |
+| A repeated `--open`, `--done`, `--search`, or `--sort` | `--search may only be specified once` |
+| A filter value that is not UTF-8 | `invalid --tag value; expected UTF-8` |
+
+Empty values are rejected on purpose, so an unset shell variable cannot
+quietly turn a filter into "everything". An older shtodo that does not know a
+filter flag also fails with a usage error rather than listing every task.
+
 `shtodo delete <ID>` and `shtodo --local delete <ID>` soft-delete exactly one
 task from the selected scope. IDs are positive integers local to their scope,
 so global task `3` and local task `3` may be different tasks. A successful
@@ -123,10 +210,13 @@ block `add`, `list`, `delete`, `done`, `reopen`, `edit`, or `restore`.
 
 Use `--json` with `add`, `list`, `delete`, `done`, `reopen`, `edit`, or
 `restore`. Put it before the command, immediately after the command, or after
-all its positional arguments. `--local` still goes before the command:
+all its positional arguments. For `list`, it may also go between filters, but
+not right after a flag that takes a value. `--local` still goes before the
+command:
 
 ```sh
 shtodo list --json
+shtodo --json list --open --tag +shtodo --sort priority
 shtodo --local --json add 'Fix the bug'
 shtodo --local done --json 3
 shtodo --local edit 3 'Updated text' --json
@@ -137,10 +227,11 @@ Success writes one compact JSON object and a newline to stdout, with empty
 stderr and exit status 0. Listing an empty or never-created scope returns an
 empty `tasks` array and creates no storage. JSON listing has the same saved
 order, inclusion of open and done tasks, and omission of tombstones as text
-listing:
+listing. List filters and `--sort priority` select and order the same task
+objects; the reply does not repeat the filter:
 
 ```json
-{"schema_version":1,"command":"list","scope":{"kind":"global"},"tasks":[{"id":1,"text":"Fix the bug","state":"open","deleted":false}]}
+{"schema_version":1,"command":"list","scope":{"kind":"global"},"tasks":[{"id":1,"text":"(A) Fix the bug +shtodo @laptop","state":"open","deleted":false,"priority":"A","tags":["+shtodo","@laptop"]},{"id":2,"text":"Run the tests","state":"open","deleted":false,"priority":null,"tags":[]}]}
 ```
 
 Mutation results contain the task from the saved transaction and a `changed`
@@ -149,7 +240,7 @@ and restoration of live tasks return `changed: false` without rewriting the
 snapshot. An add always creates a new task:
 
 ```json
-{"schema_version":1,"command":"done","scope":{"kind":"global"},"task":{"id":1,"text":"Fix the bug","state":"done","deleted":false},"changed":true}
+{"schema_version":1,"command":"done","scope":{"kind":"global"},"task":{"id":1,"text":"Fix the bug","state":"done","deleted":false,"priority":null,"tags":[]},"changed":true}
 ```
 
 The output schema is independent of the on-disk snapshot schema. Its fields
@@ -165,10 +256,29 @@ are:
 | `changed` | Whether the mutation changed the saved task list. |
 
 Each task has a positive numeric `id`, literal `text`, `state` (`open` or
-`done`), and boolean `deleted`. Deleting a task preserves its completion
-state. Retain scope alongside IDs. Task text is data, including quotes,
-backslashes, Unicode, and tabs; parse it with a JSON library. Clients should
-check `schema_version` and tolerate additional fields within that version.
+`done`), boolean `deleted`, `priority`, and `tags`. Deleting a task preserves
+its completion state. Retain scope alongside IDs. Task text is data, including
+quotes, backslashes, Unicode, and tabs; parse it with a JSON library. Clients
+should check `schema_version` and tolerate additional fields within that
+version.
+
+| Task field | Contract |
+| --- | --- |
+| `priority` | The [derived priority](#priority-and-tags) as a one-character string `"A"` to `"Z"`, or `null`. Never the `(A)` marker or a number. |
+| `tags` | The derived tags as strings with their sigil and without trailing `.,;:!?`, in text order, without duplicates; `[]` when there are none. |
+
+Both are always present on every task object, including deleted tasks in
+mutation replies, and `text` still holds the full literal text, tokens
+included. To find the tags in use, read them from `list`, for example
+`shtodo --json list | jq '[.tasks[].tags[]] | group_by(.) | map({tag: .[0], count: length})'`.
+
+Schema policy: new task metadata is always added as an always-present field,
+nullable or an array, and never signaled by an absent field. Adding such a
+field does not change `schema_version`. The version changes only when an
+existing field changes meaning, a field is removed, or an enumerated value
+gains members clients must handle, such as a third `state`. The field names
+`due` (a string or `null`) and `parent_id` (a number or `null`) are reserved
+for planned features and are not emitted yet.
 
 Failures write one JSON object and a newline to stderr, leave stdout empty,
 and exit nonzero. Error messages are for people; branch on `error.code`:
@@ -422,11 +532,12 @@ may allow an edit. This is not a record of every intervening task event.
 
 Version one is intentionally local and narrow. It does not include accounts,
 synchronization, network access, sharing or collaboration, recurring tasks,
-reminders, notifications, dates or due dates, priorities, tags, or multiple
-named lists. It has no sidebar, mouse interaction, Git-root
+reminders, notifications, dates or due dates, subtasks, or multiple named
+lists. Priorities and tags exist only as [todo.txt tokens in the task
+text](#priority-and-tags), with shell `list` filters and `--sort priority`.
+It has no sidebar, mouse interaction, Git-root
 discovery for local scope, runtime plugins or extensions, custom themes,
-shell search or filters, import, export, bulk commands,
-permanent deletion, or bulk restoration.
+import, export, bulk commands, permanent deletion, or bulk restoration.
 
 The following work is explicitly deferred: permanent deletion and automatic
 purging of tombstones; a sidebar for global, project, trash, and later views.

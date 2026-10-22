@@ -1,5 +1,10 @@
 use std::{error::Error, ffi::OsString, fmt};
 
+use crate::{
+    metadata::{FilterToken, TaskFilter, parse_filter_token},
+    projection::{TaskOrder, TaskView},
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ScopeChoice {
     Global,
@@ -16,7 +21,7 @@ pub(crate) enum OutputFormat {
 pub(crate) enum Command {
     Run(ScopeChoice),
     Add(ScopeChoice, Option<OsString>, bool),
-    List(ScopeChoice),
+    List(ScopeChoice, ListFilter),
     Delete(ScopeChoice, u64),
     Done(ScopeChoice, u64),
     Reopen(ScopeChoice, u64),
@@ -25,6 +30,15 @@ pub(crate) enum Command {
     Doctor,
     Help,
     Version,
+}
+
+/// What `list` shows, parsed and validated before storage is read.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ListFilter {
+    pub(crate) view: TaskView,
+    pub(crate) filter: TaskFilter,
+    pub(crate) search: Option<String>,
+    pub(crate) order: TaskOrder,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -36,6 +50,10 @@ pub(crate) enum CliError {
     DuplicateJsonFlag,
     JsonWithPrintId,
     JsonRequiresTaskCommand,
+    MissingFilterValue { flag: &'static str },
+    InvalidFilterValue { flag: &'static str, value: OsString },
+    ConflictingStateFilters,
+    DuplicateListFlag { flag: &'static str },
 }
 
 impl fmt::Display for CliError {
@@ -60,6 +78,30 @@ impl fmt::Display for CliError {
                 formatter.write_str(
                     "--json requires add, list, delete, done, reopen, edit, or restore",
                 )?;
+            }
+            Self::MissingFilterValue { flag: "--sort" } => {
+                formatter.write_str("--sort requires a value; expected priority")?;
+            }
+            Self::MissingFilterValue { flag } => write!(formatter, "{flag} requires a value")?,
+            Self::InvalidFilterValue { flag, value } => match (*flag, value.to_str()) {
+                (flag, None) => write!(formatter, "invalid {flag} value; expected UTF-8")?,
+                ("--search", Some(_)) => {
+                    formatter.write_str("--search requires non-empty single-line text")?;
+                }
+                (flag, Some(value)) => {
+                    let expected = match flag {
+                        "--tag" => "+project or @context",
+                        "--priority" => "a letter A-Z, a range such as A-C, or none",
+                        _ => "priority",
+                    };
+                    write!(formatter, "invalid {flag} {value:?}; expected {expected}")?;
+                }
+            },
+            Self::ConflictingStateFilters => {
+                formatter.write_str("--open and --done cannot be combined")?;
+            }
+            Self::DuplicateListFlag { flag } => {
+                write!(formatter, "{flag} may only be specified once")?;
             }
         }
         write!(formatter, "\n\n{}", usage())
@@ -86,7 +128,23 @@ where
     }
 
     let command_index = index;
-    if let Some(command) = values.get(command_index).and_then(|value| value.to_str()) {
+    if values
+        .get(command_index)
+        .is_some_and(|value| value == "list")
+    {
+        // List flag values are taken verbatim, so `--json` counts only in flag positions.
+        index += 1;
+        while index < values.len() {
+            if values[index] == "--json" {
+                values.remove(index);
+                json_flags += 1;
+            } else if takes_list_value(&values[index]) {
+                index += 2;
+            } else {
+                index += 1;
+            }
+        }
+    } else if let Some(command) = values.get(command_index).and_then(|value| value.to_str()) {
         let positional_count = match command {
             "add" | "delete" | "done" | "reopen" | "restore" => 1,
             "edit" => 2,
@@ -164,10 +222,13 @@ where
         [local, command, text] if local == "--local" && command == "add" => {
             Ok(Command::Add(ScopeChoice::Local, Some(text.clone()), false))
         }
-        [command] if command == "list" => Ok(Command::List(ScopeChoice::Global)),
-        [local, command] if local == "--local" && command == "list" => {
-            Ok(Command::List(ScopeChoice::Local))
-        }
+        [command, arguments @ ..] if command == "list" => Ok(Command::List(
+            ScopeChoice::Global,
+            parse_list_args(arguments)?,
+        )),
+        [local, command, arguments @ ..] if local == "--local" && command == "list" => Ok(
+            Command::List(ScopeChoice::Local, parse_list_args(arguments)?),
+        ),
         [command] if command == "delete" => Err(CliError::MissingTaskId),
         [local, command] if local == "--local" && command == "delete" => {
             Err(CliError::MissingTaskId)
@@ -200,6 +261,101 @@ where
         [value, ..] => Err(CliError::UnsupportedArguments {
             argument: value.clone(),
         }),
+    }
+}
+
+fn takes_list_value(argument: &OsString) -> bool {
+    matches!(
+        argument.to_str(),
+        Some("--tag" | "--priority" | "--search" | "--sort")
+    )
+}
+
+/// Parses the arguments after `list`; each flag value is the next argument, verbatim.
+fn parse_list_args(arguments: &[OsString]) -> Result<ListFilter, CliError> {
+    let mut list = ListFilter::default();
+    let mut state_flag = None;
+    let mut sorted = false;
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        match argument.to_str() {
+            Some(flag @ ("--open" | "--done")) => {
+                let (flag, view) = if flag == "--open" {
+                    ("--open", TaskView::Open)
+                } else {
+                    ("--done", TaskView::Done)
+                };
+                match state_flag {
+                    Some(previous) if previous == flag => {
+                        return Err(CliError::DuplicateListFlag { flag });
+                    }
+                    Some(_) => return Err(CliError::ConflictingStateFilters),
+                    None => state_flag = Some(flag),
+                }
+                list.view = view;
+            }
+            Some("--tag") => {
+                let (value, text) = list_value(&mut arguments, "--tag")?;
+                match parse_filter_token(text) {
+                    Some(token @ FilterToken::Tag(_)) => list.filter.add(token),
+                    _ => return Err(invalid_list_value("--tag", value)),
+                }
+            }
+            Some("--priority") => {
+                let (value, text) = list_value(&mut arguments, "--priority")?;
+                match parse_filter_token(text) {
+                    Some(token @ FilterToken::Priorities(_)) => list.filter.add(token),
+                    _ => return Err(invalid_list_value("--priority", value)),
+                }
+            }
+            Some("--search") => {
+                if list.search.is_some() {
+                    return Err(CliError::DuplicateListFlag { flag: "--search" });
+                }
+                let (value, text) = list_value(&mut arguments, "--search")?;
+                if text.trim().is_empty() || text.contains(['\n', '\r']) {
+                    return Err(invalid_list_value("--search", value));
+                }
+                list.search = Some(text.to_owned());
+            }
+            Some("--sort") => {
+                if sorted {
+                    return Err(CliError::DuplicateListFlag { flag: "--sort" });
+                }
+                let (value, text) = list_value(&mut arguments, "--sort")?;
+                if text != "priority" {
+                    return Err(invalid_list_value("--sort", value));
+                }
+                sorted = true;
+                list.order = TaskOrder::Priority;
+            }
+            _ => {
+                return Err(CliError::UnsupportedArguments {
+                    argument: argument.clone(),
+                });
+            }
+        }
+    }
+    Ok(list)
+}
+
+fn list_value<'a>(
+    arguments: &mut std::slice::Iter<'a, OsString>,
+    flag: &'static str,
+) -> Result<(&'a OsString, &'a str), CliError> {
+    let value = arguments
+        .next()
+        .ok_or(CliError::MissingFilterValue { flag })?;
+    let text = value
+        .to_str()
+        .ok_or_else(|| invalid_list_value(flag, value))?;
+    Ok((value, text))
+}
+
+fn invalid_list_value(flag: &'static str, value: &OsString) -> CliError {
+    CliError::InvalidFilterValue {
+        flag,
+        value: value.clone(),
     }
 }
 
@@ -258,6 +414,8 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo [--local] add --print-id [<TASK>]\n",
         "  shtodo list\n",
         "  shtodo --local list\n",
+        "  shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]...\n",
+        "              [--search <TEXT>] [--sort priority]\n",
         "  shtodo delete <ID>\n",
         "  shtodo --local delete <ID>\n",
         "  shtodo [--local] done <ID>\n",
@@ -273,6 +431,11 @@ pub(crate) fn usage() -> &'static str {
         "  add <TASK>  Add one task without opening the terminal UI.\n",
         "              When TASK is omitted, read it from standard input.\n",
         "  list        List non-deleted tasks with their IDs and states.\n",
+        "              --open or --done keeps one state. --tag +project or @context\n",
+        "              (repeat: all must match). --priority A, A-C, or none (repeat:\n",
+        "              any may match). --search TEXT matches case-insensitively.\n",
+        "              --sort priority lists A to Z, then unprioritized tasks.\n",
+        "              Each flag value is the next argument, even if it starts with -.\n",
         "  delete <ID> Soft-delete one task by its scope-local ID.\n",
         "  done <ID>   Mark one live task done (safe to repeat).\n",
         "  reopen <ID> Mark one live task open (safe to repeat).\n",
@@ -301,6 +464,8 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo list\n",
         "  shtodo --local list\n",
         "  shtodo list --json\n",
+        "  shtodo list --open --tag +work --sort priority\n",
+        "  shtodo --json list --priority A-B --search release\n",
         "  shtodo --local --json add \"Run the tests\"\n",
         "  shtodo delete 3\n",
         "  shtodo --local delete 3\n",
@@ -320,7 +485,13 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt as _;
 
-    use super::{Command, ScopeChoice, parse_args};
+    use super::{
+        CliError, Command, ListFilter, OutputFormat, ScopeChoice, parse_args, parse_invocation,
+    };
+    use crate::{
+        metadata::{TaskFilter, parse_filter_token},
+        projection::{TaskOrder, TaskView},
+    };
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -388,11 +559,11 @@ mod tests {
     fn parse_args_should_accept_list_for_global_and_local_scopes() {
         assert_eq!(
             parse_args(args(&["list"])),
-            Ok(Command::List(ScopeChoice::Global))
+            Ok(Command::List(ScopeChoice::Global, ListFilter::default()))
         );
         assert_eq!(
             parse_args(args(&["--local", "list"])),
-            Ok(Command::List(ScopeChoice::Local))
+            Ok(Command::List(ScopeChoice::Local, ListFilter::default()))
         );
     }
 
@@ -513,5 +684,309 @@ mod tests {
         assert!(parse_args(args(&["--print-id", "add", "task"])).is_err());
         assert!(parse_args(args(&["add", "task", "--print-id"])).is_err());
         assert!(parse_args(args(&["add", "--print-id", "one", "two"])).is_err());
+    }
+
+    fn list(values: &[&str]) -> Result<ListFilter, CliError> {
+        let mut arguments = vec!["list"];
+        arguments.extend(values);
+        match parse_args(args(&arguments))? {
+            Command::List(ScopeChoice::Global, filter) => Ok(filter),
+            command => panic!("unexpected {command:?}"),
+        }
+    }
+
+    fn task_filter(tokens: &[&str]) -> TaskFilter {
+        let mut filter = TaskFilter::default();
+        for token in tokens {
+            filter.add(parse_filter_token(token).unwrap());
+        }
+        filter
+    }
+
+    fn list_error(values: &[&str]) -> String {
+        let error = list(values).unwrap_err().to_string();
+        assert!(error.contains("Usage:"), "{error}");
+        error
+    }
+
+    #[test]
+    fn parse_list_args_should_accept_every_flag_in_any_order_in_both_scopes() {
+        let expected = ListFilter {
+            view: TaskView::Open,
+            filter: task_filter(&["+work", "@home", "A-B", "none"]),
+            search: Some("Fix It".into()),
+            order: TaskOrder::Priority,
+        };
+        assert_eq!(
+            list(&[
+                "--tag",
+                "+work",
+                "--priority",
+                "A-B",
+                "--open",
+                "--search",
+                "Fix It",
+                "--tag",
+                "@home.",
+                "--priority",
+                "none",
+                "--sort",
+                "priority",
+            ]),
+            Ok(expected.clone())
+        );
+        assert_eq!(
+            list(&[
+                "--sort",
+                "priority",
+                "--priority",
+                "a-b",
+                "--priority",
+                "NONE",
+                "--search",
+                "Fix It",
+                "--tag",
+                "@home",
+                "--open",
+                "--tag",
+                "+work",
+            ]),
+            Ok(ListFilter {
+                filter: task_filter(&["@home", "+work", "a-b", "none"]),
+                ..expected.clone()
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["--local", "list", "--done", "--tag", "+x"])),
+            Ok(Command::List(
+                ScopeChoice::Local,
+                ListFilter {
+                    view: TaskView::Done,
+                    filter: task_filter(&["+x"]),
+                    ..ListFilter::default()
+                }
+            ))
+        );
+        assert_eq!(list(&["--done"]).unwrap().view, TaskView::Done);
+        assert_eq!(list(&[]).unwrap().order, TaskOrder::Manual);
+        assert_eq!(
+            list(&["--search", "--tag"]).unwrap().search.as_deref(),
+            Some("--tag")
+        );
+        assert_eq!(
+            list(&["--tag", "+x", "--tag", "+x."]).unwrap().filter.tags,
+            ["+x"]
+        );
+    }
+
+    #[test]
+    fn parse_list_args_should_reject_every_error_row_with_usage() {
+        for (values, message) in [
+            (vec!["extra"], r#"unsupported shtodo arguments: "extra""#),
+            (vec!["--wat"], r#"unsupported shtodo arguments: "--wat""#),
+            (
+                vec!["--tag=+x"],
+                r#"unsupported shtodo arguments: "--tag=+x""#,
+            ),
+            (
+                vec!["--local"],
+                r#"unsupported shtodo arguments: "--local""#,
+            ),
+            (
+                vec!["--open", "extra"],
+                r#"unsupported shtodo arguments: "extra""#,
+            ),
+            (vec!["--tag"], "--tag requires a value"),
+            (vec!["--priority"], "--priority requires a value"),
+            (vec!["--search"], "--search requires a value"),
+            (vec!["--sort"], "--sort requires a value; expected priority"),
+            (
+                vec!["--tag", "work"],
+                r#"invalid --tag "work"; expected +project or @context"#,
+            ),
+            (
+                vec!["--tag", "+"],
+                r#"invalid --tag "+"; expected +project or @context"#,
+            ),
+            (
+                vec!["--tag", "+."],
+                r#"invalid --tag "+."; expected +project or @context"#,
+            ),
+            (
+                vec!["--tag", "+a b"],
+                r#"invalid --tag "+a b"; expected +project or @context"#,
+            ),
+            (
+                vec!["--tag", "A"],
+                r#"invalid --tag "A"; expected +project or @context"#,
+            ),
+            (
+                vec!["--priority", "AA"],
+                r#"invalid --priority "AA"; expected a letter A-Z, a range such as A-C, or none"#,
+            ),
+            (
+                vec!["--priority", "C-A"],
+                r#"invalid --priority "C-A"; expected"#,
+            ),
+            (vec!["--priority", ""], r#"invalid --priority ""; expected"#),
+            (
+                vec!["--priority", "+x"],
+                r#"invalid --priority "+x"; expected"#,
+            ),
+            (
+                vec!["--search", ""],
+                "--search requires non-empty single-line text",
+            ),
+            (
+                vec!["--search", " \t "],
+                "--search requires non-empty single-line text",
+            ),
+            (
+                vec!["--search", "a\nb"],
+                "--search requires non-empty single-line text",
+            ),
+            (
+                vec!["--search", "a\rb"],
+                "--search requires non-empty single-line text",
+            ),
+            (
+                vec!["--open", "--done"],
+                "--open and --done cannot be combined",
+            ),
+            (
+                vec!["--done", "--open"],
+                "--open and --done cannot be combined",
+            ),
+            (
+                vec!["--sort", "manual"],
+                r#"invalid --sort "manual"; expected priority"#,
+            ),
+            (
+                vec!["--sort", "x"],
+                r#"invalid --sort "x"; expected priority"#,
+            ),
+            (
+                vec!["--sort", "Priority"],
+                r#"invalid --sort "Priority"; expected priority"#,
+            ),
+            (
+                vec!["--sort", ""],
+                r#"invalid --sort ""; expected priority"#,
+            ),
+            (
+                vec!["--sort", "--json"],
+                r#"invalid --sort "--json"; expected priority"#,
+            ),
+            (
+                vec!["--open", "--open"],
+                "--open may only be specified once",
+            ),
+            (
+                vec!["--done", "--done"],
+                "--done may only be specified once",
+            ),
+            (
+                vec!["--search", "a", "--search", "b"],
+                "--search may only be specified once",
+            ),
+            (
+                vec!["--sort", "priority", "--sort", "priority"],
+                "--sort may only be specified once",
+            ),
+        ] {
+            let error = list_error(&values);
+            assert!(error.starts_with(message), "{values:?}: {error}");
+        }
+        for values in [
+            vec!["--sort"],
+            vec!["--sort", "manual"],
+            vec!["--sort", "--json"],
+        ] {
+            assert!(list_error(&values).contains("expected priority"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_list_args_should_reject_non_utf8_filter_values() {
+        for flag in ["--tag", "--priority", "--search", "--sort"] {
+            let error = parse_args(vec![
+                OsString::from("list"),
+                OsString::from(flag),
+                OsString::from_vec(vec![0xff]),
+            ])
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.starts_with(&format!("invalid {flag} value; expected UTF-8")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_invocation_should_take_list_flag_values_verbatim_and_json_only_in_flag_positions() {
+        let invoke = |values: &[&str]| parse_invocation(args(values));
+        let search = |text: &str| {
+            Ok(Command::List(
+                ScopeChoice::Global,
+                ListFilter {
+                    search: Some(text.into()),
+                    ..ListFilter::default()
+                },
+            ))
+        };
+
+        assert_eq!(
+            invoke(&["list", "--search", "--json"]),
+            (OutputFormat::Text, search("--json"))
+        );
+        for values in [
+            vec!["--json", "list", "--search", "--json"],
+            vec!["list", "--json", "--search", "--json"],
+            vec!["list", "--search", "--json", "--json"],
+        ] {
+            assert_eq!(
+                invoke(&values),
+                (OutputFormat::Json, search("--json")),
+                "{values:?}"
+            );
+        }
+        assert_eq!(
+            invoke(&["--local", "--json", "list", "--open", "--json"]).1,
+            Err(CliError::DuplicateJsonFlag)
+        );
+        assert_eq!(
+            invoke(&["list", "--open", "--json", "--sort", "priority"]),
+            (
+                OutputFormat::Json,
+                Ok(Command::List(
+                    ScopeChoice::Global,
+                    ListFilter {
+                        view: TaskView::Open,
+                        order: TaskOrder::Priority,
+                        ..ListFilter::default()
+                    }
+                ))
+            )
+        );
+        let (format, error) = invoke(&["list", "--sort", "--json"]);
+        assert_eq!(format, OutputFormat::Text);
+        assert!(
+            error
+                .unwrap_err()
+                .to_string()
+                .starts_with(r#"invalid --sort "--json""#)
+        );
+        for values in [
+            vec!["list", "--wat", "--json"],
+            vec!["--json", "list", "--tag"],
+            vec!["list", "--json", "--open", "--done"],
+            vec!["--local", "list", "--json", "--sort", "manual"],
+        ] {
+            let (format, command) = invoke(&values);
+            assert_eq!(format, OutputFormat::Json, "{values:?}");
+            assert!(command.is_err(), "{values:?}");
+        }
     }
 }

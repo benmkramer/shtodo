@@ -1,7 +1,7 @@
 use crate::{
     action::Action,
     mutation::{ConflictKind, Mutation, Outcome, TaskObservation},
-    projection::{self, Projection},
+    projection::Projection,
     task::{ListError, MoveDirection, Task, TaskId, TaskList},
 };
 
@@ -234,9 +234,8 @@ pub(crate) struct App {
     editor: Option<Editor>,
     message: Option<String>,
     celebration: Option<Celebration>,
-    view: TaskView,
     query: String,
-    lowercase_query: String,
+    projection: Projection,
     search_session: Option<SearchSession>,
     pending: Option<Mutation>,
     storage_error: Option<String>,
@@ -259,9 +258,8 @@ impl App {
             editor: None,
             message: None,
             celebration: None,
-            view: TaskView::All,
             query: String::new(),
-            lowercase_query: String::new(),
+            projection: Projection::default(),
             search_session: None,
             pending: None,
             storage_error: None,
@@ -342,7 +340,7 @@ impl App {
     }
 
     pub(crate) fn view(&self) -> TaskView {
-        self.view
+        self.projection.view
     }
 
     pub(crate) fn query(&self) -> &str {
@@ -355,7 +353,7 @@ impl App {
     }
 
     fn matches(&self, task: &Task) -> bool {
-        projection::matches(task, self.view, &self.lowercase_query)
+        self.projection.matches(task)
     }
 
     pub(crate) fn tasks(&self) -> &TaskList {
@@ -575,7 +573,7 @@ impl App {
             Action::CancelEdit => {
                 if let Some(session) = self.search_session.take() {
                     self.query = session.query;
-                    self.lowercase_query = self.query.to_lowercase();
+                    self.projection.lowercase_query = self.query.to_lowercase();
                     self.selected = session.selected;
                     self.reconcile_selection();
                 }
@@ -589,7 +587,7 @@ impl App {
                     && self.query != editor.buffer
                 {
                     self.query.clone_from(&editor.buffer);
-                    self.lowercase_query = self.query.to_lowercase();
+                    self.projection.lowercase_query = self.query.to_lowercase();
                     self.reconcile_selection();
                 }
                 Ok(transition)
@@ -615,9 +613,9 @@ impl App {
     }
 
     fn cycle_view(&mut self, direction: MoveDirection) -> Transition {
-        self.view = match direction {
-            MoveDirection::Down => self.view.next(),
-            MoveDirection::Up => self.view.previous(),
+        self.projection.view = match direction {
+            MoveDirection::Down => self.projection.view.next(),
+            MoveDirection::Up => self.projection.view.previous(),
         };
         self.reconcile_selection();
         Transition::Transient
@@ -628,7 +626,7 @@ impl App {
             return Transition::Unchanged;
         }
         self.query.clear();
-        self.lowercase_query.clear();
+        self.projection.lowercase_query.clear();
         self.reconcile_selection();
         Transition::Transient
     }
@@ -655,13 +653,7 @@ impl App {
     }
 
     fn adjacent_visible(&self, selected: TaskId, direction: MoveDirection) -> Option<TaskId> {
-        projection::adjacent(
-            &self.tasks,
-            selected,
-            direction,
-            self.view,
-            &self.lowercase_query,
-        )
+        self.projection.adjacent(&self.tasks, selected, direction)
     }
 
     fn clear_message(&mut self) -> bool {
@@ -708,10 +700,7 @@ impl App {
             id,
             direction,
             neighbor,
-            projection: Projection {
-                view: self.view,
-                lowercase_query: self.lowercase_query.clone(),
-            },
+            projection: self.projection.clone(),
         }))
     }
 

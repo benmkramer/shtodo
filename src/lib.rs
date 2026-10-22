@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod input;
 mod json;
+mod metadata;
 mod mutation;
 mod projection;
 mod session;
@@ -60,8 +61,8 @@ fn execute(command: cli::Command, format: cli::OutputFormat) -> Result<()> {
         cli::Command::Add(choice, argument, print_id) => {
             add_task(choice, argument, print_id, format)?;
         }
-        cli::Command::List(choice) => {
-            list_tasks(choice, format)?;
+        cli::Command::List(choice, filter) => {
+            list_tasks(choice, filter, format)?;
         }
         cli::Command::Delete(choice, id) => {
             delete_task(choice, id, format)?;
@@ -149,15 +150,47 @@ fn task_text_from_argument(value: OsString) -> Result<String> {
     })
 }
 
-fn list_tasks(choice: cli::ScopeChoice, format: cli::OutputFormat) -> Result<()> {
+fn list_tasks(
+    choice: cli::ScopeChoice,
+    list: cli::ListFilter,
+    format: cli::OutputFormat,
+) -> Result<()> {
+    let projection = projection::Projection {
+        view: list.view,
+        lowercase_query: list
+            .search
+            .as_deref()
+            .map(str::to_lowercase)
+            .unwrap_or_default(),
+        filter: list.filter,
+    };
     let home = storage::home_from_environment()?;
     let scope = storage::scope_from_environment(choice)?;
     let tasks = storage::load_read_only(&home, &scope)?;
+    let unfiltered = projection.is_unfiltered();
+    let rows = tasks
+        .visible_tasks()
+        .filter(|task| unfiltered || projection.matches(task));
+    match list.order {
+        projection::TaskOrder::Manual => write_list_rows(tasks.scope(), rows, format),
+        projection::TaskOrder::Priority => {
+            let mut sorted: Vec<&task::Task> = rows.collect();
+            projection::sort_by_priority(&mut sorted);
+            write_list_rows(tasks.scope(), sorted.into_iter(), format)
+        }
+    }
+}
+
+fn write_list_rows<'a>(
+    scope: &'a task::ListScope,
+    rows: impl Iterator<Item = &'a task::Task>,
+    format: cli::OutputFormat,
+) -> Result<()> {
     if format == cli::OutputFormat::Json {
-        return json::write_list(&tasks);
+        return json::write_list(scope, rows);
     }
     let mut stdout = std::io::stdout().lock();
-    for task in tasks.visible_tasks() {
+    for task in rows {
         let state = if task.completed() { "done" } else { "open" };
         writeln!(stdout, "{}  {}  {}", task.id().get(), state, task.text())?;
     }

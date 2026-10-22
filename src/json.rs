@@ -5,7 +5,7 @@ use std::io::Write;
 use color_eyre::eyre::{Report, Result};
 use serde::Serialize;
 
-use crate::{cli, mutation::Outcome, storage::TransactionError, task};
+use crate::{cli, metadata, mutation::Outcome, storage::TransactionError, task};
 
 const SCHEMA_VERSION: u64 = 1;
 
@@ -31,6 +31,9 @@ struct Task<'a> {
     text: &'a str,
     state: &'static str,
     deleted: bool,
+    /// A one-character string such as `"A"`, or `null`.
+    priority: Option<char>,
+    tags: Vec<&'a str>,
 }
 
 impl<'a> From<&'a task::Task> for Task<'a> {
@@ -40,6 +43,8 @@ impl<'a> From<&'a task::Task> for Task<'a> {
             text: task.text(),
             state: if task.completed() { "done" } else { "open" },
             deleted: task.is_deleted(),
+            priority: metadata::priority(task.text()).map(metadata::Priority::letter),
+            tags: metadata::distinct_tags(task.text()),
         }
     }
 }
@@ -61,14 +66,17 @@ struct MutationReply<'a> {
     changed: bool,
 }
 
-pub(crate) fn write_list(list: &task::TaskList) -> Result<()> {
+pub(crate) fn write_list<'a>(
+    scope: &'a task::ListScope,
+    tasks: impl Iterator<Item = &'a task::Task>,
+) -> Result<()> {
     write_json(
         std::io::stdout().lock(),
         &ListReply {
             schema_version: SCHEMA_VERSION,
             command: "list",
-            scope: list.scope().into(),
-            tasks: list.visible_tasks().map(Task::from).collect(),
+            scope: scope.into(),
+            tasks: tasks.map(Task::from).collect(),
         },
     )
 }
@@ -179,5 +187,28 @@ mod tests {
         );
         assert!(reply.get("task").is_none());
         assert_eq!(store.load().unwrap().visible_tasks().count(), 1);
+    }
+
+    #[test]
+    fn task_objects_should_carry_derived_priority_letters_and_distinct_tags() {
+        let mut list = task::TaskList::new(task::ListScope::Global);
+        let tagged = list
+            .add("(A) Fix the bug +shtodo @laptop +shtodo.")
+            .unwrap();
+        let plain = list.add("(a) plain (B) text").unwrap();
+        list.delete(plain).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(Task::from(list.task(tagged).unwrap())).unwrap(),
+            serde_json::json!({
+                "id": 1, "text": "(A) Fix the bug +shtodo @laptop +shtodo.", "state": "open",
+                "deleted": false, "priority": "A", "tags": ["+shtodo", "@laptop"]
+            })
+        );
+        let deleted = serde_json::to_string(&Task::from(list.task(plain).unwrap())).unwrap();
+        assert!(
+            deleted.ends_with(r#""deleted":true,"priority":null,"tags":[]}"#),
+            "{deleted}"
+        );
     }
 }

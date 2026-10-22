@@ -14,11 +14,15 @@ Today it offers a keyboard TUI for a checklist, global and per-directory lists,
 manual ordering, configurable keys, browsable trash, and transient TUI
 text search with All/Open/Done tabs. Its shell task commands now include add,
 list, delete, done, reopen, edit, and restore, with optional `add --print-id`
-output for scripts. Shell listing remains unfiltered. The current measurements
+output for scripts. Shell listing has state, tag, priority, and text filters
+and an optional priority sort; their cost is in the
+[tags and priority shell comparison](./benchmarks/2026-10-21-tags-and-priority-cli-comparison.md).
+The current measurements
 use a local beta.3 release build with the unreleased concurrency implementation.
 The fuller lifecycle commands and TUI behavior are measured in a separate
 [paired beta.3 comparison](./benchmarks/concurrent-usage-comparison.md).
-It has no priorities, tags, scheduling, recurrence,
+Priorities and tags are only todo.txt tokens in the task text. It has no
+scheduling, recurrence,
 sync, supported import/export, or structured JSON output. See the
 [current scope](./usage.md#version-one-limits) and
 [feature comparison](#feature-comparison).
@@ -122,6 +126,21 @@ differs as described below.
 
 Artifacts: [large-list medians and p95s](./benchmarks/2026-10-05-repaired-expanded-10000.md)
 and [raw samples and metadata](./benchmarks/2026-10-05-repaired-expanded-10000.json).
+
+## Tags and priority shell listing: October 21, 2026
+
+The [paired shell comparison](./benchmarks/2026-10-21-tags-and-priority-cli-comparison.md)
+measures the derived priority and tags change against `1f2421c`. At 10,000
+records, plain-fixture `list` medians are 11.55 to 11.43 ms (-1.0%) and
+`list --json` medians are 5.65 to 6.15 ms (+8.7%). Both are within the plan's
+gates on the plain and mixed fixtures. On a fixture where half the tasks carry
+tokens, `list --json` is 6.10 to 7.03 ms (+15.2%, +0.93 ms). That is over the
+10% relative bound and inside the 1.5 ms absolute bound. The cost is output
+size: every task object now carries the always-present `priority` and `tags`
+fields. The owner's decision on accepting it is recorded as question 12 in the
+[plan's decisions table](./plans/2026-10-21-tags-and-priority.md#decisions-before-stage-0-exits).
+Text listing does no token work. Filtered and sorted cases are recorded for
+information.
 
 ## Concurrency change: October 5, 2026
 
@@ -423,8 +442,8 @@ and the fuller shell lifecycle have their own
 | --- | --- | --- | --- |
 | Interaction | Built-in keyboard TUI and small CLI | Rich CLI | Bash CLI |
 | Shell task lifecycle | Add, list, done, reopen, edit, delete, restore | Add, list, modify, done, delete | Add, list, replace, do, delete |
-| Organization | Global and exact-directory lists; TUI text search and All/Open/Done tabs | Projects, tags, contexts, filters | Text files, `+projects`, `@contexts`, text filtering |
-| Priority and scheduling | Neither | Priority, due dates, recurrence | Letter priorities; dates/text conventions, no core recurrence scheduler |
+| Organization | Global and exact-directory lists; TUI text search and All/Open/Done tabs; todo.txt `+project`/`@context` tags with shell `list` filters | Projects, tags, contexts, filters | Text files, `+projects`, `@contexts`, text filtering |
+| Priority and scheduling | todo.txt letter priorities with `list --sort priority`; no scheduling | Priority, due dates, recurrence | Letter priorities; dates/text conventions, no core recurrence scheduler |
 | Data and integration | Local versioned JSON; no supported import/export | TaskChampion storage; JSON import/export and hooks | Human-editable text; add-ons |
 | Sync | None | Configured TaskChampion sync | External file tooling; no core sync engine |
 | Delete recovery | Retained tombstones; shell restore by ID or latest/selective restoration in TUI | Deleted status and undo | No equivalent core undo command |

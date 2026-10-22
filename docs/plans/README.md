@@ -11,6 +11,7 @@ specified verification gates, and update its status only after completion.
 | [001](./001-agent-shell-interface.md) | Add an agent-friendly list and soft-delete shell interface | P1 | M | none | DONE |
 | [004](./004-browsable-trash.md) | Add browsable TUI trash and selective restoration | P1 | M | 001 | DONE |
 | [Concurrent usage](./concurrent-usage.md) | Short storage transactions and safe TUI refresh | P1 | L | Plan 001; see integration order | DONE |
+| [Tags and priority](./2026-10-21-tags-and-priority.md) | Derived todo.txt priority and tags with TUI and shell list filtering | P1 | L | Concurrent usage; JSON output | IN PROGRESS |
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED with a short reason, or REJECTED
 with a short rationale.
@@ -53,9 +54,11 @@ with a short rationale.
 
 - JSON output is deferred because the agent-facing contract needs real usage
   before shtodo commits to a structured schema.
-- Shell list filters and search are deferred because agents can filter the
-  explicit `open` and `done` rows themselves. Transient TUI search and status
-  views are implemented separately and leave that shell contract unchanged.
+- Shell list filters and search were deferred because agents could filter the
+  explicit `open` and `done` rows themselves. The
+  [tags and priority plan](./2026-10-21-tags-and-priority.md) supersedes that
+  deferral at the owner's request: `list` now has `--open`/`--done`, `--tag`,
+  `--priority`, `--search`, and `--sort priority`, honored by `--json`.
 - Bulk deletion is deferred to keep retries and partial-failure behavior
   unambiguous.
 - Permanent deletion is rejected for this slice because existing recoverable
