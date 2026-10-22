@@ -359,6 +359,71 @@ mod tests {
     }
 
     #[test]
+    fn a_due_filtered_reorder_should_follow_the_day_its_projection_was_resolved_for() {
+        let mut filter = crate::metadata::TaskFilter::default();
+        filter.add(crate::metadata::parse_filter_token("due:today").unwrap());
+        let day = |day| crate::metadata::Date::new(2026, 10, day).unwrap();
+        filter.due.resolve(|| day(21));
+        let yesterday = Projection {
+            filter,
+            ..Projection::default()
+        };
+        let mut today = yesterday.clone();
+        today.filter.due.resolve(|| day(22));
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first due:2026-10-21").unwrap();
+        let second = list.add("second due:2026-10-22").unwrap();
+        let third = list.add("third due:2026-10-21").unwrap();
+        let fourth = list.add("fourth due:2026-10-22").unwrap();
+        assert_eq!(
+            yesterday.adjacent(&list, first, MoveDirection::Down),
+            Some(third)
+        );
+        assert_eq!(
+            today.adjacent(&list, second, MoveDirection::Down),
+            Some(fourth)
+        );
+
+        // A pair seen on the old day, sent with the new day's projection, is refused.
+        let before = list.clone();
+        let stale = Mutation::MoveAdjacent {
+            id: first,
+            direction: MoveDirection::Down,
+            neighbor: Some(third),
+            projection: today.clone(),
+        };
+        assert!(matches!(
+            stale.apply(&mut list),
+            Outcome::Conflict {
+                kind: ConflictKind::OrderChanged,
+                ..
+            }
+        ));
+        assert_eq!(list, before);
+
+        // Each day's own pair is consistent under the lock, whatever the clock says now.
+        for (id, neighbor, projection) in [(first, third, yesterday), (second, fourth, today)] {
+            let mut moved = before.clone();
+            let request = Mutation::MoveAdjacent {
+                id,
+                direction: MoveDirection::Down,
+                neighbor: Some(neighbor),
+                projection,
+            };
+            assert!(request.apply(&mut moved).changed());
+            assert_eq!(
+                moved.task(id).map(Task::text),
+                before.task(id).map(Task::text)
+            );
+            let order = moved.tasks().iter().map(Task::id).collect::<Vec<_>>();
+            assert!(
+                order.iter().position(|task| *task == neighbor)
+                    < order.iter().position(|task| *task == id)
+            );
+        }
+    }
+
+    #[test]
     fn selective_restore_should_reject_a_new_deletion_sequence_but_allow_already_live() {
         let mut list = TaskList::new(ListScope::Global);
         let id = list.add("task").unwrap();

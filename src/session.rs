@@ -321,14 +321,25 @@ mod tests {
         let after = store.counts();
         assert_eq!(after.1, before.1, "unchanged bytes and date parse nothing");
 
-        // In PR 1 nothing shown depends on the date: a new day is stored without a redraw.
+        // Row styling depends on the date: a new day redraws once, then idles again.
         let tomorrow = test_today().succ().unwrap();
         date.set(tomorrow);
         let at = now + Duration::from_secs(4);
-        assert!(!session.tick_using(&store, at, || at, today));
+        assert!(
+            session.tick_using(&store, at, || at, today),
+            "a new day redraws"
+        );
         assert_eq!(session.app.today(), tomorrow);
         assert_eq!(reads.get(), 4);
-        assert_eq!(store.counts().1, before.1);
+        for step in 5..=7 {
+            let at = now + Duration::from_secs(step);
+            assert!(
+                !session.tick_using(&store, at, || at, today),
+                "the same new day does not redraw again"
+            );
+        }
+        assert_eq!(reads.get(), 7);
+        assert_eq!(store.counts().1, before.1, "a new day parses no bytes");
     }
 
     #[test]
@@ -408,6 +419,51 @@ mod tests {
         assert_eq!(after.0 - before.0, 5);
         assert_eq!(after.1, before.1);
         assert_eq!(displayed(&session), [3, 1, 2]);
+    }
+
+    #[test]
+    fn refresh_should_rebuild_due_order_and_a_new_day_should_only_restyle() {
+        let (_home, store, mut session, now) = fixture();
+        session.action(&store, Action::ToggleSort).unwrap();
+        session.action(&store, Action::ToggleSort).unwrap();
+        assert_eq!(session.app.order(), crate::projection::TaskOrder::Due);
+        write(&store, Mutation::Add("late due:2026-10-01".into()));
+        write(&store, Mutation::Add("(A) soon due:2026-10-22".into()));
+        assert!(session.refresh_using(&store, || now));
+        assert_eq!(displayed(&session), [3, 4, 1, 2]);
+        assert_eq!(session.app.selected(), Some(id(1)));
+
+        let rebuilds = session.app.order_rebuilds();
+        let before = store.counts();
+        let tomorrow = test_today().succ().unwrap();
+        let at = now + Duration::from_secs(1);
+        assert!(session.tick_using(&store, at, || at, || tomorrow));
+        assert_eq!(session.app.today(), tomorrow);
+        for step in 2..=4 {
+            let at = now + Duration::from_secs(step);
+            assert!(!session.tick_using(&store, at, || at, || tomorrow));
+        }
+        assert_eq!(store.counts().1, before.1, "unchanged bytes parse nothing");
+        assert_eq!(
+            session.app.order_rebuilds(),
+            rebuilds,
+            "the day does not rebuild"
+        );
+        assert_eq!(displayed(&session), [3, 4, 1, 2]);
+        assert_eq!(session.app.selected(), Some(id(1)));
+
+        write(
+            &store,
+            Mutation::EditText {
+                id: id(3),
+                text: "late due:2026-12-01".into(),
+                original: None,
+            },
+        );
+        let at = now + Duration::from_secs(5);
+        assert!(session.tick_using(&store, at, || at, || tomorrow));
+        assert_eq!(session.app.order_rebuilds(), rebuilds + 1);
+        assert_eq!(displayed(&session), [4, 3, 1, 2]);
     }
 
     #[test]
@@ -1297,10 +1353,7 @@ mod tests {
 #[cfg(test)]
 mod measurements {
     use super::*;
-    use crate::{
-        app::test_today,
-        task::{ListScope, TaskList},
-    };
+    use crate::task::{ListScope, TaskList};
 
     struct Group {
         _home: tempfile::TempDir,
@@ -1341,6 +1394,100 @@ mod measurements {
     }
 
     #[test]
+    #[ignore = "frame timing after simulated day changes; invoke explicitly in release mode"]
+    fn day_change_frame_measurements() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        use crate::{action::Action, input::Keymap, metadata::Date, ui};
+
+        // The benchmark's dated fixture: every other task has a priority, two tags, and a date
+        // from 30 days before to 30 days after the displayed date; every third task is done.
+        let today = Date::new(2026, 10, 21).unwrap();
+        let shift = |mut date: Date, days: i32| {
+            for _ in 0..days.unsigned_abs() {
+                date = if days < 0 { date.pred() } else { date.succ() }.unwrap();
+            }
+            date
+        };
+        let mut list = TaskList::new(ListScope::Global);
+        for index in 1..=10_000_i32 {
+            let mut text = format!("Benchmark task {index:08}");
+            if index % 2 == 0 {
+                let priority = ['A', 'B', 'C', 'D'][(index / 2 % 4) as usize];
+                let due = shift(today, index / 2 % 61 - 30);
+                text = format!(
+                    "({priority}) {text} +proj{} @ctx{} due:{due}",
+                    index % 5,
+                    index % 3
+                );
+            }
+            let id = list.add(&text).unwrap();
+            if index % 3 == 0 {
+                list.set_completed(id, true).unwrap();
+            }
+        }
+        let keymap = Keymap::defaults();
+        let mut results = Vec::new();
+        for (label, keys) in [
+            ("manual", ""),
+            ("due_order", "ss"),
+            ("due_today_filter", "fdue:today\n"),
+        ] {
+            let mut app = App::with_today(list.clone(), today);
+            for key in keys.chars() {
+                let action = match key {
+                    's' if app.mode() == crate::app::Mode::Normal => Action::ToggleSort,
+                    'f' if app.mode() == crate::app::Mode::Normal => Action::EditFilter,
+                    '\n' => Action::CommitEdit,
+                    character => Action::InsertChar(character),
+                };
+                app.apply(action).unwrap();
+            }
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            terminal
+                .draw(|frame| ui::render(frame, &app, &keymap))
+                .unwrap();
+            let mut samples = Vec::new();
+            for sample in 0..105 {
+                let day = if sample % 2 == 0 {
+                    today.succ().unwrap()
+                } else {
+                    today
+                };
+                let start = Instant::now();
+                assert!(app.set_today(day), "every sample is a new day");
+                terminal
+                    .draw(|frame| ui::render(frame, &app, &keymap))
+                    .unwrap();
+                if sample >= 5 {
+                    samples.push(start.elapsed().as_nanos() as f64 / 1_000_000.0);
+                }
+            }
+            samples.sort_by(f64::total_cmp);
+            let percentile = |p: usize| samples[((samples.len() - 1) * p) / 100];
+            println!(
+                "{label}: median {:.3} ms, p95 {:.3} ms",
+                percentile(50),
+                percentile(95)
+            );
+            results.push(serde_json::json!({
+                "case": label, "records": 10_000, "samples": samples.len(),
+                "median_ms": percentile(50), "p95_ms": percentile(95), "max_ms": percentile(100),
+                "samples_ms": samples,
+            }));
+        }
+        let result = serde_json::json!({
+            "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
+            "method": "Release test executable. Each sample calls App::set_today with a new date (alternating two days) and draws one 100x24 frame to ratatui's TestBackend, as the session's single redraw after a day change does. Five warmups, 100 samples per case. Excludes the PTY and terminal output.",
+            "results": results,
+        });
+        let output = std::env::var_os("SHTODO_DAY_CHANGE_REPORT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("target/day-change-frame.json"));
+        std::fs::write(output, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+    }
+
+    #[test]
     #[ignore = "three 60-second refresh samples; invoke explicitly in release mode"]
     fn idle_refresh_measurements() {
         let mut groups = Vec::new();
@@ -1360,10 +1507,12 @@ mod measurements {
                 store.save(&list).unwrap();
                 let sessions = (0..clients)
                     .map(|_| {
+                        // `tick` reads the real date, so the sessions start on it: a fixed
+                        // test date would look like a new day and request one redraw.
                         Session::new(
                             store.read_snapshot(ScopePresence::RequireExisting).unwrap(),
                             Instant::now(),
-                            test_today(),
+                            clock::today(),
                         )
                     })
                     .collect();

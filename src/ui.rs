@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{cmp::Ordering, path::Path};
 
 use ratatui::{
     Frame,
@@ -11,7 +11,7 @@ use ratatui::{
 use crate::{
     app::{App, EditKind, Mode, Notice, TaskView},
     input::{BindingId, Keymap, ResolvedBinding},
-    metadata,
+    metadata::{self, Date},
     projection::TaskOrder,
     task::{ListScope, Task},
 };
@@ -21,6 +21,9 @@ const MIN_HEIGHT: u16 = 8;
 const ROW_PREFIX_WIDTH: u16 = 4;
 const PROJECT_COLOR: Color = Color::Cyan;
 const CONTEXT_COLOR: Color = Color::Magenta;
+const DUE_STYLE: Style = Style::new().fg(Color::Blue);
+const OVERDUE_COLOR: Color = Color::Red;
+const DUE_TODAY_COLOR: Color = Color::Yellow;
 
 fn editor_window(buffer: &str, cursor: usize, width: u16) -> (&str, u16) {
     let mut cursor = cursor.min(buffer.len());
@@ -258,8 +261,7 @@ fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .filter(|_| matches!(app.mode(), Mode::Search | Mode::Filter))
     else {
         let filter = Some(app.filter_text()).filter(|text| !text.is_empty());
-        let sorted = app.order() == TaskOrder::Priority;
-        let status = status_line(matches, app.query(), filter, sorted, area.width);
+        let status = status_line(matches, app.query(), filter, app.order(), area.width);
         frame.render_widget(Paragraph::new(status), area);
         return;
     };
@@ -290,9 +292,15 @@ fn status_line(
     matches: usize,
     query: &str,
     filter: Option<&str>,
-    sorted: bool,
+    order: TaskOrder,
     width: u16,
 ) -> String {
+    let sort = match order {
+        TaskOrder::Manual => "",
+        TaskOrder::Priority => " · by priority",
+        TaskOrder::Due => " · by due",
+    };
+    let sorted = !sort.is_empty();
     const FILTER: &str = " · f:";
     let width = usize::from(width);
     let mut line = format!(" · {matches} matches");
@@ -300,7 +308,6 @@ fn status_line(
         line.push_str(" · /");
         line.push_str(query);
     }
-    let sort = if sorted { " · by priority" } else { "" };
     let used = text_width(&line);
     let Some(filter) = filter else {
         if used + text_width(sort) <= width {
@@ -419,7 +426,7 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         .take(rows)
         .map(|task| match editor_view {
             Some((EditKind::Edit(id), visible, _)) if task.id() == id => editor_item(visible),
-            _ => task_item(task),
+            _ => task_item(task, app.today()),
         })
         .collect::<Vec<_>>();
     if detached && let Some((_, visible, _)) = editor_view {
@@ -464,7 +471,9 @@ fn render_trash_content(frame: &mut Frame<'_>, area: Rect, app: &App, keymap: &K
         .map(|task| {
             let state = if task.completed() { "done" } else { "open" };
             let mut spans = vec![Span::raw(format!("{}  {state}  ", task.id().get()))];
-            spans.extend(text_spans(task.text(), Style::default()));
+            // Tombstones are not actionable, so their dates are never overdue or due today.
+            let due = metadata::due_token(task.text()).map(|(token, _)| (token, DUE_STYLE));
+            spans.extend(text_spans(task.text(), Style::default(), due));
             ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
@@ -516,8 +525,8 @@ fn notice_text(notice: &Notice, keymap: &Keymap, width: usize) -> String {
     match notice {
         Notice::ManualOrderRequired => {
             match binding_label(keymap, Mode::Normal, BindingId::ToggleSort) {
-                Some(key) => format!("Reorder uses manual order; press {key} to switch"),
-                None => "Reorder uses manual order".into(),
+                Some(key) => format!("Reorder needs manual order; {key} cycles"),
+                None => "Reorder needs manual order".into(),
             }
         }
         Notice::FinishTag(tags) => clip_entries("Finish the tag: ", tags, ", ", width),
@@ -728,22 +737,67 @@ fn scope_label(scope: &ListScope) -> String {
     }
 }
 
-fn task_item(task: &Task) -> ListItem<'static> {
-    let marker = if task.completed() { "✓ " } else { "○ " };
-    let text_style = if task.completed() {
+fn task_item(task: &Task, today: Date) -> ListItem<'static> {
+    let completed = task.completed();
+    let marker = if completed { "✓ " } else { "○ " };
+    let text_style = if completed {
         Style::default().add_modifier(Modifier::DIM | Modifier::CROSSED_OUT)
     } else {
         Style::default()
     };
+    let due = metadata::due_token(task.text());
+    // A done task is never overdue or due today, so its token is blue and its marker plain.
+    let urgent = due
+        .filter(|_| !completed)
+        .and_then(|(_, date)| urgent_style(date, today));
+    let marker_style = urgent.unwrap_or_default();
+    let due_style = text_style.patch(urgent.unwrap_or(DUE_STYLE));
 
-    let mut spans = vec![Span::raw(marker)];
-    spans.extend(text_spans(task.text(), text_style));
+    let mut spans = vec![Span::styled(marker, marker_style)];
+    spans.extend(text_spans(
+        task.text(),
+        text_style,
+        due.map(|(token, _)| (token, due_style)),
+    ));
     ListItem::new(Line::from(spans))
 }
 
-/// Styles the priority marker and tag slices in place; the rest, including punctuation
-/// stripped from a tag, keeps `base`, so the row text and its width are unchanged.
-fn text_spans(text: &str, base: Style) -> Vec<Span<'static>> {
+/// Overdue is red and due today yellow, both bold; any other date has no urgent style.
+fn urgent_style(due: Date, today: Date) -> Option<Style> {
+    let color = match due.cmp(&today) {
+        Ordering::Less => OVERDUE_COLOR,
+        Ordering::Equal => DUE_TODAY_COLOR,
+        Ordering::Greater => return None,
+    };
+    Some(Style::default().fg(color).add_modifier(Modifier::BOLD))
+}
+
+/// Styles the priority marker, tag slices, and the `due` slice in place; the rest, including
+/// punctuation stripped from a tag or due token, keeps `base`, so the row text and its width are
+/// unchanged. The three kinds never overlap.
+fn text_spans(text: &str, base: Style, due: Option<(&str, Style)>) -> Vec<Span<'static>> {
+    // Every slice borrows `text`, so its offset comes from the slice address.
+    let offset = |slice: &str| {
+        let start = slice.as_ptr().addr() - text.as_ptr().addr();
+        debug_assert!(start + slice.len() <= text.len() && text.is_char_boundary(start));
+        start
+    };
+    let mut styled = metadata::tags(text)
+        .map(|tag| {
+            let color = if tag.starts_with('+') {
+                PROJECT_COLOR
+            } else {
+                CONTEXT_COLOR
+            };
+            (offset(tag), tag, base.fg(color))
+        })
+        .collect::<Vec<_>>();
+    if let Some((token, style)) = due {
+        let start = offset(token);
+        let index = styled.partition_point(|(tag, _, _)| *tag < start);
+        styled.insert(index, (start, token, style));
+    }
+
     let mut spans = Vec::new();
     let mut end = 0;
     if metadata::priority(text).is_some() {
@@ -753,20 +807,12 @@ fn text_spans(text: &str, base: Style) -> Vec<Span<'static>> {
             base.add_modifier(Modifier::BOLD),
         ));
     }
-    for tag in metadata::tags(text) {
-        // Tags borrow `text`, so their offsets come from the slice addresses.
-        let start = tag.as_ptr().addr() - text.as_ptr().addr();
-        debug_assert!(start + tag.len() <= text.len() && text.is_char_boundary(start));
+    for (start, slice, style) in styled {
         if start > end {
             spans.push(Span::styled(text[end..start].to_owned(), base));
         }
-        let color = if tag.starts_with('+') {
-            PROJECT_COLOR
-        } else {
-            CONTEXT_COLOR
-        };
-        spans.push(Span::styled(tag.to_owned(), base.fg(color)));
-        end = start + tag.len();
+        spans.push(Span::styled(slice.to_owned(), style));
+        end = start + slice.len();
     }
     if end < text.len() || spans.is_empty() {
         spans.push(Span::styled(text[end..].to_owned(), base));
@@ -1712,51 +1758,262 @@ mod tests {
         assert_eq!(cells[13].fg, Color::Reset);
     }
 
+    /// The `○ `/`✓ ` marker cells of a list row, after the two-column highlight symbol.
+    fn marker_cells(buffer: &Buffer, row: u16) -> [Cell; 2] {
+        [buffer[(2, row)].clone(), buffer[(3, row)].clone()]
+    }
+
+    fn due_rows() -> App {
+        // `App::new` displays 2026-10-21.
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("(A) late due:2026-10-20. +home").unwrap();
+        list.add("now due:2026-10-21").unwrap();
+        list.add("later due:2026-10-22 @desk").unwrap();
+        let done = list.add("old due:2026-10-01").unwrap();
+        list.toggle_complete(done).unwrap();
+        list.add("odd due:2026-02-30").unwrap();
+        App::new(list)
+    }
+
+    #[test]
+    fn due_tokens_should_color_rows_and_markers_by_the_displayed_date_at_minimum_size() {
+        let app = due_rows();
+        let buffer = render_app(&app, 40, 8);
+        let bold = |cell: &Cell| cell.modifier.contains(Modifier::BOLD);
+
+        assert!(buffer_row(&buffer, 40, 2).starts_with("› ○ (A) late due:2026-10-20. +home"));
+        let marker = marker_cells(&buffer, 2);
+        assert_eq!(marker[0].symbol(), "○");
+        assert!(
+            marker
+                .iter()
+                .all(|cell| cell.fg == Color::Red && bold(cell))
+        );
+        let cells = row_cells(&buffer, 2, "(A) late due:2026-10-20. +home");
+        assert!(
+            cells[..3]
+                .iter()
+                .all(|cell| bold(cell) && cell.fg == Color::Reset)
+        );
+        assert!(
+            cells[4..8]
+                .iter()
+                .all(|cell| !bold(cell) && cell.fg == Color::Reset)
+        );
+        assert!(
+            cells[9..23]
+                .iter()
+                .all(|cell| cell.fg == Color::Red && bold(cell))
+        );
+        assert_eq!(cells[23].symbol(), ".");
+        assert!(cells[23].fg == Color::Reset && !bold(&cells[23]));
+        assert!(cells[25..].iter().all(|cell| cell.fg == Color::Cyan));
+        assert!(
+            buffer[(0, 2)].bg == Color::DarkGray
+                && cells.iter().all(|cell| cell.bg == Color::DarkGray),
+            "the selection highlight is unchanged"
+        );
+
+        let marker = marker_cells(&buffer, 3);
+        assert!(
+            marker
+                .iter()
+                .all(|cell| cell.fg == Color::Yellow && bold(cell))
+        );
+        let cells = row_cells(&buffer, 3, "now due:2026-10-21");
+        assert!(cells[..4].iter().all(|cell| cell.fg == Color::Reset));
+        assert!(
+            cells[4..]
+                .iter()
+                .all(|cell| cell.fg == Color::Yellow && bold(cell))
+        );
+        assert_eq!(cells[0].bg, Color::Reset);
+
+        let marker = marker_cells(&buffer, 4);
+        assert!(
+            marker
+                .iter()
+                .all(|cell| cell.fg == Color::Reset && !bold(cell))
+        );
+        let cells = row_cells(&buffer, 4, "later due:2026-10-22 @desk");
+        assert!(
+            cells[6..20]
+                .iter()
+                .all(|cell| cell.fg == Color::Blue && !bold(cell))
+        );
+        assert!(cells[21..].iter().all(|cell| cell.fg == Color::Magenta));
+
+        let marker = marker_cells(&buffer, 5);
+        assert_eq!(marker[0].symbol(), "✓");
+        assert!(
+            marker
+                .iter()
+                .all(|cell| cell.fg == Color::Reset && !bold(cell))
+        );
+        let cells = row_cells(&buffer, 5, "old due:2026-10-01");
+        assert!(cells.iter().all(|cell| {
+            cell.modifier
+                .contains(Modifier::DIM | Modifier::CROSSED_OUT)
+        }));
+        assert!(
+            cells[4..]
+                .iter()
+                .all(|cell| cell.fg == Color::Blue && !bold(cell))
+        );
+        assert!(
+            cells
+                .iter()
+                .all(|cell| !matches!(cell.fg, Color::Red | Color::Yellow))
+        );
+
+        let cells = row_cells(&buffer, 6, "odd due:2026-02-30");
+        assert!(
+            cells
+                .iter()
+                .all(|cell| cell.fg == Color::Reset && !bold(cell))
+        );
+        assert!(
+            marker_cells(&buffer, 6)
+                .iter()
+                .all(|cell| cell.fg == Color::Reset)
+        );
+    }
+
+    #[test]
+    fn a_clipped_due_token_should_leave_the_marker_carrying_the_overdue_state() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add(&format!("{} due:2026-10-01", "long ".repeat(10)))
+            .unwrap();
+        list.add(&format!("{} due:2026-10-21", "wide ".repeat(10)))
+            .unwrap();
+        let app = App::new(list);
+        let buffer = render_app(&app, 40, 8);
+
+        for row in [2, 3] {
+            assert!(
+                !buffer_row(&buffer, 40, row).contains("due:"),
+                "row {row} is clipped"
+            );
+        }
+        let bold = |cell: &Cell| cell.modifier.contains(Modifier::BOLD);
+        assert!(
+            marker_cells(&buffer, 2)
+                .iter()
+                .all(|cell| cell.fg == Color::Red && bold(cell))
+        );
+        assert!(
+            marker_cells(&buffer, 3)
+                .iter()
+                .all(|cell| cell.fg == Color::Yellow && bold(cell))
+        );
+        assert_eq!(buffer[(0, 2)].bg, Color::DarkGray);
+    }
+
+    #[test]
+    fn trash_rows_should_style_due_tokens_blue_without_marker_color() {
+        let mut list = TaskList::new(ListScope::Global);
+        let late = list.add("late due:2026-10-01").unwrap();
+        let now = list.add("now due:2026-10-21!").unwrap();
+        list.delete(late).unwrap();
+        list.delete(now).unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::OpenTrash).unwrap();
+        let buffer = render_app(&app, 40, 8);
+
+        assert!(buffer_row(&buffer, 40, 1).contains("2  open  now due:2026-10-21!"));
+        let cells = row_cells(&buffer, 1, "now due:2026-10-21!");
+        assert!(cells[4..18].iter().all(|cell| cell.fg == Color::Blue));
+        assert_eq!(cells[18].fg, Color::Reset);
+        let cells = row_cells(&buffer, 2, "1  open  late due:2026-10-01");
+        assert!(cells[..9].iter().all(|cell| cell.fg == Color::Reset));
+        assert!(cells[14..].iter().all(|cell| cell.fg == Color::Blue));
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| !matches!(cell.fg, Color::Red | Color::Yellow))
+        );
+    }
+
+    #[test]
+    fn a_new_displayed_date_should_restyle_rows() {
+        let mut app = due_rows();
+        assert!(!app.set_today(crate::app::test_today()), "same date");
+        assert!(app.set_today(crate::metadata::Date::new(2026, 10, 22).unwrap()));
+        let buffer = render_app(&app, 40, 8);
+        let colors = (2..=4)
+            .map(|row| marker_cells(&buffer, row)[0].fg)
+            .collect::<Vec<_>>();
+        assert_eq!(colors, [Color::Red, Color::Red, Color::Yellow]);
+        let cells = row_cells(&buffer, 4, "later due:2026-10-22 @desk");
+        assert!(cells[6..20].iter().all(|cell| cell.fg == Color::Yellow));
+    }
+
     #[test]
     fn status_line_should_drop_sort_first_then_truncate_the_filter_and_keep_the_count() {
         use super::status_line;
+        use crate::projection::TaskOrder::{Due, Manual, Priority};
 
-        assert_eq!(status_line(3, "", None, false, 40), " · 3 matches · /");
+        assert_eq!(status_line(3, "", None, Manual, 40), " · 3 matches · /");
         assert_eq!(
-            status_line(3, "café", None, false, 40),
+            status_line(3, "café", None, Manual, 40),
             " · 3 matches · /café"
         );
         assert_eq!(
-            status_line(2, "", Some("+shtodo A-B"), true, 60),
+            status_line(2, "", Some("+shtodo A-B"), Priority, 60),
             " · 2 matches · f:+shtodo A-B · by priority"
         );
         assert_eq!(
-            status_line(2, "x", Some("+shtodo"), true, 60),
+            status_line(2, "x", Some("+shtodo"), Priority, 60),
             " · 2 matches · /x · f:+shtodo · by priority"
         );
         assert_eq!(
-            status_line(2, "", None, true, 40),
+            status_line(2, "", None, Priority, 40),
             " · 2 matches · by priority"
         );
         assert_eq!(
-            status_line(2, "", Some("+shtodo A-B"), true, 30),
+            status_line(2, "", Some("+shtodo A-B"), Priority, 30),
             " · 2 matches · f:+shtodo A-B"
         );
         assert_eq!(
-            status_line(2, "", Some("+shtodo A-B"), true, 21),
+            status_line(2, "", Some("+shtodo A-B"), Priority, 21),
             " · 2 matches · f:+sh…"
         );
-        assert_eq!(status_line(2, "", None, true, 21), " · 2 matches");
+        assert_eq!(status_line(2, "", None, Priority, 21), " · 2 matches");
         assert_eq!(
-            status_line(2, "", Some("+東京 +x"), false, 21),
+            status_line(2, "", Some("+東京 +x"), Manual, 21),
             " · 2 matches · f:+東…"
         );
         assert_eq!(
-            status_line(10_000, "", Some("+x A"), false, 22),
+            status_line(10_000, "", Some("+x A"), Manual, 22),
             " · 10000 matches · f:…"
         );
         assert_eq!(
-            status_line(10_000, "", Some("+x A"), false, 21),
+            status_line(10_000, "", Some("+x A"), Manual, 21),
             " · 10000 matches"
         );
         assert_eq!(
-            status_line(10_000, "query", None, true, 10),
+            status_line(10_000, "query", None, Priority, 10),
             " · 10000 matches · /query"
+        );
+
+        assert_eq!(status_line(2, "", None, Due, 40), " · 2 matches · by due");
+        assert_eq!(
+            status_line(2, "", Some("due:today"), Due, 40),
+            " · 2 matches · f:due:today · by due"
+        );
+        assert_eq!(
+            status_line(2, "", Some("due:today"), Due, 30),
+            " · 2 matches · f:due:today"
+        );
+        assert_eq!(
+            status_line(2, "", Some("+shtodo A-B"), Due, 21),
+            " · 2 matches · f:+sh…"
+        );
+        assert_eq!(status_line(2, "", None, Due, 20), " · 2 matches");
+        assert_eq!(
+            status_line(2, "x", None, Due, 40),
+            " · 2 matches · /x · by due"
         );
     }
 
@@ -1787,6 +2044,27 @@ mod tests {
         assert!(status.contains(" · 3 matches"), "{status}");
         assert!(!status.contains("by priority"));
         assert!(!status.contains('/'));
+
+        app.apply(Action::ToggleSort).unwrap();
+        let buffer = render_app(&app, 80, 12);
+        let status = buffer_row(&buffer, 80, 1);
+        assert!(status.contains("Done  · 3 matches · by due"), "{status}");
+        assert!(!status.contains("by priority"));
+        assert!(buffer_row(&buffer, 80, 2).contains("○ (A) a open"));
+        // ` · by due` is shorter than ` · by priority` and still fits at 40 columns...
+        let status = buffer_row(&render_app(&app, 40, 8), 40, 1);
+        assert_eq!(status, "[All]│ Open │ Done  · 3 matches · by due");
+        // ...until a filter needs the room, when it is dropped before the filter is cut.
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "A-C");
+        app.apply(Action::CommitEdit).unwrap();
+        let status = buffer_row(&render_app(&app, 40, 8), 40, 1);
+        assert_eq!(status, "[All]│ Open │ Done  · 2 matches · f:A-C ");
+        assert!(
+            buffer_row(&render_app(&app, 80, 12), 80, 1).contains(" · 2 matches · f:A-C · by due")
+        );
+        app.apply(Action::ClearSearch).unwrap();
+
         app.apply(Action::ToggleSort).unwrap();
         assert!(buffer_row(&render_app(&app, 80, 12), 80, 1).contains(" · 3 matches · /"));
     }
@@ -1800,22 +2078,29 @@ mod tests {
                 "o",
             ),
         ] {
-            let mut app = prioritized();
-            app.apply(Action::ToggleSort).unwrap();
-            app.apply(Action::MoveTaskUp).unwrap();
-            let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
-            assert!(
-                footer.contains(&format!(
-                    "NORMAL  Reorder uses manual order; press {key} to switch"
-                )),
-                "{footer}"
-            );
-            app.apply(Action::OpenHelp).unwrap();
-            let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
-            assert!(
-                help.contains(&format!("{key} toggle priority sort")),
-                "{help}"
-            );
+            for presses in [1, 2] {
+                let mut app = prioritized();
+                for _ in 0..presses {
+                    app.apply(Action::ToggleSort).unwrap();
+                }
+                app.apply(Action::MoveTaskUp).unwrap();
+                let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+                assert!(
+                    footer.contains(&format!("NORMAL  Reorder needs manual order; {key} cycles")),
+                    "{footer}"
+                );
+                assert!(!footer.contains("uses manual order"), "{footer}");
+                // The notice is 36 columns; after the mode label, 40 columns keep the key.
+                let narrow = buffer_row(&render_app_with_keymap(&app, &keymap, 40, 8), 40, 7);
+                assert_eq!(
+                    narrow,
+                    format!("NORMAL  Reorder needs manual order; {key} cy")
+                );
+                app.apply(Action::OpenHelp).unwrap();
+                let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+                assert!(help.contains(&format!("{key} cycle sort order")), "{help}");
+                assert!(!help.contains("toggle priority sort"), "{help}");
+            }
         }
         let keymap =
             Keymap::with_overrides(&[override_for(BindingId::StartSearch, &["s"])]).unwrap();
@@ -1823,6 +2108,16 @@ mod tests {
         app.apply(Action::OpenHelp).unwrap();
         let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
         assert!(help.contains("Unbound: toggle_sort (config)"));
+
+        // With `toggle_sort` unbound, the notice names no key.
+        let mut app = prioritized();
+        app.apply(Action::ToggleSort).unwrap();
+        app.apply(Action::MoveTaskUp).unwrap();
+        let footer = buffer_row(&render_app_with_keymap(&app, &keymap, 100, 12), 100, 11);
+        assert!(
+            footer.starts_with("NORMAL  Reorder needs manual order · "),
+            "{footer}"
+        );
     }
 
     fn type_text(app: &mut App, text: &str) {
@@ -1943,6 +2238,34 @@ mod tests {
     }
 
     #[test]
+    fn a_due_filter_should_show_its_words_in_the_status_and_tags_only_in_the_hint() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("now due:2026-10-21 +x").unwrap();
+        list.add("soon due:2026-10-22 @y").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "due:today");
+        let buffer = render_app(&app, 40, 8);
+        // Counts follow completed tokens, as for a trailing priority token.
+        assert_eq!(display_row(&buffer, 6).trim_end(), "+x 1 · @y 1");
+        let status = buffer_row(&render_app(&app, 80, 12), 80, 1);
+        assert!(status.contains(" · 1 matches · f:due:today"), "{status}");
+        type_text(&mut app, " ");
+        let buffer = render_app(&app, 40, 8);
+        assert_eq!(display_row(&buffer, 6).trim_end(), "+x 1");
+        app.apply(Action::CommitEdit).unwrap();
+        let status = buffer_row(&render_app(&app, 80, 12), 80, 1);
+        assert!(
+            status.contains("Done  · 1 matches · f:due:today"),
+            "{status}"
+        );
+        assert!(app.set_today(crate::metadata::Date::new(2026, 10, 22).unwrap()));
+        let buffer = render_app(&app, 80, 12);
+        assert!(buffer_row(&buffer, 80, 1).contains(" · 1 matches · f:due:today"));
+        assert!(buffer_row(&buffer, 80, 2).contains("soon due:2026-10-22 @y"));
+    }
+
+    #[test]
     fn filter_footer_and_help_should_use_the_configured_filter_keys() {
         let mut app = App::new(TaskList::new(ListScope::Global));
         app.apply(Action::OpenHelp).unwrap();
@@ -1951,7 +2274,7 @@ mod tests {
         app.apply(Action::CloseHelp).unwrap();
         let normal = buffer_row(&render_app(&app, 200, 12), 200, 11);
         assert!(
-            normal.contains("s toggle priority sort · f edit filter"),
+            normal.contains("s cycle sort order · f edit filter"),
             "{normal}"
         );
 

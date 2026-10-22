@@ -862,6 +862,15 @@ mod tests {
                 vec!["--priority", "+x"],
                 r#"invalid --priority "+x"; expected"#,
             ),
+            // `due:` is a TUI filter-editor token only; the shell takes `--due today`.
+            (
+                vec!["--tag", "due:today"],
+                r#"invalid --tag "due:today"; expected +project or @context"#,
+            ),
+            (
+                vec!["--priority", "due:none"],
+                r#"invalid --priority "due:none"; expected"#,
+            ),
             (
                 vec!["--search", ""],
                 "--search requires non-empty single-line text",

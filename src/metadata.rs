@@ -386,11 +386,16 @@ pub(crate) enum FilterToken<'a> {
     /// A normalized `+project` or `@context` tag.
     Tag(&'a str),
     Priorities(PrioritySet),
+    /// A `due:<WHEN>` filter-editor token, with the same `WHEN` values as `--due`.
+    Due(DueTerm),
 }
 
 pub(crate) fn parse_filter_token(token: &str) -> Option<FilterToken<'_>> {
     if token.contains(char::is_whitespace) {
         return None;
+    }
+    if let Some(value) = token.strip_prefix(DUE_KEY) {
+        return parse_due_term(value).map(FilterToken::Due);
     }
     if let Some(tag) = normalized_tag(token) {
         return Some(FilterToken::Tag(tag));
@@ -428,6 +433,7 @@ impl TaskFilter {
                 }
             }
             FilterToken::Priorities(set) => self.priorities.0 |= set.0,
+            FilterToken::Due(term) => self.due.add(term),
         }
     }
 
@@ -556,6 +562,67 @@ mod tests {
         assert!(!set("A-C").contains(None));
         assert!(set("none").contains(None));
         assert!(!set("none").contains(priority("(A) x")));
+    }
+
+    #[test]
+    fn filter_tokens_should_parse_due_terms_with_the_lowercase_key_only() {
+        let term = |token: &str| match parse_filter_token(token) {
+            Some(FilterToken::Due(term)) => term,
+            other => panic!("{token:?} parsed as {other:?}"),
+        };
+        for value in [
+            "today",
+            "TOMORROW",
+            "overdue",
+            "none",
+            "any",
+            "2026-10-21",
+            "today..2026-11-01",
+            "..2026-10-31",
+            "today..",
+        ] {
+            assert_eq!(
+                term(&format!("due:{value}")),
+                parse_due_term(value).unwrap(),
+                "{value:?}"
+            );
+        }
+        assert_eq!(term("due:none"), DueTerm::None);
+        for token in [
+            "due:",
+            "due:tod",
+            "due:2026-1",
+            "due:today.",
+            "due:today..2",
+            "due:soon",
+            "due:week",
+            "due:..",
+            "due:tomorrow..today",
+            "due:due:today",
+            "Due:today",
+            "DUE:today",
+            "overdue:today",
+            "due",
+            "today",
+        ] {
+            assert_eq!(parse_filter_token(token), None, "{token:?}");
+        }
+        // The key must start the token; with a sigil it is a tag, as in task text.
+        assert_eq!(
+            parse_filter_token("+due:today"),
+            Some(FilterToken::Tag("+due:today"))
+        );
+
+        let mut filter = filter(&["+x", "due:today", "due:tomorrow"]);
+        filter.due.resolve(|| date("2026-10-21"));
+        assert!(filter.matches("a +x due:2026-10-21", false));
+        assert!(filter.matches("a +x due:2026-10-22", true));
+        assert!(
+            !filter.matches("a due:2026-10-21", false),
+            "AND with the tag"
+        );
+        assert!(!filter.matches("a +x due:2026-10-23", false));
+        assert!(!filter.matches("a +x", false));
     }
 
     #[test]

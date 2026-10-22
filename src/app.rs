@@ -234,7 +234,7 @@ struct TrashState {
 /// A footer notice that names a configured key, so the UI renders its text from the keymap.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Notice {
-    /// Reorder was requested while the list is sorted by priority.
+    /// Reorder was requested while the list is sorted by priority or due date.
     ManualOrderRequired,
     /// Enter on a tag prefix shared by these tags, in hint-line order.
     FinishTag(Vec<String>),
@@ -278,16 +278,26 @@ fn split_filter_buffer(buffer: &str) -> (Vec<&str>, Option<&str>) {
     (tokens, trailing)
 }
 
-fn parse_filter_tokens<'a>(tokens: &[&'a str]) -> Result<TaskFilter, &'a str> {
+/// Resolves due terms against the displayed date. An empty due filter is left as parsed, so
+/// tag- and priority-only filters keep their shape.
+fn resolve_due(filter: &mut TaskFilter, today: Date) {
+    if !filter.due.is_empty() {
+        filter.due.resolve(|| today);
+    }
+}
+
+/// Parses completed tokens, with due terms resolved against the displayed date.
+fn parse_filter_tokens<'a>(tokens: &[&'a str], today: Date) -> Result<TaskFilter, &'a str> {
     let mut filter = TaskFilter::default();
     for token in tokens {
         filter.add(metadata::parse_filter_token(token).ok_or(*token)?);
     }
+    resolve_due(&mut filter, today);
     Ok(filter)
 }
 
 fn invalid_filter(token: &str) -> String {
-    format!("Invalid filter \"{token}\"; use +project, @context, A, A-C, or none")
+    format!("Invalid filter \"{token}\"; use +project, @context, A-C, none, or due:WHEN")
 }
 
 const HIDDEN: &str = "hidden by the current view, search, or filter";
@@ -307,14 +317,18 @@ pub(crate) struct App {
     filter_text: String,
     filter_session: Option<FilterSession>,
     order: TaskOrder,
-    /// Canonical indices of live tasks in Priority order; rebuilt when tasks or order change.
+    /// Canonical indices of live tasks in Priority or Due order; rebuilt only when tasks or the
+    /// order change. Due keys are absolute dates, so a new day never rebuilds it.
     sorted: Option<Vec<usize>>,
+    /// How often `sorted` was rebuilt, so tests can prove when it is not.
+    #[cfg(test)]
+    order_rebuilds: usize,
     search_session: Option<SearchSession>,
     pending: Option<Mutation>,
     storage_error: Option<String>,
     durability_warning: Option<String>,
-    /// The local date: used now to rewrite `due:today` and `due:tomorrow` on add and edit, and
-    /// the date the TUI will display once due styling lands (PR 2 of the due dates plan).
+    /// The displayed local date: it styles due tokens, resolves relative due filter terms, and
+    /// rewrites `due:today` and `due:tomorrow` on add and edit.
     today: Date,
 }
 
@@ -352,6 +366,8 @@ impl App {
             filter_session: None,
             order: TaskOrder::Manual,
             sorted: None,
+            #[cfg(test)]
+            order_rebuilds: 0,
             search_session: None,
             pending: None,
             storage_error: None,
@@ -360,15 +376,27 @@ impl App {
         }
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "PR 2 shows the date"))]
     pub(crate) fn today(&self) -> Date {
         self.today
     }
 
-    /// Records a new local date. Nothing shown depends on it yet, so no redraw is needed.
+    /// Records a new local date and re-resolves relative due terms against it. Returns whether
+    /// anything shown changed: row styling depends on the date, so every new date redraws.
     pub(crate) fn set_today(&mut self, today: Date) -> bool {
+        if self.today == today {
+            return false;
+        }
         self.today = today;
-        false
+        // Terms keep the typed words, so a new day only re-resolves them; the Due order holds
+        // absolute dates and is not rebuilt.
+        resolve_due(&mut self.projection.filter, today);
+        if let Some(session) = &mut self.filter_session {
+            resolve_due(&mut session.preview.exact, today);
+            resolve_due(&mut session.completed, today);
+        }
+        self.refresh_tag_counts();
+        self.reconcile_selection();
+        true
     }
 
     pub(crate) fn prepare(&mut self, action: Action) -> Result<Transition, ListError> {
@@ -520,7 +548,7 @@ impl App {
         self.ordered_live_tasks().filter(|task| self.matches(task))
     }
 
-    /// Live tasks in display order: canonical, or the cached Priority order.
+    /// Live tasks in display order: canonical, or the cached Priority or Due order.
     fn ordered_live_tasks(&self) -> impl Iterator<Item = &Task> {
         let tasks = self.tasks.tasks();
         let sorted = self.sorted.as_deref();
@@ -532,8 +560,18 @@ impl App {
             .chain(canonical.into_iter().flatten())
     }
 
+    #[cfg(test)]
+    pub(crate) fn order_rebuilds(&self) -> usize {
+        self.order_rebuilds
+    }
+
     fn rebuild_order(&mut self) {
-        self.sorted = (self.order == TaskOrder::Priority).then(|| {
+        #[cfg(test)]
+        {
+            self.order_rebuilds += 1;
+        }
+        let order = self.order;
+        self.sorted = (order != TaskOrder::Manual).then(|| {
             let mut live = self
                 .tasks
                 .tasks()
@@ -541,8 +579,13 @@ impl App {
                 .enumerate()
                 .filter(|(_, task)| !task.is_deleted())
                 .collect::<Vec<_>>();
-            // Stable, like `projection::sort_by_priority`: equal keys keep canonical order.
-            live.sort_by_key(|(_, task)| projection::priority_key(task));
+            // Stable, like `projection::sort_by_priority` and `sort_by_due`: equal keys keep
+            // canonical order. A due key parses the text, so each task is parsed once.
+            if order == TaskOrder::Due {
+                live.sort_by_cached_key(|(_, task)| projection::due_key(task));
+            } else {
+                live.sort_by_key(|(_, task)| projection::priority_key(task));
+            }
             live.into_iter().map(|(index, _)| index).collect()
         });
     }
@@ -868,7 +911,7 @@ impl App {
             return;
         };
         let (tokens, trailing) = split_filter_buffer(&editor.buffer);
-        let completed = match parse_filter_tokens(&tokens) {
+        let completed = match parse_filter_tokens(&tokens, self.today) {
             Ok(filter) => filter,
             Err(token) => {
                 self.message = Some(invalid_filter(token));
@@ -877,8 +920,13 @@ impl App {
         };
         let mut exact = completed.clone();
         let mut trailing_prefix = None;
+        // A trailing token that does not parse yet (`A-`, `due:2026-1`) adds no constraint.
         match trailing.and_then(metadata::parse_filter_token) {
             Some(FilterToken::Tag(tag)) => trailing_prefix = Some(tag.to_owned()),
+            Some(token @ FilterToken::Due(_)) => {
+                exact.add(token);
+                resolve_due(&mut exact, self.today);
+            }
             Some(token) => exact.add(token),
             None => {}
         }
@@ -904,7 +952,7 @@ impl App {
             return Transition::Unchanged;
         };
         let (tokens, trailing) = split_filter_buffer(&editor.buffer);
-        let completed = match parse_filter_tokens(&tokens) {
+        let completed = match parse_filter_tokens(&tokens, self.today) {
             Ok(filter) => filter,
             Err(token) => {
                 self.message = Some(invalid_filter(token));
@@ -935,12 +983,14 @@ impl App {
                         return Transition::Transient;
                     }
                 },
-                Some(priorities) => {
-                    filter.add(priorities);
-                    words.push(token.to_owned());
+                // Priority and due tokens are exact and kept as typed, never completed.
+                Some(token @ (FilterToken::Priorities(_) | FilterToken::Due(_))) => {
+                    filter.add(token);
+                    words.push(trailing.unwrap_or_default().to_owned());
                 }
             }
         }
+        resolve_due(&mut filter, self.today);
         self.projection.filter = filter;
         self.filter_text = words.join(" ");
         self.filter_session = None;
@@ -1011,7 +1061,8 @@ impl App {
     fn toggle_sort(&mut self) -> Transition {
         self.order = match self.order {
             TaskOrder::Manual => TaskOrder::Priority,
-            TaskOrder::Priority | TaskOrder::Due => TaskOrder::Manual,
+            TaskOrder::Priority => TaskOrder::Due,
+            TaskOrder::Due => TaskOrder::Manual,
         };
         self.rebuild_order();
         self.reconcile_selection();
@@ -1104,8 +1155,8 @@ impl App {
     }
 
     fn move_task(&mut self, direction: MoveDirection) -> Result<Transition, ListError> {
-        if self.order == TaskOrder::Priority {
-            // A swap in priority order has no canonical meaning, so no mutation is submitted.
+        if self.order != TaskOrder::Manual {
+            // A swap in a sorted order has no canonical meaning, so no mutation is submitted.
             self.notice = Some(Notice::ManualOrderRequired);
             return Ok(Transition::Transient);
         }
@@ -2860,6 +2911,21 @@ mod sort_tests {
         assert_eq!(visible_ids(&app), [2, 4]);
         assert_eq!(app.selected(), Some(id(2)));
 
+        // No fixture task has a date, so Due order falls back to Priority order.
+        assert_eq!(
+            app.apply(Action::ToggleSort).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.order(), TaskOrder::Due);
+        assert_eq!(visible_ids(&app), [2, 4]);
+        assert_eq!(app.selected(), Some(id(2)));
+        app.apply(Action::ClearSearch).unwrap();
+        assert_eq!(visible_ids(&app), [3, 2, 4, 1]);
+        assert_eq!(app.selected(), Some(id(2)));
+        app.apply(Action::StartSearch).unwrap();
+        app.apply(Action::InsertChar('b')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+
         assert_eq!(
             app.apply(Action::ToggleSort).unwrap(),
             Transition::Transient
@@ -2890,6 +2956,16 @@ mod sort_tests {
         app.apply(Action::CloseHelp).unwrap();
 
         app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Due);
+        for action in [Action::MoveTaskDown, Action::MoveTaskUp] {
+            assert_eq!(app.prepare(action).unwrap(), Transition::Transient);
+            assert!(app.take_mutation().is_none());
+            assert_eq!(app.notice(), Some(&Notice::ManualOrderRequired));
+            assert_eq!(app.tasks(), &before);
+        }
+
+        app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Manual);
         for _ in 0..4 {
             app.apply(Action::MoveDown).unwrap();
         }
@@ -2930,6 +3006,108 @@ mod sort_tests {
         );
         assert_eq!(visible_ids(&app), [1, 3, 5, 2, 4, 6]);
         assert_eq!(app.selected(), Some(id(2)));
+    }
+
+    /// Canonical 1..=5; Priority order is 3, 2, 5, 1, 4 and Due order 4, 3, 2, 5, 1.
+    fn dated() -> App {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "plain one",
+            "(B) b due:2026-10-25",
+            "(A) a due:2026-10-25",
+            "c due:2026-10-01",
+            "(C) no date",
+        ] {
+            list.add(text).unwrap();
+        }
+        App::new(list)
+    }
+
+    #[test]
+    fn sort_should_cycle_manual_priority_and_due_and_keep_selection_identity() {
+        let mut app = dated();
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(2)));
+        for (order, rows) in [
+            (TaskOrder::Priority, [3, 2, 5, 1, 4]),
+            (TaskOrder::Due, [4, 3, 2, 5, 1]),
+            (TaskOrder::Manual, [1, 2, 3, 4, 5]),
+            (TaskOrder::Priority, [3, 2, 5, 1, 4]),
+        ] {
+            assert_eq!(
+                app.apply(Action::ToggleSort).unwrap(),
+                Transition::Transient
+            );
+            assert_eq!(app.order(), order);
+            assert_eq!(visible_ids(&app), rows, "{order:?}");
+            assert_eq!(app.selected(), Some(id(2)), "{order:?}");
+        }
+    }
+
+    #[test]
+    fn due_order_should_drive_selection_movement_and_refuse_reorder() {
+        let mut app = dated();
+        app.apply(Action::ToggleSort).unwrap();
+        app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Due);
+        assert_eq!(app.selected(), Some(id(1)));
+        for expected in [5, 2, 3, 4] {
+            assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Transient);
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Unchanged);
+        for expected in [3, 2, 5, 1] {
+            app.apply(Action::MoveDown).unwrap();
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Unchanged);
+
+        let before = app.tasks().clone();
+        for action in [Action::MoveTaskDown, Action::MoveTaskUp] {
+            assert_eq!(app.prepare(action).unwrap(), Transition::Transient);
+            assert!(app.take_mutation().is_none());
+            assert_eq!(app.notice(), Some(&Notice::ManualOrderRequired));
+        }
+        assert_eq!(app.tasks(), &before);
+    }
+
+    #[test]
+    fn due_order_should_be_rebuilt_only_on_reconcile_and_order_changes() {
+        let mut app = dated();
+        app.apply(Action::ToggleSort).unwrap();
+        app.apply(Action::ToggleSort).unwrap();
+        let rebuilds = app.order_rebuilds;
+
+        app.apply(Action::CycleView).unwrap();
+        app.apply(Action::StartSearch).unwrap();
+        app.apply(Action::InsertChar('a')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        app.apply(Action::ClearSearch).unwrap();
+        app.apply(Action::EditFilter).unwrap();
+        app.apply(Action::InsertChar('A')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        app.apply(Action::ClearSearch).unwrap();
+        app.apply(Action::PreviousView).unwrap();
+        assert!(app.set_today(crate::metadata::Date::new(2026, 10, 30).unwrap()));
+        app.apply(Action::OpenTrash).unwrap();
+        app.apply(Action::CloseTrash).unwrap();
+        assert_eq!(
+            app.order_rebuilds, rebuilds,
+            "views, search, filter, and days reuse it"
+        );
+        assert_eq!(visible_ids(&app), [4, 3, 2, 5, 1]);
+
+        let mut latest = app.tasks().clone();
+        latest.edit(id(1), "plain one due:2026-09-01").unwrap();
+        assert!(app.reconcile(latest));
+        assert_eq!(app.order_rebuilds, rebuilds + 1);
+        assert_eq!(visible_ids(&app), [1, 4, 3, 2, 5]);
+        assert!(!app.reconcile(app.tasks().clone()), "unchanged data");
+        assert_eq!(app.order_rebuilds, rebuilds + 1);
+
+        app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Manual);
+        assert_eq!(app.order_rebuilds, rebuilds + 2);
     }
 
     #[test]
@@ -3143,7 +3321,7 @@ mod filter_tests {
         assert_eq!(app.mode(), Mode::Filter);
         assert_eq!(
             app.message(),
-            Some("Invalid filter \"+\"; use +project, @context, A, A-C, or none")
+            Some("Invalid filter \"+\"; use +project, @context, A-C, none, or due:WHEN")
         );
         clear_buffer(&mut app);
         type_text(&mut app, "+.");
@@ -3192,7 +3370,7 @@ mod filter_tests {
         assert_eq!(visible_ids(&app), [2, 4]);
         assert_eq!(
             app.message(),
-            Some("Invalid filter \"work\"; use +project, @context, A, A-C, or none")
+            Some("Invalid filter \"work\"; use +project, @context, A-C, none, or due:WHEN")
         );
         app.apply(Action::CommitEdit).unwrap();
         assert_eq!(app.mode(), Mode::Filter);
@@ -3213,7 +3391,7 @@ mod filter_tests {
         assert_eq!(app.mode(), Mode::Filter);
         assert_eq!(
             app.message(),
-            Some("Invalid filter \"A-\"; use +project, @context, A, A-C, or none")
+            Some("Invalid filter \"A-\"; use +project, @context, A-C, none, or due:WHEN")
         );
 
         clear_buffer(&mut app);
@@ -3507,10 +3685,14 @@ mod due_tests {
     }
 
     #[test]
-    fn set_today_should_change_what_the_next_add_writes_without_a_redraw() {
+    fn set_today_should_change_what_the_next_add_writes_and_redraw_only_on_a_new_date() {
         let mut app = App::new(TaskList::new(ListScope::Global));
         let new_year = Date::new(2026, 12, 31).unwrap();
-        assert!(!app.set_today(new_year));
+        assert!(
+            !app.set_today(test_today()),
+            "the same date needs no redraw"
+        );
+        assert!(app.set_today(new_year), "a new date restyles rows");
         assert_eq!(app.today(), new_year);
         assert!(!app.set_today(new_year));
         app.prepare(Action::StartAdd).unwrap();
@@ -3518,6 +3700,279 @@ mod due_tests {
         assert_eq!(
             commit(&mut app),
             Some(Mutation::Add("x due:2027-01-01".into()))
+        );
+    }
+}
+
+#[cfg(test)]
+mod due_filter_tests {
+    use super::{App, Mode, Transition};
+    use crate::{
+        action::Action,
+        metadata::Date,
+        mutation::Mutation,
+        task::{ListScope, MoveDirection, TaskId, TaskList},
+    };
+
+    const INVALID: &str = "; use +project, @context, A-C, none, or due:WHEN";
+
+    fn id(value: u64) -> TaskId {
+        TaskId::from_shell_integer(value).unwrap()
+    }
+
+    fn day(day: u8) -> Date {
+        Date::new(2026, 10, day).unwrap()
+    }
+
+    fn visible_ids(app: &App) -> Vec<u64> {
+        app.visible_tasks().map(|task| task.id().get()).collect()
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+    }
+
+    fn accept(app: &mut App, text: &str) {
+        app.apply(Action::EditFilter).unwrap();
+        type_text(app, text);
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Normal, "{text:?}: {:?}", app.message());
+    }
+
+    /// Displayed on 2026-10-21: 1 overdue, 2 done and overdue, 3 and 7 today, 4 and 8
+    /// tomorrow, 5 later, 6 undated.
+    fn dated() -> App {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "late due:2026-10-20 +x",
+            "done late due:2026-10-19 +x",
+            "now due:2026-10-21 +x",
+            "soon due:2026-10-22 +x",
+            "later due:2026-11-02 +x",
+            "plain +x",
+            "now too due:2026-10-21",
+            "also soon due:2026-10-22",
+        ] {
+            list.add(text).unwrap();
+        }
+        list.set_completed(id(2), true).unwrap();
+        App::new(list)
+    }
+
+    #[test]
+    fn due_overdue_preview_should_hide_done_and_future_rows() {
+        let mut app = dated();
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "due:overdue");
+        assert_eq!(visible_ids(&app), [1]);
+        assert_eq!(app.message(), None);
+        type_text(&mut app, " due:none");
+        assert_eq!(visible_ids(&app), [1, 6], "due terms are a union");
+    }
+
+    #[test]
+    fn an_in_progress_due_token_should_drop_out_of_the_preview_without_an_error() {
+        let mut app = dated();
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "+x due:2026-1");
+        assert_eq!(visible_ids(&app), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(app.message(), None);
+        assert!(app.filter_preview().unwrap().exact.due.is_empty());
+        type_text(&mut app, "0-22");
+        assert_eq!(visible_ids(&app), [4]);
+    }
+
+    #[test]
+    fn typing_a_due_range_should_preview_each_prefix_that_parses_and_never_error() {
+        let mut app = dated();
+        app.apply(Action::EditFilter).unwrap();
+        let all = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let mut typed = String::new();
+        for character in "due:today..2026-11-01".chars() {
+            type_text(&mut app, &character.to_string());
+            typed.push(character);
+            let expected = match typed.as_str() {
+                "due:today" => vec![3, 7],
+                "due:today.." => vec![3, 4, 5, 7, 8],
+                "due:today..2026-11-01" => vec![3, 4, 7, 8],
+                // A lone letter is a priority token, and no task has priority D.
+                "d" => vec![],
+                // `due:today.`, `due:today..2` to `due:today..2026-11-0`, and every shorter
+                // prefix do not parse yet, so they add no due constraint.
+                _ => all.clone(),
+            };
+            assert_eq!(visible_ids(&app), expected, "{typed:?}");
+            assert_eq!(app.message(), None, "{typed:?}");
+            assert!(app.notice().is_none(), "{typed:?}");
+        }
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.filter_text(), "due:today..2026-11-01");
+        assert_eq!(visible_ids(&app), [3, 4, 7, 8]);
+    }
+
+    #[test]
+    fn enter_should_accept_due_tokens_as_typed_and_never_complete_them() {
+        let mut app = dated();
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "due:tod");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Filter);
+        assert_eq!(
+            app.message(),
+            Some(format!("Invalid filter \"due:tod\"{INVALID}").as_str())
+        );
+        assert_eq!(app.editor().unwrap().buffer(), "due:tod");
+        assert!(app.filter().is_empty());
+        assert!(app.notice().is_none(), "never completed like a tag prefix");
+
+        type_text(&mut app, "AY");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.filter_text(), "due:todAY", "kept as typed");
+        assert_eq!(visible_ids(&app), [3, 7]);
+    }
+
+    #[test]
+    fn an_invalid_due_token_should_keep_the_editor_with_the_message() {
+        let mut app = dated();
+        accept(&mut app, "due:today");
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "due:soon");
+        assert_eq!(app.message(), None, "in progress");
+        assert_eq!(
+            visible_ids(&app),
+            [3, 7],
+            "the completed token still applies"
+        );
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Filter);
+        let message = format!("Invalid filter \"due:soon\"{INVALID}");
+        assert_eq!(app.message(), Some(message.as_str()));
+        assert_eq!(app.filter_text(), "due:today");
+
+        type_text(&mut app, " ");
+        assert_eq!(
+            app.message(),
+            Some(message.as_str()),
+            "a completed invalid token"
+        );
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Filter);
+        assert_eq!(visible_ids(&app), [3, 7], "the last valid preview is kept");
+        assert_eq!(app.filter_text(), "due:today");
+    }
+
+    #[test]
+    fn due_tokens_should_or_together_and_and_with_tags() {
+        let mut app = dated();
+        accept(&mut app, "+x due:today due:tomorrow");
+        assert_eq!(visible_ids(&app), [3, 4]);
+        assert_eq!(app.filter_text(), "+x due:today due:tomorrow");
+        accept(&mut app, " due:overdue");
+        assert_eq!(app.filter_text(), "+x due:today due:tomorrow due:overdue");
+        assert_eq!(visible_ids(&app), [1, 3, 4]);
+    }
+
+    #[test]
+    fn escape_should_restore_and_layered_escape_should_clear_due_tokens_with_the_filter() {
+        let mut app = dated();
+        accept(&mut app, "due:overdue");
+        app.apply(Action::EditFilter).unwrap();
+        assert_eq!(app.editor().unwrap().buffer(), "due:overdue ");
+        type_text(&mut app, "due:tomorrow");
+        assert_eq!(visible_ids(&app), [1, 4, 8]);
+        app.apply(Action::CancelEdit).unwrap();
+        assert_eq!(app.filter_text(), "due:overdue");
+        assert_eq!(visible_ids(&app), [1]);
+
+        app.apply(Action::StartSearch).unwrap();
+        type_text(&mut app, "zzz");
+        app.apply(Action::CommitEdit).unwrap();
+        assert!(visible_ids(&app).is_empty());
+        app.apply(Action::ClearSearch).unwrap();
+        assert_eq!(visible_ids(&app), [1]);
+        app.apply(Action::ClearSearch).unwrap();
+        assert!(app.filter().is_empty());
+        assert_eq!(app.filter_text(), "");
+        assert_eq!(visible_ids(&app), [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn a_new_day_should_re_resolve_the_accepted_filter_and_an_open_preview() {
+        let mut app = dated();
+        accept(&mut app, "due:today");
+        assert_eq!(visible_ids(&app), [3, 7]);
+        assert_eq!(app.selected(), Some(id(3)));
+        assert!(app.set_today(day(22)));
+        assert_eq!(app.filter_text(), "due:today", "the words are kept");
+        assert_eq!(visible_ids(&app), [4, 8]);
+        assert_eq!(app.selected(), Some(id(4)), "selection reconciled");
+
+        // Completed `due:today +x`, trailing `due:overdue`: today or overdue, and `+x`.
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "+x due:overdue");
+        assert_eq!(visible_ids(&app), [1, 3, 4]);
+        assert_eq!(app.filter_hint().unwrap(), [("+x", 1)]);
+        assert!(app.set_today(day(19)), "a date that moves backward");
+        assert_eq!(visible_ids(&app), [2], "the preview moved");
+        assert_eq!(app.filter_hint().unwrap(), [("+x", 1)]);
+        assert!(app.set_today(day(25)));
+        assert_eq!(visible_ids(&app), [1, 3, 4]);
+        assert!(
+            app.filter_hint().unwrap().is_empty(),
+            "counts follow the completed tokens on the new day"
+        );
+        assert_eq!(app.editor().unwrap().buffer(), "due:today +x due:overdue");
+        assert_eq!(app.mode(), Mode::Filter);
+        app.apply(Action::CancelEdit).unwrap();
+        assert!(
+            visible_ids(&app).is_empty(),
+            "the accepted filter moved too"
+        );
+        assert!(app.set_today(day(21)));
+        assert_eq!(visible_ids(&app), [3, 7]);
+    }
+
+    #[test]
+    fn a_filtered_move_after_a_new_day_should_carry_the_new_day_projection() {
+        let mut app = dated();
+        accept(&mut app, "due:today");
+        assert!(app.set_today(day(22)));
+        assert_eq!(visible_ids(&app), [4, 8]);
+        assert_eq!(app.selected(), Some(id(4)));
+        assert_eq!(
+            app.prepare(Action::MoveTaskDown).unwrap(),
+            Transition::Submit
+        );
+        let request = app.take_mutation().unwrap();
+        let Mutation::MoveAdjacent {
+            id: moved,
+            direction,
+            neighbor,
+            projection,
+        } = &request
+        else {
+            panic!("{request:?}");
+        };
+        assert_eq!(
+            (*moved, *direction, *neighbor),
+            (id(4), MoveDirection::Down, Some(id(8)))
+        );
+        assert_eq!(
+            projection, &app.projection,
+            "resolved for the displayed day"
+        );
+
+        let mut latest = app.tasks().clone();
+        assert!(request.apply(&mut latest).changed());
+        assert_eq!(
+            latest
+                .visible_tasks()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 8, 5, 6, 7, 4]
         );
     }
 }

@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "started_at": "2026-10-22T18:48:07.768921+00:00",
+  "completed_at": "2026-10-22T18:51:13.167589+00:00",
+  "mode": "idle",
+  "machine": {
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "architecture": "arm64",
+    "python": "3.14.6",
+    "logical_cpus": 16,
+    "hardware": {
+      "machine_model": "Mac16,5",
+      "chip_type": "Apple M4 Max",
+      "physical_memory": "48 GB",
+      "number_processors": "proc 16:0:12:4"
+    },
+    "power": "Now drawing from 'AC Power'"
+  },
+  "binaries": {
+    "baseline": {
+      "path": "/Users/benmkramer/.herdr/worktrees/shtodo/feat-due-dates/target/control-00343c6/target/release/shtodo",
+      "sha256": "8a9b8cdfe6f895ab916cc0f461e108413bbc88e8966c239af74cc040c10268c4",
+      "version": "shtodo 0.1.0-beta.4"
+    },
+    "current": {
+      "path": "/Users/benmkramer/.herdr/worktrees/shtodo/feat-due-dates/target/candidate-3141433/shtodo",
+      "sha256": "5b78327c0599c000d4950e70d31003947e9703cee0662b72cf673117a1a46847",
+      "version": "shtodo 0.1.0-beta.4"
+    }
+  },
+  "settings": {
+    "baseline": "target/control-00343c6/target/release/shtodo",
+    "current": "target/candidate-3141433/shtodo",
+    "mode": "idle",
+    "sizes": [
+      0,
+      100,
+      1000,
+      10000
+    ],
+    "kinds": [
+      "plain",
+      "mixed"
+    ],
+    "operations": null,
+    "runs": 50,
+    "warmups": 5,
+    "seed": 20261005,
+    "idle_seconds": 60,
+    "idle_samples": 3,
+    "idle_warmup": 5,
+    "output": "docs/benchmarks/2026-10-22-due-dates-tui-idle-comparison.json"
+  },
+  "harness_sha256": "0705fff7f0fed681a39eb7eb92b72e1690f62eef6cb8499ea18c48ca739df286",
+  "cargo_lock_sha256": "4be26418d3f8e273242a13df167d3b802c9f442572bc9956c236a68434b1eb07",
+  "baseline_commit": "00343c6795e99722b78f2ebde95d5f7bd8f16996",
+  "current_git_status": "M CHANGELOG.md\n M README.md\n M docs/benchmarks.md\n M docs/configuration.md\n M docs/plans/2026-10-21-due-dates.md\n M docs/plans/README.md\n M docs/usage.md\n?? docs/benchmarks/2026-10-22-due-dates-tui-comparison-run1.json\n?? docs/benchmarks/2026-10-22-due-dates-tui-comparison-run2.json\n?? docs/benchmarks/2026-10-22-due-dates-tui-comparison.md",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "method": "Paired release binaries on independent temporary global scopes. CLI cases shuffled each round; snapshot reset and correctness checks outside timers; null stdout; process launch/exit included. Plain fixtures match the historical short open-task workload; mixed fixtures have Unicode and one-third tombstones. TUI cases shuffled each round; input ends at an acknowledged marker/mode frame, including rendering and PTY/harness work; completion persisted before frame. Idle runs six independent scopes together, one TUI each, with wait4 CPU including initialization/warmup and no terminal output after warmup. Warm caches, local storage; not a throughput ceiling or a cross-platform result.",
+  "results": [
+    {
+      "binary": "baseline",
+      "records": 0,
+      "clients": 1,
+      "snapshot_bytes": 132,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.047890999999999996,
+      "elapsed_seconds": 185.3743751249276,
+      "percent_of_one_core": 0.025834746559617674
+    },
+    {
+      "binary": "current",
+      "records": 0,
+      "clients": 1,
+      "snapshot_bytes": 132,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.047781,
+      "elapsed_seconds": 185.3182749580592,
+      "percent_of_one_core": 0.025783209999560852
+    },
+    {
+      "binary": "baseline",
+      "records": 1000,
+      "clients": 1,
+      "snapshot_bytes": 166983,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.063012,
+      "elapsed_seconds": 185.263587417081,
+      "percent_of_one_core": 0.03401208023578971
+    },
+    {
+      "binary": "current",
+      "records": 1000,
+      "clients": 1,
+      "snapshot_bytes": 166983,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.064265,
+      "elapsed_seconds": 185.2066201660782,
+      "percent_of_one_core": 0.03469908361935031
+    },
+    {
+      "binary": "baseline",
+      "records": 10000,
+      "clients": 1,
+      "snapshot_bytes": 1691822,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.19738,
+      "elapsed_seconds": 185.14202462509274,
+      "percent_of_one_core": 0.10661004728650278
+    },
+    {
+      "binary": "current",
+      "records": 10000,
+      "clients": 1,
+      "snapshot_bytes": 1691822,
+      "idle_output_bytes": [
+        0,
+        0,
+        0
+      ],
+      "cpu_seconds": 0.19816099999999998,
+      "elapsed_seconds": 185.07838999992236,
+      "percent_of_one_core": 0.10706868586877329
+    }
+  ]
+}

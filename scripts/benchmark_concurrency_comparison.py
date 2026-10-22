@@ -300,17 +300,17 @@ def wait_screen(tui, predicate):
             tui.feed(data)
 
 
-def tagged_tui_fixture(home, size):
+def token_tui_fixture(home, size, builder):
     directory = home / ".shtodo/global"
     directory.mkdir(parents=True)
     path = directory / "tasks.json"
-    path.write_text(json.dumps(tagged_fixture(size), indent=2, ensure_ascii=False) + "\n")
+    path.write_text(json.dumps(builder(size), indent=2, ensure_ascii=False) + "\n")
     (directory / "tasks.lock").touch()
     return path.stat().st_size
 
 
 # TUI cases per fixture: (case label, binary label, keys sent before timing, operations).
-# The priority case and Filter mode need this branch's binary, so they run for it only.
+# The sorted cases and Filter mode need this branch's binary, so they run for it only.
 TUI_CASES = {
     "mixed": [("baseline", "baseline", b"", ("toggle_to_frame", "help_to_frame", "search_keystroke")),
               ("current", "current", b"", ("toggle_to_frame", "help_to_frame", "search_keystroke")),
@@ -318,12 +318,26 @@ TUI_CASES = {
     "tagged": [("baseline", "baseline", b"", ("toggle_to_frame", "search_keystroke")),
                ("current", "current", b"", ("toggle_to_frame", "search_keystroke", "filter_keystroke")),
                ("current_priority", "current", b"s", ("toggle_to_frame",))],
+    # Due order on `s s` is gated against Priority order on the same binary.
+    "dated": [("baseline", "baseline", b"", ("toggle_to_frame", "search_keystroke")),
+              ("current", "current", b"", ("toggle_to_frame", "search_keystroke", "filter_keystroke")),
+              ("current_priority", "current", b"s", ("toggle_to_frame",)),
+              ("current_due", "current", b"ss", ("toggle_to_frame",))],
 }
+# The status text each sort setup waits for before timing.
+SETUP_STATUS = {b"s": "by priority", b"ss": "by due"}
+TUI_FIXTURES = {"tagged": tagged_fixture, "dated": dated_fixture}
+# On the dated fixture both keystrokes end on the same rows, the tasks due on the run date: the
+# search finds the date's literal token, and the filter's final `y` completes `due:today`.
+DATED_SEARCH = f"/due:{RUN_DATE}"
 # Keystroke cases: untimed keys that open the editor, then one timed character, then Esc.
 KEYSTROKES = {
     ("mixed", "search_keystroke"): (b"/Tas", b"k", "/Task", "SEARCH"),
     ("tagged", "search_keystroke"): (b"/+", b"p", "/+p", "SEARCH"),
     ("tagged", "filter_keystroke"): (b"f+", b"p", "f:+p", "FILTER"),
+    ("dated", "search_keystroke"): (DATED_SEARCH[:-1].encode(), DATED_SEARCH[-1].encode(),
+                                    DATED_SEARCH, "SEARCH"),
+    ("dated", "filter_keystroke"): (b"fdue:toda", b"y", "f:due:today", "FILTER"),
 }
 
 
@@ -343,9 +357,9 @@ def measure_tui(args, binaries, rng):
                     rng.shuffle(specs)
                     for label, binary, setup, operations in specs:
                         home = root / f"{kind}-{size}-{label}"
-                        if kind == "tagged":
-                            size_bytes = tagged_tui_fixture(home, size)
-                            # Task 1 is selected first; sorting keeps it selected, now near the end.
+                        if kind in TUI_FIXTURES:
+                            size_bytes = token_tui_fixture(home, size, TUI_FIXTURES[kind])
+                            # Task 1 is selected first; sorting keeps it selected, now further down.
                             target, marker_text = 1, "task 00000001"
                         else:
                             size_bytes = fixture(home, size)
@@ -355,7 +369,8 @@ def measure_tui(args, binaries, rng):
                         wait_screen(tui, lambda value: footer(value).startswith("NORMAL"))
                         if setup:
                             tui.send(setup)
-                            wait_screen(tui, lambda value: "by priority" in "".join(value.screen[1]))
+                            wait_screen(tui, lambda value, status=SETUP_STATUS[setup]: status in "".join(
+                                value.screen[1]))
                         value = json.loads((home / ".shtodo/global/tasks.json").read_text())
                         completed = value["tasks"][target - 1]["completed"]
                         cases.append(dict(label=label, binary=binary, home=home, tui=tui, kind=kind,

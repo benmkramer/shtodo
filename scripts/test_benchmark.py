@@ -98,6 +98,25 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(command, ["add", f"{benchmark.ADDED_TASK} due:today"])
         self.assertEqual(expected["tasks"][-1]["text"], f"{benchmark.ADDED_TASK} due:{day}")
 
+    def test_dated_tui_keystrokes_end_on_the_rows_due_on_the_run_date(self):
+        import benchmark_concurrency_comparison as comparison
+
+        opening, key, status, mode = comparison.KEYSTROKES[("dated", "search_keystroke")]
+        self.assertEqual((opening + key).decode(), status)
+        self.assertEqual((status, mode), (f"/due:{comparison.RUN_DATE}", "SEARCH"))
+        opening, key, status, mode = comparison.KEYSTROKES[("dated", "filter_keystroke")]
+        self.assertEqual((opening, key, status, mode), (b"fdue:toda", b"y", "f:due:today", "FILTER"))
+        value = comparison.dated_fixture(600)
+        searched = [task["id"] for task in value["tasks"]
+                    if comparison.DATED_SEARCH[1:] in task["text"].lower()]
+        due_today = [int(line.split()[0])
+                     for line in comparison.expected_rows(value, "list_due_today").splitlines()]
+        self.assertEqual(searched, due_today)
+        self.assertTrue(searched)
+        cases = {label: setup for label, _, setup, _ in comparison.TUI_CASES["dated"]}
+        self.assertEqual(comparison.SETUP_STATUS[cases["current_due"]], "by due")
+        self.assertEqual(comparison.SETUP_STATUS[cases["current_priority"]], "by priority")
+
     @unittest.skipUnless((benchmark.ROOT / "target/benchmark-tools/taskbook/node_modules/.bin/tb").exists(),
                          "optional Taskbook installation unavailable")
     def test_taskbook_delete_can_be_restored_and_reset_clears_archive(self):

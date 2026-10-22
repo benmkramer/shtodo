@@ -409,8 +409,8 @@ mode, saves nothing, and shows `Task text cannot be empty`.
 | `d`           | Delete the selected task                        |
 | `u`           | Restore the most recently deleted task          |
 | `/`           | Enter or refine text search                     |
-| `f`           | Edit the tag and priority filter                |
-| `s`           | Toggle priority order and manual order          |
+| `f`           | Edit the tag, priority, and due filter          |
+| `s`           | Cycle manual, priority, and due order           |
 | Tab           | Move to the next All, Open, or Done tab          |
 | Shift-Tab     | Move to the previous view tab                    |
 | Esc           | Clear the accepted search; with none, the filter |
@@ -444,11 +444,17 @@ Alt-b and Alt-f aliases above.
 
 Press `f` to edit the filter. Filter mode uses the Insert mode text editing
 keys above, and `q`, `s`, `f`, `/`, and Space are text. The buffer holds
-space-separated tokens with the same grammar as the shell `--tag` and
-`--priority` values: `+project`, `@context`, a priority letter `A`, a range
-`A-C`, or `none`. For example, `+shtodo @laptop A-B` shows tasks with both tags
-and priority `A` or `B`. Tags are combined with AND, priorities with OR. See
-[Priority and tags](#priority-and-tags) and
+space-separated tokens with the same grammar as the shell `--tag`,
+`--priority`, and `--due` values: `+project`, `@context`, a priority letter
+`A`, a range `A-C`, or `none`, and `due:WHEN`, where `WHEN` is any `--due`
+value (`today`, `tomorrow`, `overdue`, `none`, `any`, a date, or a
+`START..END` range). For example, `+shtodo @laptop A-B` shows tasks with both
+tags and priority `A` or `B`, and `+home due:overdue due:today` shows `+home`
+tasks that are overdue or due today. Tags are combined with AND, priorities
+with OR, and due tokens with OR; the three kinds are combined with AND, as in
+the shell. The `due:` key is lowercase; `today`, `tomorrow`, and `overdue`
+mean the date the TUI is showing. See [Priority and tags](#priority-and-tags),
+[Due dates](#due-dates), and
 [Filtering and sorting the list](#filtering-and-sorting-the-list).
 
 | Key    | Action                                               |
@@ -460,10 +466,16 @@ and priority `A` or `B`. Tags are combined with AND, priorities with OR. See
 The list previews the filter as you type. Completed tokens match exactly. The
 last token, while you are still typing it, matches any tag that starts with
 it, so `+sh` previews both `+shtodo` and `+shell`. A sigil alone (`+` or `@`)
-previews no tag constraint, and a priority token that does not parse yet
-(`A-`) is left out of the preview.
+previews no tag constraint, and a priority or due token that does not parse
+yet (`A-`, `due:2026-1`, `due:tod`) is left out of the preview without an
+error. Due tokens match exactly, never by prefix, so while you type a range
+the preview follows each prefix that parses: for `due:today..2026-11-01`,
+`due:today` previews today, `due:today.` adds no due constraint,
+`due:today..` previews today onward, and the range applies once it is
+complete.
 
-A hint line above the footer lists the tags in the rows matching the view,
+A hint line above the footer lists only tags, never due dates. It counts the
+tags in the rows matching the view,
 the search, and the completed tokens, with row counts, highest first:
 `+shtodo 12 · +shell 3 · @laptop 2`. While you type a tag, it lists only the
 tags that start with it. `No tags in this view` means those rows have no tags.
@@ -479,10 +491,12 @@ Enter resolves the last tag token against the tags in the hint line:
 - A tag that matches nothing is accepted as typed, so you can filter for a tag
   no task has yet. The list is then empty.
 
-Earlier tokens and priority tokens are never completed. An invalid token, such
-as `foo` or a sigil alone, keeps the editor open with
-`Invalid filter "foo"; use +project, @context, A, A-C, or none`. Accepting an
-empty buffer clears the filter.
+Earlier tokens, priority tokens, and due tokens are never completed; a due
+token is kept as typed, so the status line shows `f:due:today` and the
+filter keeps meaning today on later days. An invalid token, such as `foo`,
+a sigil alone, or an unfinished `due:tod`, keeps the editor open with
+`Invalid filter "foo"; use +project, @context, A-C, none, or due:WHEN`.
+Accepting an empty buffer clears the filter.
 
 ### Help mode
 
@@ -559,7 +573,8 @@ mode, Escape clears an accepted query while keeping Open/Done filtering. `q`,
 `f`, `s`, `/`, and Space are text while editing a query; Ctrl-C still quits. All of
 these keys follow the configured bindings described in [Configuring keybindings].
 
-Press `f` to filter by tag and priority (see [Filter mode](#filter-mode)). The
+Press `f` to filter by tag, priority, and due date (see
+[Filter mode](#filter-mode)). The
 view, the search, and the filter combine: a task is shown only if it matches
 all three. For example, Open with `/bug` and `f +shtodo A-B` shows open tasks
 containing `bug`, tagged `+shtodo`, with priority `A` or `B`. In Normal mode
@@ -568,8 +583,9 @@ The view tab is never cleared by Escape.
 
 The tab strip and status line show the active view, matching count, and
 `/query`, including an empty query. An accepted filter adds `f:` and its
-tokens, and priority order adds `by priority`, for example
-`· 3 matches · /bug · f:+shtodo A-B · by priority`. When a filter or sort is
+tokens, and priority or due order adds `by priority` or `by due`, for
+example `· 3 matches · /bug · f:+shtodo A-B · by priority`. When a filter or
+sort is
 shown, an empty query is left out. In a narrow terminal the sort label is
 dropped first, then the filter is shortened with `…`; the count is always
 shown. The header's open/done counts cover all
@@ -580,15 +596,29 @@ start fresh in every session, do not save anything, and do not affect
 `shtodo list` output.
 
 Rows keep their text exactly as typed. A priority marker such as `(A)` is
-bold, `+project` tags are cyan, and `@context` tags are magenta. Completed
-rows are dimmed and struck through, including those spans. Trash rows use the
-same styling.
+bold, `+project` tags are cyan, and `@context` tags are magenta. The due
+token (the first valid `due:YYYY-MM-DD`, without trailing punctuation) is red
+and bold when an open task is overdue, yellow and bold when it is due today,
+and blue for any other date. The status marker (`○`) of an open overdue task
+is also red and bold, and of an open task due today yellow and bold, so the
+state stays visible when a long row is cut off at the right edge. Completed
+rows are dimmed and struck through, including those spans; their due token
+is blue and their `✓` marker is never red or yellow, because a done task is
+never overdue. Trash rows use the same styling, with due tokens always blue
+and no marker color. When the local date changes while the TUI is open, rows
+are restyled and `today`, `tomorrow`, and `overdue` in an accepted or open
+filter move to the new date within a second (up to five while storage errors
+slow its refresh), with one redraw;
+the typed filter words do not change.
 
-Matching tasks retain their manual, canonical order unless priority order is
-on. Press `s` to toggle priority order: `A` to `Z`, then tasks without a
-priority, with manual order breaking ties, the same as
-`shtodo list --sort priority`. Open and done tasks are not separated; use the
-Open tab for that. Selection keeps the same task when the order changes.
+Matching tasks retain their manual, canonical order unless a sorted order is
+on. Press `s` to cycle manual, priority, and due order, then manual again.
+Priority order is `A` to `Z`, then tasks without a priority, with manual order
+breaking ties, the same as `shtodo list --sort priority`. Due order is the
+earliest due date first, then tasks without one, with priority and then
+manual order breaking ties, the same as `shtodo list --sort due`. Open and
+done tasks are not separated; use the Open tab for that. Selection keeps the
+same task when the order changes.
 Navigation and task actions operate on the displayed rows. Selection keeps its task identity while
 that task still matches. If completion, reopening, editing, or a view change
 hides it, selection moves to the next matching task in display order, then
@@ -596,8 +626,8 @@ the previous one. Deletion also selects the next match, then the previous one.
 No matches means no selected task, so navigation, reordering, editing,
 completion, and deletion safely do nothing.
 
-`J`/`K` reorder only in manual order. In priority order they change nothing
-and show `Reorder uses manual order; press s to switch`, naming the configured
+`J`/`K` reorder only in manual order. In priority or due order they change
+nothing and show `Reorder needs manual order; s cycles`, naming the configured
 `toggle_sort` key. In manual order, `J`/`K` swap the selected task with its
 next/previous matching neighbor in their existing canonical slots. With a
 filter, the neighbor is the next or previous task that matches the view,
