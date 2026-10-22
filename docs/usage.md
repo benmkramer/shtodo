@@ -457,7 +457,7 @@ removed from this view. Browse and help actions never save the snapshot.
 
 To change these controls, see [Configuring keybindings].
 
-## Search and task views
+## Search, filters, and task views
 
 Each TUI session starts in All with an empty search. The tab strip highlights
 and brackets the active view, such as `[All]`. Tab moves through All, Open,
@@ -466,34 +466,65 @@ These controls work in Normal mode; accept or cancel an edit before switching
 views. Press `/` to edit the current query. Matches update as you type and
 combine with the active view. Search uses a literal substring of task text
 after Unicode lowercasing; spaces and punctuation are literal, and there are
-no regular expressions, accent normalization, or tags.
+no regular expressions or accent normalization. Search treats `+project` and
+`@context` as plain text; use the filter for exact tags.
 
 Search mode uses the same text editing bindings as Insert mode. Enter accepts
 the query and returns to the list, including an empty query. Escape cancels
 search editing and restores the previous query and selected task. From Normal
 mode, Escape clears an accepted query while keeping Open/Done filtering. `q`,
-`f`, `/`, and Space are text while editing a query; Ctrl-C still quits. All of
+`f`, `s`, `/`, and Space are text while editing a query; Ctrl-C still quits. All of
 these keys follow the configured bindings described in [Configuring keybindings].
 
-The tab strip and status line show the active view, matching count, and
-`/query`, including an empty query. The header's open/done counts cover all
-non-deleted tasks in the scope. An empty list shows `No tasks yet`; a populated
-list whose current view/search matches nothing shows `No matching tasks`. Search and view changes
-are transient, do not save anything, and do not affect `shtodo list` output.
+Press `f` to filter by tag and priority (see [Filter mode](#filter-mode)). The
+view, the search, and the filter combine: a task is shown only if it matches
+all three. For example, Open with `/bug` and `f +shtodo A-B` shows open tasks
+containing `bug`, tagged `+shtodo`, with priority `A` or `B`. In Normal mode
+Escape clears one layer per press: the accepted search first, then the filter.
+The view tab is never cleared by Escape.
 
-Matching tasks retain their manual, canonical order. Navigation and task
-actions operate on those same rows. Selection keeps its task identity while
+The tab strip and status line show the active view, matching count, and
+`/query`, including an empty query. An accepted filter adds `f:` and its
+tokens, and priority order adds `by priority`, for example
+`· 3 matches · /bug · f:+shtodo A-B · by priority`. When a filter or sort is
+shown, an empty query is left out. In a narrow terminal the sort label is
+dropped first, then the filter is shortened with `…`; the count is always
+shown. The header's open/done counts cover all
+non-deleted tasks in the scope. An empty list shows `No tasks yet`; a populated
+list whose current view, search, or filter matches nothing shows
+`No matching tasks`. Search, filter, sort, and view changes are transient,
+start fresh in every session, do not save anything, and do not affect
+`shtodo list` output.
+
+Rows keep their text exactly as typed. A priority marker such as `(A)` is
+bold, `+project` tags are cyan, and `@context` tags are magenta. Completed
+rows are dimmed and struck through, including those spans. Trash rows use the
+same styling.
+
+Matching tasks retain their manual, canonical order unless priority order is
+on. Press `s` to toggle priority order: `A` to `Z`, then tasks without a
+priority, with manual order breaking ties, the same as
+`shtodo list --sort priority`. Open and done tasks are not separated; use the
+Open tab for that. Selection keeps the same task when the order changes.
+Navigation and task actions operate on the displayed rows. Selection keeps its task identity while
 that task still matches. If completion, reopening, editing, or a view change
-hides it, selection moves to the next matching task in canonical order, then
+hides it, selection moves to the next matching task in display order, then
 the previous one. Deletion also selects the next match, then the previous one.
 No matches means no selected task, so navigation, reordering, editing,
 completion, and deletion safely do nothing.
 
-`J`/`K` swap the selected task with its next/previous matching neighbor in
-their existing canonical slots. Hidden tasks and tombstones stay in their
+`J`/`K` reorder only in manual order. In priority order they change nothing
+and show `Reorder uses manual order; press s to switch`, naming the configured
+`toggle_sort` key. In manual order, `J`/`K` swap the selected task with its
+next/previous matching neighbor in their existing canonical slots. With a
+filter, the neighbor is the next or previous task that matches the view,
+search, and filter. If another process changes the list so that neighbor no
+longer matches, the move is refused with `Task order changed; review and
+retry`. Hidden tasks and tombstones stay in their
 slots. This preserves manual ordering without shifting hidden rows. A new or
 restored task is selected if it matches; otherwise the current selection is
-kept and a message explains that the task is hidden by the view/search. `u`
+kept and a message explains that the task is hidden by the current view,
+search, or filter. `u`
 still restores the most recently deleted task even if it will be hidden.
 The completion celebration occurs only when the final actual open task is
 completed, including open tasks hidden by search.
