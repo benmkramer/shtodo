@@ -7,8 +7,12 @@ with its tag hint line. Both are `0.1.0-beta.4` release builds with the same
 Cargo manifest, lockfile, Rust 1.98.0, and optimization profile. Exact binary
 hashes distinguish them.
 
-Result: **STOP**. The Filter-mode keystroke gate fails after the viewport
-mitigation. The other TUI gates pass.
+Result: every TUI gate passes. The Filter-mode keystroke missed the plan's
+original gate, within 5% of the `/` search keystroke, after the viewport
+mitigation, and the work stopped for the owner. On October 21, 2026 the owner
+restated that gate as within 5% of `/` or within 0.5 ms absolute (plan
+question 13), matching the absolute bounds the shell gates carry. The final
+run passes the restated gate at +0.28 ms.
 
 ## Gates
 
@@ -18,7 +22,7 @@ The plan's TUI gates, at 10,000 records, final run:
 | --- | --- | ---: | ---: | ---: | --- | --- |
 | Completion-to-frame, Manual order | Mixed | Control 15.71 ms | 15.37 ms | -2.2% (-0.34 ms) | 5% | Pass |
 | Completion-to-frame, Priority order | Mixed | Control 15.71 ms | 15.38 ms | -2.1% (-0.33 ms) | Report only | |
-| Filter keystroke-to-frame | Tagged | Current `/` keystroke 0.574 ms | 0.853 ms | +48.7% (+0.28 ms) | 5% of `/` | **Fail** |
+| Filter keystroke-to-frame | Tagged | Current `/` keystroke 0.574 ms | 0.853 ms | +48.7% (+0.28 ms) | Restated: 5% or 0.5 ms of `/` (original: 5% of `/`) | Pass restated (missed original) |
 
 Information only, final run at 10,000 records:
 
@@ -59,7 +63,35 @@ Three full runs, each 50 interleaved samples per case after 5 warmups, seed
   keystroke is: the buffer split and token parse, the preview predicate (a tag
   scan per row in place of `/`'s lowercase copy and substring search), the
   prefix filter over the cached counts, and the hint row. No further change was
-  tried, per the STOP rule.
+  tried, per the STOP rule, before the owner restated the gate.
+
+## Idle refresh
+
+The [paired idle run](./2026-10-21-tags-and-priority-tui-idle-comparison.json)
+was taken from the same control and the run 3 binary
+(`24c70e1a…`). It runs control and current together on six independent
+scopes, one TUI per binary for each of 0, 1,000, and 10,000 mixed records (Unicode text, one-third tombstones), as in
+the October 5 idle report.
+After a 5-second warmup there are three 60-second idle windows. Every window
+has zero terminal output from every process. CPU is measured with `wait4` over
+each process's lifetime (about 185 s), including startup and warmup.
+
+| Records | Snapshot bytes | Control CPU (% of one core) | Current CPU (% of one core) |
+| ---: | ---: | ---: | ---: |
+| 0 | 132 | 0.0258% | 0.0229% |
+| 1,000 | 166,983 | 0.0346% | 0.0366% |
+| 10,000 | 1,691,822 | 0.1261% | 0.1219% |
+
+The differences are within run-to-run noise in both directions. Idle refresh
+compares canonical bytes before parsing, and nothing in this change runs on
+that path. The ignored release test
+`session::measurements::idle_refresh_measurements` (`cargo test --release
+--locked --lib idle_refresh_measurements -- --ignored`) also passes: over three
+60-second samples at 0, 1,000, and 10,000 records with one and two sessions,
+unchanged bytes cause zero parses. With filter and sort active, the session
+unit test
+`refresh_should_keep_filter_editor_buffer_cursor_filter_and_sort_and_reconcile_tags`
+and the sorted refresh test cover no parse or redraw on equal bytes.
 
 ## Method and provenance
 
@@ -79,4 +111,8 @@ Three full runs, each 50 interleaved samples per case after 5 warmups, seed
   binary, so they run for it only.
 - Machine: Apple M4 Max (Mac16,5), 48 GB, macOS 27.0.1 arm64, on AC power,
   Python 3.14.6. Warm caches, local storage.
-- The idle refresh run (`--mode idle`) was not taken: the STOP came first.
+- Idle command: `python3 scripts/benchmark_concurrency_comparison.py
+  --baseline target/control-527127c/target/release/shtodo --mode idle
+  --output docs/benchmarks/2026-10-21-tags-and-priority-tui-idle-comparison.json`,
+  with the default 5-second warmup, three 60-second samples, and mixed
+  fixtures.

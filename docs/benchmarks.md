@@ -17,6 +17,8 @@ list, delete, done, reopen, edit, and restore, with optional `add --print-id`
 output for scripts. Shell listing has state, tag, priority, and text filters
 and an optional priority sort; their cost is in the
 [tags and priority shell comparison](./benchmarks/2026-10-21-tags-and-priority-cli-comparison.md).
+The unreleased TUI priority styling, sort, and filter editor are measured in
+the [tags and priority TUI comparison](./benchmarks/2026-10-21-tags-and-priority-tui-comparison.md).
 The current measurements
 use a local beta.3 release build with the unreleased concurrency implementation.
 The fuller lifecycle commands and TUI behavior are measured in a separate
@@ -141,6 +143,20 @@ fields. The owner's decision on accepting it is recorded as question 12 in the
 [plan's decisions table](./plans/2026-10-21-tags-and-priority.md#decisions-before-stage-0-exits).
 Text listing does no token work. Filtered and sorted cases are recorded for
 information.
+
+## Tags and priority TUI: October 21, 2026
+
+The [paired TUI comparison](./benchmarks/2026-10-21-tags-and-priority-tui-comparison.md)
+measures row styling, `s` priority order, and the `f` filter editor against
+the PR 1 merge at `527127c`. At 10,000 mixed records, completion-to-frame
+medians are 15.71 to 15.37 ms (-2.2%) in manual order and 15.38 ms in
+priority order. `/` keystroke-to-frame is faster than the control on both
+fixtures, because styled rows are now built only for the visible window.
+Filter keystroke-to-frame at 10,000 tagged records is 0.853 ms against
+0.574 ms for `/` (+48.7%, +0.28 ms). That missed the plan's original 5%
+relative gate and passes the owner's restated gate, within 5% or within
+0.5 ms of `/`. Idle refresh keeps zero terminal output, and idle CPU at 10,000 records is 0.1261% to 0.1219% of one
+core.
 
 ## Concurrency change: October 5, 2026
 
