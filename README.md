@@ -98,7 +98,7 @@ The essentials are:
 
 ```text
 i add · e edit · Space complete · d delete · u restore latest · t trash
-/ search · Tab / Shift-Tab views · ? help · q quit
+/ search · f filter · s sort · Tab / Shift-Tab views · ? help · q quit
 ```
 
 See [Usage and keyboard controls] for the full interaction guide.

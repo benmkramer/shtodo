@@ -303,7 +303,7 @@ text; select JSON mode before the command when editing to that text.
 
 ### Interactive editing
 
-The interface has Normal, Insert, Search, Help, and Trash modes. Add or edit
+The interface has Normal, Insert, Search, Filter, Help, and Trash modes. Add or edit
 tasks in Insert mode, then press Enter to save. Task text is trimmed, must be non-empty
 and single-line, and Escape cancels an uncommitted add or edit. A terminal smaller
 than 40 columns by 8 rows displays a resize message until it is large enough.
@@ -318,17 +318,19 @@ mode, saves nothing, and shows `Task text cannot be empty`.
 | ------------- | ----------------------------------------------- |
 | `j` or Down   | Move selection down                             |
 | `k` or Up     | Move selection up                               |
-| `J`           | Move the selected task down                     |
-| `K`           | Move the selected task up                       |
+| `J`           | Move the selected task down (manual order only) |
+| `K`           | Move the selected task up (manual order only)   |
 | `i`           | Add a task                                      |
 | `e`           | Edit the selected task                          |
 | Space         | Toggle the selected task complete or incomplete |
 | `d`           | Delete the selected task                        |
 | `u`           | Restore the most recently deleted task          |
 | `/`           | Enter or refine text search                     |
+| `f`           | Edit the tag and priority filter                |
+| `s`           | Toggle priority order and manual order          |
 | Tab           | Move to the next All, Open, or Done tab          |
 | Shift-Tab     | Move to the previous view tab                    |
-| Esc           | Clear the accepted search, keeping the view     |
+| Esc           | Clear the accepted search; with none, the filter |
 | `t`           | Open trash for the current scope                |
 | `?`           | Open keyboard help                              |
 | `q` or Ctrl-C | Quit                                            |
@@ -354,6 +356,50 @@ Type to enter task text. `q` is ordinary text in this mode.
 On macOS, terminals report Option as Alt when Option is configured as an
 Escape/Meta key. The common Meta-b and Meta-f encodings are supported by the
 Alt-b and Alt-f aliases above.
+
+### Filter mode
+
+Press `f` to edit the filter. Filter mode uses the Insert mode text editing
+keys above, and `q`, `s`, `f`, `/`, and Space are text. The buffer holds
+space-separated tokens with the same grammar as the shell `--tag` and
+`--priority` values: `+project`, `@context`, a priority letter `A`, a range
+`A-C`, or `none`. For example, `+shtodo @laptop A-B` shows tasks with both tags
+and priority `A` or `B`. Tags are combined with AND, priorities with OR. See
+[Priority and tags](#priority-and-tags) and
+[Filtering and sorting the list](#filtering-and-sorting-the-list).
+
+| Key    | Action                                               |
+| ------ | ---------------------------------------------------- |
+| Enter  | Accept the filter, completing a unique tag prefix    |
+| Esc    | Cancel and restore the previous filter and selection |
+| Ctrl-C | Quit                                                 |
+
+The list previews the filter as you type. Completed tokens match exactly. The
+last token, while you are still typing it, matches any tag that starts with
+it, so `+sh` previews both `+shtodo` and `+shell`. A sigil alone (`+` or `@`)
+previews no tag constraint, and a priority token that does not parse yet
+(`A-`) is left out of the preview.
+
+A hint line above the footer lists the tags in the rows matching the view,
+the search, and the completed tokens, with row counts, highest first:
+`+shtodo 12 · +shell 3 · @laptop 2`. While you type a tag, it lists only the
+tags that start with it. `No tags in this view` means those rows have no tags.
+
+Enter resolves the last tag token against the tags in the hint line:
+
+- A tag that is present is accepted as typed. Trailing `.,;:!?` is removed,
+  as for `--tag`.
+- A prefix of exactly one tag is completed to that tag, so `+sh` becomes
+  `+shtodo` when no other tag starts with `+sh`.
+- A prefix of several tags keeps the editor open and shows
+  `Finish the tag: +shtodo, +shell`.
+- A tag that matches nothing is accepted as typed, so you can filter for a tag
+  no task has yet. The list is then empty.
+
+Earlier tokens and priority tokens are never completed. An invalid token, such
+as `foo` or a sigil alone, keeps the editor open with
+`Invalid filter "foo"; use +project, @context, A, A-C, or none`. Accepting an
+empty buffer clears the filter.
 
 ### Help mode
 
@@ -404,8 +450,8 @@ only clears the deletion marker; text, completion, ID, and canonical position
 are preserved. The normal list's `u` still restores the latest remaining
 deletion, including after a restart.
 
-Normal mutation and search keys (`i`, `e`, Space, `d`, `J`, `K`, `u`, `/`,
-Tab, and Shift-Tab) are inactive in trash. Tombstones cannot be edited,
+Normal mutation, search, filter, and sort keys (`i`, `e`, Space, `d`, `J`,
+`K`, `u`, `/`, `f`, `s`, Tab, and Shift-Tab) are inactive in trash. Tombstones cannot be edited,
 completed, reordered, or permanently
 removed from this view. Browse and help actions never save the snapshot.
 
