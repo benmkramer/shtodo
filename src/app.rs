@@ -263,6 +263,8 @@ struct FilterSession {
     preview: FilterPreview,
     /// The buffer's completed tokens: the rows the hint line counts and Enter completes from.
     completed: TaskFilter,
+    /// Tag counts for `completed`, kept across keystrokes that only extend the trailing token.
+    tag_counts: Vec<(String, usize)>,
 }
 
 /// Splits a filter buffer into completed tokens and the trailing token still being typed.
@@ -441,11 +443,29 @@ impl App {
     /// Filter mode's tag discovery: distinct tags with row counts, highest first, then by name.
     pub(crate) fn filter_hint(&self) -> Option<Vec<(&str, usize)>> {
         let session = self.filter_session.as_ref()?;
-        let mut counts = self.tag_counts(&session.completed);
-        if let Some(prefix) = &session.preview.trailing_prefix {
-            counts.retain(|(tag, _)| tag.starts_with(prefix.as_str()));
+        let prefix = session.preview.trailing_prefix.as_deref().unwrap_or("");
+        Some(
+            session
+                .tag_counts
+                .iter()
+                .filter(|(tag, _)| tag.starts_with(prefix))
+                .map(|(tag, count)| (tag.as_str(), *count))
+                .collect(),
+        )
+    }
+
+    fn refresh_tag_counts(&mut self) {
+        let Some(session) = &self.filter_session else {
+            return;
+        };
+        let counts = self
+            .tag_counts(&session.completed)
+            .into_iter()
+            .map(|(tag, count)| (tag.to_owned(), count))
+            .collect();
+        if let Some(session) = &mut self.filter_session {
+            session.tag_counts = counts;
         }
-        Some(counts)
     }
 
     /// Tags in rows matching the view, the search, and `filter`, ignoring any preview prefix.
@@ -795,7 +815,9 @@ impl App {
                 trailing_prefix: None,
             },
             completed: self.projection.filter.clone(),
+            tag_counts: Vec::new(),
         });
+        self.refresh_tag_counts();
         self.editor = Some(Editor {
             kind: EditKind::Filter,
             cursor: buffer.len(),
@@ -829,12 +851,17 @@ impl App {
             Some(token) => exact.add(token),
             None => {}
         }
+        let mut recount = false;
         if let Some(session) = &mut self.filter_session {
             session.preview = FilterPreview {
                 exact,
                 trailing_prefix,
             };
+            recount = session.completed != completed;
             session.completed = completed;
+        }
+        if recount {
+            self.refresh_tag_counts();
         }
         self.reconcile_selection();
     }
@@ -1110,6 +1137,7 @@ impl App {
             .unwrap_or(0);
         self.tasks = tasks;
         self.rebuild_order();
+        self.refresh_tag_counts();
         if !self
             .selected
             .is_some_and(|id| self.tasks.task(id).is_some_and(|task| self.matches(task)))
@@ -3256,6 +3284,28 @@ mod filter_tests {
         assert_eq!(app.filter_hint().unwrap(), [("+shtodo", 3), ("+shell", 1)]);
         type_text(&mut app, "x");
         assert!(app.filter_hint().unwrap().is_empty());
+    }
+
+    #[test]
+    fn filter_hint_should_recount_after_refresh_and_after_erasing_a_completed_token() {
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("a +shtodo @x").unwrap();
+        list.add("b +shell").unwrap();
+        let mut app = App::new(list.clone());
+        app.apply(Action::EditFilter).unwrap();
+        type_text(&mut app, "@x +sh");
+        assert_eq!(app.filter_hint().unwrap(), [("+shtodo", 1)]);
+        list.add("c +shine @x").unwrap();
+        assert!(app.reconcile(list));
+        assert_eq!(app.filter_hint().unwrap(), [("+shine", 1), ("+shtodo", 1)]);
+        for _ in "@x +sh".chars() {
+            app.apply(Action::DeleteBeforeCursor).unwrap();
+        }
+        type_text(&mut app, "+sh");
+        assert_eq!(
+            app.filter_hint().unwrap(),
+            [("+shell", 1), ("+shine", 1), ("+shtodo", 1)]
+        );
     }
 
     #[test]
