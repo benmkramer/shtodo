@@ -21,7 +21,9 @@ Due-date filters, `--sort due`, the JSON `due` field, and relative-word
 rewriting are measured in the
 [due dates shell comparison](./benchmarks/2026-10-21-due-dates-cli-comparison.md).
 The unreleased TUI priority styling, sort, and filter editor are measured in
-the [tags and priority TUI comparison](./benchmarks/2026-10-21-tags-and-priority-tui-comparison.md).
+the [tags and priority TUI comparison](./benchmarks/2026-10-21-tags-and-priority-tui-comparison.md),
+and TUI due-date styling, Due order, and due filter tokens in the
+[due dates TUI comparison](./benchmarks/2026-10-22-due-dates-tui-comparison.md).
 The current measurements
 use a local beta.3 release build with the unreleased concurrency implementation.
 The fuller lifecycle commands and TUI behavior are measured in a separate
@@ -159,6 +161,19 @@ always-present `due` field, which adds 9% to 12% to the output bytes. The
 first clock read in `add "x due:today"` and `list --due today` is not
 measurable against the same build's plain `add` and `--due DATE`. Due filters
 and `--sort due` are recorded for information.
+
+## Due dates TUI: October 22, 2026
+
+The [paired TUI comparison](./benchmarks/2026-10-22-due-dates-tui-comparison.md)
+measures due-token styling, `s` cycling to Due order, and `due:` filter tokens
+against the PR 1 merge at `00343c6`, in two runs with different seeds. At
+10,000 records, Manual-order completion-to-frame is -0.7% to -2.1% against the
+control on the mixed and dated fixtures. Due order is +4.1% to +4.6% (+0.63 to
++0.69 ms) against Priority order on the same build, inside the 5% bound; the
+cost is the due parse in the sorted-order rebuild after each change. The
+Filter keystroke that completes `due:today` is 9.9% to 11.7% faster than a `/`
+keystroke that shows the same rows. Idle refresh keeps zero terminal output,
+and idle CPU at 10,000 records is 0.1066% for the control and 0.1071% for this change, of one core.
 
 ## Tags and priority TUI: October 21, 2026
 

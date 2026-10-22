@@ -29,8 +29,19 @@ All notable changes to shtodo are documented in this file.
 - JSON task objects include `due`, a `"YYYY-MM-DD"` string or `null`.
 - TUI rows style the priority marker and tags in place: bold priority, cyan
   `+project`, magenta `@context`.
-- TUI `s` toggles priority order, sharing the order of `list --sort priority`.
-  `J`/`K` reorder only in manual order and explain how to switch.
+- TUI `s` cycles manual, priority, and due order, sharing the orders of
+  `list --sort priority` and `list --sort due`. `J`/`K` reorder only in manual
+  order and otherwise show `Reorder needs manual order; s cycles`.
+- TUI rows style the first valid due token in place: red and bold when an
+  open task is overdue, yellow and bold when it is due today, blue otherwise.
+  The status marker of an open overdue or due-today task takes the same color,
+  so the state survives a clipped row. Done and Trash rows use blue only.
+- TUI filter editor accepts `due:WHEN` tokens with every `--due` value, such
+  as `due:overdue due:today`, ORed together and ANDed with tags and
+  priorities. In-progress due tokens are left out of the preview, and due
+  tokens are never completed by Enter.
+- The TUI notices a new local date within a second, restyles rows, and moves
+  `today`, `tomorrow`, and `overdue` in the filter to it, with one redraw.
 - TUI `f` opens a tag and priority filter editor with a live prefix preview,
   a hint line listing tags in the current rows with counts, and Enter
   completion of a unique tag prefix. The status line shows the accepted filter
@@ -40,6 +51,10 @@ All notable changes to shtodo are documented in this file.
 
 - TUI Esc in Normal mode clears one layer per press: the accepted search,
   then the filter.
+- TUI `s` (`toggle_sort`) cycles three orders instead of toggling priority
+  order, and its description is `cycle sort order`. The reorder notice now
+  reads `Reorder needs manual order; s cycles`, naming the configured key, and
+  an invalid filter token names `due:WHEN`. The config name is unchanged.
 - The new `toggle_sort` (`s`) and `edit_filter` (`f`) defaults yield to
   existing Normal bindings on those keys; such configs load unchanged and the
   new action is unbound until given a free key.

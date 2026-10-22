@@ -185,9 +185,10 @@ Filter mode, opened with Normal `edit_filter`, also shares every binding in
 `[keybindings.insert]`; there is no `[keybindings.filter]` table. `commit_edit`
 accepts the filter, completing a unique tag prefix, and `cancel_edit` restores
 the previous filter and selection. The Filter footer shows the effective keys
-with filter-specific accept/cancel hints. Normal `toggle_sort` switches between
-manual and priority order. Filter, sort, and the tag hint line are never stored
-in configuration or task snapshots.
+with filter-specific accept/cancel hints. Normal `toggle_sort` cycles manual,
+priority, and due order, then manual again; its config name is unchanged, so
+existing configurations keep working. Filter, sort, and the tag hint line are
+never stored in configuration or task snapshots.
 
 ### Trash
 
