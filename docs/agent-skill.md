@@ -45,6 +45,7 @@ Use $shtodo to show my global tasks.
 Use $shtodo to add "Review the release notes" to my global list.
 Use $shtodo to show the open tasks for this directory.
 Use $shtodo to show my open +shtodo tasks, highest priority first.
+Use $shtodo to show my overdue tasks and the ones due today, earliest first.
 Use $shtodo to delete task 3 from this directory's list.
 ```
 

@@ -57,6 +57,8 @@ shtodo list --json
 shtodo add "(A) Ship the release +shtodo @laptop"
 shtodo list --open --tag +shtodo --sort priority
 shtodo --json list --priority A-B --search release
+shtodo add "Pay rent due:2026-11-01"
+shtodo list --open --due overdue --due today --sort due
 shtodo --local --json add "Capture a task for an agent"
 shtodo delete 3
 shtodo --local delete 3
@@ -84,6 +86,13 @@ Priorities and tags use todo.txt syntax inside the task text: a leading
 are tags. `shtodo list` filters with `--open` or `--done`, `--tag`,
 `--priority`, and `--search`, and `--sort priority` lists `A` to `Z` first.
 See [priority and tags](./docs/usage.md#priority-and-tags).
+
+Due dates use the todo.txt `due:YYYY-MM-DD` token in the same text.
+`due:today` and `due:tomorrow` are rewritten to the local date when a task is
+added or edited, so saved text always holds a real date. `shtodo list --due`
+takes `today`, `tomorrow`, `overdue`, `none`, `any`, a date, or a range such
+as `2026-10-01..2026-10-31`, and `--sort due` lists the earliest date first.
+See [due dates](./docs/usage.md#due-dates).
 
 For agents and other programs, `--json` returns a versioned object with the
 scope and task data. It supports `list` and every shell task mutation;
@@ -133,9 +142,10 @@ example prompts.
 ## Scope
 
 Version one is intentionally local and narrow. It does not include accounts,
-synchronization, sharing, recurring tasks, reminders, dates, subtasks, or
-multiple named lists. Priorities and tags are derived from todo.txt tokens in
-the task text rather than stored separately, so they need no migration.
+synchronization, sharing, recurring tasks, reminders, times of day, start
+dates, subtasks, or multiple named lists. Priorities, tags, and due dates are
+derived from todo.txt tokens in the task text rather than stored separately,
+so they need no migration.
 The TUI supports text search and All/Open/Done views.
 See [Version-one limits] for the complete scope and deferred features.
 

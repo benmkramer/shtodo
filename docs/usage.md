@@ -103,6 +103,49 @@ shtodo edit 3 "(B) Fix the bug +shtodo"   # change the priority, drop @laptop
 To change a priority or tag, edit the text. There is no separate priority
 command.
 
+### Due dates
+
+A due date is also written in the task text, as the todo.txt token
+`due:YYYY-MM-DD`. Like priority and tags, it is derived when needed and never
+stored separately, so older binaries read the same lists.
+
+```sh
+shtodo add "(A) Pay rent due:2026-11-01 +home"
+shtodo add "Call the bank due:today"        # saved as due:2026-10-21 on that day
+shtodo edit 3 "Pay rent due:2026-12-01"     # change the date by editing the text
+```
+
+- A **due token** is a word that starts with the lowercase key `due:`,
+  anywhere in the text, followed by exactly `YYYY-MM-DD` in ASCII digits
+  naming a real calendar day (years `0000` to `9999`, with leap years).
+  Trailing `.`, `,`, `;`, `:`, `!`, and `?` are not part of the token, as for
+  tags, so `Pay due:2026-11-01.` is due November 1.
+- The task's due date is the **first** valid due token. Later due tokens,
+  valid or not, are ignored.
+- Anything else is plain text and gives no due date: `due:` alone,
+  `due: 2026-11-01`, `Due:` or `DUE:`, `overdue:2026-11-01`,
+  `+due:2026-11-01`, `due:2026-1-5`, `due:26-10-21`, `due:2026/10/21`,
+  `due:2026-02-30`, `due:2026-11-01T09:00`, and `due:2026-11-01)`.
+- **Relative words.** When a task is added or edited, in the shell or the
+  TUI, `due:today` and `due:tomorrow` (any ASCII case, with optional trailing
+  punctuation) are rewritten to the date, so saved text always holds an
+  absolute date that never changes meaning. Every relative token is
+  rewritten, while only the first valid token is the due date:
+  `x due:today due:tomorrow` is saved as `x due:2026-10-21 due:2026-10-22`
+  and is due 2026-10-21. Other words such as `due:fri` or `due:+3d` stay plain
+  text. An edit whose rewritten text equals the current text reports
+  `Unchanged` and writes nothing. Older shtodo versions do not rewrite these
+  words; a `due:today` they save stays plain text and never becomes a date.
+- **Today** is the calendar date in the time zone of the shtodo process. It
+  follows `TZ` (a zone name such as `America/New_York`, `:America/New_York`,
+  a zone file path, or a POSIX rule such as `<-05>5`) and otherwise the
+  system zone. An unknown or empty `TZ` uses UTC. The TUI reads the date when
+  it starts and again each second with its refresh, and uses the date it has
+  when you press Enter.
+- Completing a task keeps its due token. A done task is never overdue.
+- Search still matches the full literal text, so `/due:2026-11` finds those
+  tokens as text.
+
 ### Filtering and sorting the list
 
 `shtodo list` accepts filters after `list`, in any order. They combine with
@@ -113,26 +156,54 @@ AND across kinds:
 | `--open` or `--done` | Only open or only done tasks; at most one of them |
 | `--tag <TAG>` | Tasks with that exact `+project` or `@context` tag. Repeat to require every listed tag |
 | `--priority <P>` | Tasks whose priority is the letter `A` to `Z`, in the inclusive range `A-C`, or `none` for no priority. ASCII case-insensitive (`a-c`, `NONE`). Repeat to accept any of them |
+| `--due <WHEN>` | Tasks by [due date](#due-dates); WHEN is listed below. Repeat to accept any of them |
 | `--search <TEXT>` | Tasks whose full text contains TEXT, ignoring case, like TUI `/` search. At most once |
-| `--sort priority` | All matching tasks ordered `A` to `Z`, then tasks without a priority. The value is case-sensitive: only `priority` is accepted. At most once |
+| `--sort priority` | All matching tasks ordered `A` to `Z`, then tasks without a priority. At most one `--sort` |
+| `--sort due` | All matching tasks by due date, earliest first, then tasks without one. Equal dates are ordered by priority, then saved order. At most one `--sort` |
+
+`--sort` values are case-sensitive: only `priority` and `due` are accepted.
+`--due` takes one of these values, with ASCII case-insensitive words:
+
+| WHEN | Shows |
+| --- | --- |
+| `today`, `tomorrow` | Tasks due on that local date |
+| `overdue` | Open tasks due before today; never done tasks |
+| `YYYY-MM-DD` | Tasks due on that date |
+| `START..END` | Tasks due from START to END, inclusive. Each bound is a date, `today`, or `tomorrow`, and one may be omitted: `..2026-10-31`, `today..` |
+| `none` | Tasks without a valid due token |
+| `any` | Tasks with a valid due token |
+
+There is no `week` value; write the range you mean, such as
+`--due today..2026-10-28`. A range whose order is known to be reversed, such as
+`2026-10-22..2026-10-21` or `tomorrow..today`, is an error. A range that mixes
+a date and a relative word, such as `2026-10-25..today`, is accepted and
+matches nothing on days when it is reversed. `--open --due overdue` is the
+same as `--due overdue`, and `--done --due overdue` is always empty; use
+`--done --due ..2026-10-20` for done tasks that were due by a date.
 
 ```sh
 shtodo list --open --tag +shtodo
 shtodo list --tag +shtodo --tag @laptop --priority A-B
 shtodo --local list --priority none --search "release notes"
 shtodo list --open --sort priority
+shtodo list --open --due overdue --due today --sort due
+shtodo list --due 2026-10-01..2026-10-31 --tag +home
 ```
 
 Without `--sort`, filtered output keeps the saved order and the same
 `ID  state  text` lines. `--sort priority` filters first and then sorts; tasks
-with the same priority, and tasks without one, keep their saved order. It is
-the only sort; reordering stays in the TUI. A `--tag` value is normalized like
+with the same priority, and tasks without one, keep their saved order.
+`--sort due` works the same way with dates. These are the only sorts;
+reordering stays in the TUI. Only relative `--due` values (`today`,
+`tomorrow`, `overdue`, or a range with one of them) read the date; absolute
+dates, `none`, `any`, and `--sort due` never do. A `--tag` value is normalized like
 a derived tag, so `--tag +shtodo.` means `--tag +shtodo`. A filter that
 matches nothing prints nothing and exits 0.
 
 Each flag value is the next argument, exactly as given, even if it starts with
 `-`. So `shtodo list --search --json` searches for the text `--json`, and
-`shtodo list --sort --json` fails because `--json` is not a sort. Put `--json`
+`shtodo list --sort --json` and `shtodo list --due --json` fail because
+`--json` is not a value they accept. Put `--json`
 before `list` (`shtodo --json list --search ...`) to avoid this.
 `--flag=value` forms are not supported.
 
@@ -143,19 +214,24 @@ error code is `invalid_arguments`:
 | Case | Message |
 | --- | --- |
 | Unknown flag, `--flag=value`, or extra argument | `unsupported shtodo arguments: "--wat"` |
-| `--tag`, `--priority`, or `--search` with no value | `--tag requires a value` |
+| `--tag`, `--priority`, `--due`, or `--search` with no value | `--tag requires a value` |
 | `--tag work`, `--tag +`, `--tag "+a b"` | `invalid --tag "work"; expected +project or @context` |
 | `--priority AA`, `--priority C-A`, `--priority ""` | `invalid --priority "AA"; expected a letter A-Z, a range such as A-C, or none` |
 | Empty, whitespace-only, or multiline `--search` | `--search requires non-empty single-line text` |
 | `--open` with `--done` | `--open and --done cannot be combined` |
-| `--sort` with no value | `--sort requires a value; expected priority` |
-| `--sort manual`, `--sort x`, `--sort ""`, `--sort --json` | `invalid --sort "manual"; expected priority` |
-| A repeated `--open`, `--done`, `--search`, or `--sort` | `--search may only be specified once` |
+| `--due soon`, `--due week`, `--due ""`, `--due ..`, `--due 2026-02-30`, `--due due:today`, `--due --json`, `--due tomorrow..today` | `invalid --due "soon"; expected today, tomorrow, overdue, none, any, YYYY-MM-DD, or START..END` |
+| `--sort` with no value | `--sort requires a value; expected priority or due` |
+| `--sort manual`, `--sort Due`, `--sort ""`, `--sort --json` | `invalid --sort "manual"; expected priority or due` |
+| A repeated `--open`, `--done`, `--search`, or `--sort`, including `--sort priority --sort due` | `--search may only be specified once` |
 | A filter value that is not UTF-8 | `invalid --tag value; expected UTF-8` |
 
 Empty values are rejected on purpose, so an unset shell variable cannot
 quietly turn a filter into "everything". An older shtodo that does not know a
-filter flag also fails with a usage error rather than listing every task.
+filter flag also fails with a usage error rather than listing every task:
+a version without due dates rejects `--due` with
+`unsupported shtodo arguments: "--due"` and `--sort due` with
+`invalid --sort "due"; expected priority`. A repeated identical `--due` value
+is accepted and counted once.
 
 `shtodo delete <ID>` and `shtodo --local delete <ID>` soft-delete exactly one
 task from the selected scope. IDs are positive integers local to their scope,
@@ -228,10 +304,10 @@ stderr and exit status 0. Listing an empty or never-created scope returns an
 empty `tasks` array and creates no storage. JSON listing has the same saved
 order, inclusion of open and done tasks, and omission of tombstones as text
 listing. List filters and `--sort priority` select and order the same task
-objects; the reply does not repeat the filter:
+objects, as do `--due` and `--sort due`; the reply does not repeat the filter:
 
 ```json
-{"schema_version":1,"command":"list","scope":{"kind":"global"},"tasks":[{"id":1,"text":"(A) Fix the bug +shtodo @laptop","state":"open","deleted":false,"priority":"A","tags":["+shtodo","@laptop"]},{"id":2,"text":"Run the tests","state":"open","deleted":false,"priority":null,"tags":[]}]}
+{"schema_version":1,"command":"list","scope":{"kind":"global"},"tasks":[{"id":1,"text":"(A) Fix the bug +shtodo @laptop due:2026-11-01","state":"open","deleted":false,"priority":"A","tags":["+shtodo","@laptop"],"due":"2026-11-01"},{"id":2,"text":"Run the tests","state":"open","deleted":false,"priority":null,"tags":[],"due":null}]}
 ```
 
 Mutation results contain the task from the saved transaction and a `changed`
@@ -240,7 +316,7 @@ and restoration of live tasks return `changed: false` without rewriting the
 snapshot. An add always creates a new task:
 
 ```json
-{"schema_version":1,"command":"done","scope":{"kind":"global"},"task":{"id":1,"text":"Fix the bug","state":"done","deleted":false,"priority":null,"tags":[]},"changed":true}
+{"schema_version":1,"command":"done","scope":{"kind":"global"},"task":{"id":1,"text":"Fix the bug","state":"done","deleted":false,"priority":null,"tags":[],"due":null},"changed":true}
 ```
 
 The output schema is independent of the on-disk snapshot schema. Its fields
@@ -256,7 +332,7 @@ are:
 | `changed` | Whether the mutation changed the saved task list. |
 
 Each task has a positive numeric `id`, literal `text`, `state` (`open` or
-`done`), boolean `deleted`, `priority`, and `tags`. Deleting a task preserves
+`done`), boolean `deleted`, `priority`, `tags`, and `due`. Deleting a task preserves
 its completion state. Retain scope alongside IDs. Task text is data, including
 quotes, backslashes, Unicode, and tabs; parse it with a JSON library. Clients
 should check `schema_version` and tolerate additional fields within that
@@ -266,19 +342,25 @@ version.
 | --- | --- |
 | `priority` | The [derived priority](#priority-and-tags) as a one-character string `"A"` to `"Z"`, or `null`. Never the `(A)` marker or a number. |
 | `tags` | The derived tags as strings with their sigil and without trailing `.,;:!?`, in text order, without duplicates; `[]` when there are none. |
+| `due` | The [derived due date](#due-dates) as a `"YYYY-MM-DD"` string, or `null` when the text has no valid due token. Never the `due:` key, a relative word, or a time. |
 
-Both are always present on every task object, including deleted tasks in
+All three are always present on every task object, including deleted tasks in
 mutation replies, and `text` still holds the full literal text, tokens
-included. To find the tags in use, read them from `list`, for example
+included. An `add` or `edit` reply shows the saved text after `due:today` and
+`due:tomorrow` are rewritten, with its `due`, so a client can check the date
+it wrote; `"due": null` after writing a `due:` token means the token was not a
+valid date. There is no `overdue` field and no echoed "today", because both
+would depend on the reader's clock and zone: compare `due` with your own
+date, or ask shtodo with `--due overdue`. To find the tags in use, read them from `list`, for example
 `shtodo --json list | jq '[.tasks[].tags[]] | group_by(.) | map({tag: .[0], count: length})'`.
 
 Schema policy: new task metadata is always added as an always-present field,
 nullable or an array, and never signaled by an absent field. Adding such a
-field does not change `schema_version`. The version changes only when an
-existing field changes meaning, a field is removed, or an enumerated value
-gains members clients must handle, such as a third `state`. The field names
-`due` (a string or `null`) and `parent_id` (a number or `null`) are reserved
-for planned features and are not emitted yet.
+field does not change `schema_version`; `due` was added this way in version
+1. The version changes only when an existing field changes meaning, a field is
+removed, or an enumerated value gains members clients must handle, such as a
+third `state`. The field name `parent_id` (a number or `null`) is reserved for
+a planned feature and is not emitted yet.
 
 Failures write one JSON object and a newline to stderr, leave stdout empty,
 and exit nonzero. Error messages are for people; branch on `error.code`:
@@ -609,9 +691,12 @@ may allow an edit. This is not a record of every intervening task event.
 
 Version one is intentionally local and narrow. It does not include accounts,
 synchronization, network access, sharing or collaboration, recurring tasks,
-reminders, notifications, dates or due dates, subtasks, or multiple named
-lists. Priorities and tags exist only as [todo.txt tokens in the task
-text](#priority-and-tags), with shell `list` filters and `--sort priority`.
+reminders, notifications, times of day, start or threshold dates, subtasks,
+or multiple named lists. Priorities, tags, and due dates exist only as
+todo.txt tokens in the task text ([priority and tags](#priority-and-tags),
+[due dates](#due-dates)), with shell `list` filters, `--sort priority`, and
+`--sort due`. Due dates are calendar days; relative input is limited to
+`due:today` and `due:tomorrow`.
 It has no sidebar, mouse interaction, Git-root
 discovery for local scope, runtime plugins or extensions, custom themes,
 import, export, bulk commands, permanent deletion, or bulk restoration.
