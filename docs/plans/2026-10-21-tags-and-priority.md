@@ -570,10 +570,12 @@ view, search, or filter").
 - Shell `--sort priority`: one `Vec<&Task>` of the filtered rows and one
   stable sort keyed by a constant-time `priority` check. Only that flag pays
   this cost.
-- TUI Priority order: collect the visible tasks, then sort them with the same
-  `projection::sort_by_priority`. Cache this `Vec<TaskId>` on `App` and
-  invalidate it on `reconcile`, filter, view, query, or sort changes, so
-  navigation and rendering do not re-sort every keypress.
+- TUI Priority order: sort every live task by the same priority key as
+  `projection::sort_by_priority` (stable, canonical ties) and cache their
+  canonical indices on `App`. The cache is rebuilt only on `reconcile` and on
+  a sort toggle. View, search, and filter are applied on top of it at display
+  time, and a stable sort's subset stays sorted, so no stale order can be
+  shown and navigation and rendering do not re-sort every keypress.
 - Filter mode adds the preview predicate and the hint line's tag scan per
   keystroke; neither runs outside Filter mode.
 - Row styling adds a few spans per row, and `render_content` builds an item for
