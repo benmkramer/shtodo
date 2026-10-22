@@ -42,6 +42,19 @@ dated text.
 The binary size gate ran at the start of Stage 1 and is recorded in the plan's
 validation record.
 
+Note added after review: these timings measure `7283b8c`. Three later review
+fixes were not re-timed. Two change only `clock::today`, which now converts
+`SystemTime` with `Timestamp::try_from` instead of calling `Timestamp::now()`
+and clamps an out-of-range clock instead of panicking. The third makes the TUI
+read the date on its own deadline. Dropping `Timestamp::now()` and its panic
+path also made the binary smaller. At `52e817f` the macOS release binary is
+1,350,144 bytes, +99,504 bytes (97.2 KiB, +8.0%) over the control's
+1,250,640, down from +215,376 bytes at `7283b8c`. The
+`x86_64-unknown-linux-musl` binary is 1,563,928 bytes, +94,304 bytes
+(92.1 KiB, +6.4%) over 1,469,624. Clean-archive builds of `7283b8c`,
+`f321ba8`, and `d13dcf8` on the same host gave 1,466,016, 1,350,144, and
+1,350,144 bytes, so the drop came with `f321ba8`.
+
 ## Due filters and sort, for information
 
 The control has no `--due` or `--sort due`, so these run on the current binary
