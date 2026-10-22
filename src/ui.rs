@@ -393,28 +393,35 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
             editor_window(editor.buffer(), editor.cursor(), editor_width);
         (editor.kind(), visible, cursor_column)
     });
-    let mut selected_index = visible_tasks
-        .iter()
-        .position(|task| Some(task.id()) == app.selected());
+    let detached = editor_view.is_some_and(|(kind, _, _)| match kind {
+        EditKind::Add => true,
+        EditKind::Edit(id) => !visible_tasks.iter().any(|task| task.id() == id),
+        EditKind::Search | EditKind::Filter => false,
+    });
+    let selected_index = if detached {
+        Some(visible_tasks.len())
+    } else {
+        visible_tasks
+            .iter()
+            .position(|task| Some(task.id()) == app.selected())
+    };
+    // Style only the rows the list can show: the window a fresh `ListState` scrolls to, which
+    // ends at the selected row once it is past the first screen.
+    let rows = usize::from(area.height);
+    let start = selected_index.map_or(0, |index| (index + 1).saturating_sub(rows));
     let mut items = visible_tasks
         .iter()
+        .skip(start)
+        .take(rows)
         .map(|task| match editor_view {
             Some((EditKind::Edit(id), visible, _)) if task.id() == id => editor_item(visible),
             _ => task_item(task),
         })
         .collect::<Vec<_>>();
-
-    if let Some((kind, visible, _)) = editor_view {
-        let detached = match kind {
-            EditKind::Add => true,
-            EditKind::Edit(id) => !visible_tasks.iter().any(|task| task.id() == id),
-            EditKind::Search | EditKind::Filter => false,
-        };
-        if detached {
-            selected_index = Some(items.len());
-            items.push(editor_item(visible));
-        }
+    if detached && let Some((_, visible, _)) = editor_view {
+        items.push(editor_item(visible));
     }
+    let selected_index = selected_index.map(|index| index - start);
 
     let list = List::new(items)
         .highlight_symbol("› ")
@@ -1190,6 +1197,46 @@ mod tests {
 
         assert!(text.contains("task 9"));
         assert!(!text.contains("task 0"));
+    }
+
+    #[test]
+    fn list_should_scroll_the_same_window_for_every_selection_and_detached_add() {
+        let mut list = TaskList::new(ListScope::Global);
+        for index in 0..30 {
+            list.add(&format!("(A) task {index} +p")).unwrap();
+        }
+        let mut app = App::new(list);
+        // At 40x10 the list has rows 2 to 8; the selection scrolls into the last row.
+        let rows = 2..9_u16;
+        let height = rows.len();
+        for selected in 0..30_usize {
+            let buffer = render_app(&app, 40, 10);
+            let first = (selected + 1).saturating_sub(height);
+            for (offset, row) in rows.clone().enumerate() {
+                let marker = if first + offset == selected {
+                    "› "
+                } else {
+                    "  "
+                };
+                assert_eq!(
+                    buffer_row(&buffer, 40, row).trim_end(),
+                    format!("{marker}○ (A) task {} +p", first + offset),
+                    "selection {selected}, row {row}"
+                );
+            }
+            app.apply(Action::MoveDown).unwrap();
+        }
+        app.apply(Action::StartAdd).unwrap();
+        type_text(&mut app, "new");
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &Keymap::defaults()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer_row(buffer, 40, 2).trim_end(), "  ○ (A) task 24 +p");
+        assert_eq!(buffer_row(buffer, 40, 8).trim_end(), "› ○ new");
+        terminal.backend_mut().assert_cursor_position((7, 8));
     }
 
     #[test]
