@@ -1,7 +1,7 @@
 //! Shared transient projection for rendering and latest-snapshot reorder checks.
 use crate::{
     metadata::{self, TaskFilter},
-    task::{MoveDirection, Task, TaskId, TaskList},
+    task::{MoveDirection, Task, TaskId, TaskList, adjacent_sibling},
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -104,24 +104,9 @@ pub(crate) fn adjacent(
     if projection.is_unfiltered() {
         return list.adjacent_visible(id, direction);
     }
-    let mut previous = None;
-    let mut found = false;
-    for task in list
-        .visible_tasks()
-        .filter(|task| matches(task, projection))
-    {
-        if found {
-            return Some(task.id());
-        }
-        if task.id() == id {
-            match direction {
-                MoveDirection::Up => return previous,
-                MoveDirection::Down => found = true,
-            }
-        }
-        previous = Some(task.id());
-    }
-    None
+    adjacent_sibling(list.visible_tasks(), id, direction, |task| {
+        matches(task, projection)
+    })
 }
 
 /// Display order for a projection. Storage and reorder guards never need it.
@@ -250,6 +235,47 @@ mod tests {
             Projection::default().adjacent(&list, first, MoveDirection::Down),
             Some(hidden)
         );
+    }
+
+    #[test]
+    fn adjacent_should_move_only_among_siblings_filtered_and_unfiltered() {
+        let mut list = TaskList::new(ListScope::Global);
+        let first = list.add("first +x").unwrap();
+        let second = list.add("second").unwrap();
+        let third = list.add("third +x").unwrap();
+        let child_a = list.add_subtask(first, "child a +x").unwrap();
+        let child_b = list.add_subtask(first, "child b").unwrap();
+        let child_c = list.add_subtask(first, "child c +x").unwrap();
+        let other = list.add_subtask(second, "other child +x").unwrap();
+        // Canonical order: first [a, b, c], second [other], third.
+        let unfiltered = Projection::default();
+        let tagged = Projection {
+            filter: filter(&["+x"]),
+            ..Projection::default()
+        };
+        let cases = [
+            (&unfiltered, first, MoveDirection::Down, Some(second)),
+            (&unfiltered, second, MoveDirection::Up, Some(first)),
+            (&unfiltered, child_a, MoveDirection::Down, Some(child_b)),
+            (&unfiltered, child_a, MoveDirection::Up, None),
+            (&unfiltered, child_c, MoveDirection::Down, None),
+            (&unfiltered, other, MoveDirection::Up, None),
+            (&unfiltered, other, MoveDirection::Down, None),
+            (&tagged, first, MoveDirection::Down, Some(third)),
+            (&tagged, third, MoveDirection::Up, Some(first)),
+            (&tagged, child_a, MoveDirection::Down, Some(child_c)),
+            (&tagged, child_c, MoveDirection::Up, Some(child_a)),
+            (&tagged, child_c, MoveDirection::Down, None),
+            (&tagged, other, MoveDirection::Up, None),
+            (&tagged, child_b, MoveDirection::Down, None),
+        ];
+        for (projection, id, direction, expected) in cases {
+            assert_eq!(
+                projection.adjacent(&list, id, direction),
+                expected,
+                "{id:?} {direction:?}"
+            );
+        }
     }
 
     #[test]

@@ -164,7 +164,16 @@ fn error_details(error: &Report) -> (&'static str, Option<u64>) {
     match error.downcast_ref::<task::ListError>() {
         Some(task::ListError::InvalidText) => ("invalid_task_text", None),
         Some(task::ListError::TaskNotFound(id)) => ("task_not_found", Some(id.get())),
-        Some(task::ListError::TaskDeleted(id)) => ("task_deleted", Some(id.get())),
+        Some(
+            task::ListError::TaskDeleted(id)
+            // The parent to restore first, which may differ from the requested ID.
+            | task::ListError::ParentDeleted(id),
+        ) => ("task_deleted", Some(id.get())),
+        Some(task::ListError::InvalidParent(
+            task::ParentError::SelfParent(id)
+            | task::ParentError::ParentIsSubtask(id)
+            | task::ParentError::HasSubtasks(id),
+        )) => ("invalid_parent", Some(id.get())),
         _ => ("command_failed", None),
     }
 }
