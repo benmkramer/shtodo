@@ -118,15 +118,83 @@ pub(crate) enum TaskOrder {
     Due,
 }
 
+/// Sorts rows that are in canonical order as a tree. A group is a root followed by those of
+/// its subtasks among the rows; a subtask whose parent is not among the rows is a group of its
+/// own. Groups sort by their first row's key and subtasks sort within their group; the sort is
+/// stable, so equal keys keep canonical order. Each row's key is computed once.
+pub(crate) fn sort_tree<K: Clone + Ord>(rows: &mut [&Task], key: impl Fn(&Task) -> K) {
+    sort_tree_by(rows, |task| task, key);
+}
+
+/// `sort_tree` over rows that carry a task, such as the TUI's canonical indices.
+pub(crate) fn sort_tree_by<'a, T: Copy, K: Clone + Ord>(
+    rows: &mut [T],
+    task_of: impl Fn(T) -> &'a Task,
+    key: impl Fn(&Task) -> K,
+) {
+    let mut head: Option<(TaskId, usize, K)> = None;
+    let mut keyed = Vec::with_capacity(rows.len());
+    for (position, row) in rows.iter().enumerate() {
+        let task = task_of(*row);
+        let own = key(task);
+        let sort_key = match (task.parent_id(), &head) {
+            (Some(parent), Some((id, group, group_key))) if *id == parent => {
+                (group_key.clone(), *group, Some(own))
+            }
+            _ => {
+                head = Some((task.id(), position, own.clone()));
+                (own, position, None)
+            }
+        };
+        keyed.push((sort_key, position));
+    }
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    let sorted = keyed
+        .iter()
+        .map(|(_, position)| rows[*position])
+        .collect::<Vec<_>>();
+    rows.copy_from_slice(&sorted);
+}
+
+/// A `list` row; `indented` only when its parent was printed just above its group.
+pub(crate) struct ListRow<'a> {
+    pub(crate) task: &'a Task,
+    pub(crate) indented: bool,
+}
+
+/// Streams matching tasks in tree order with O(1) state: canonical order, or `sort_tree`'s.
+pub(crate) fn list_rows<'a>(
+    tasks: impl Iterator<Item = &'a Task>,
+    matches: impl Fn(&Task) -> bool,
+) -> impl Iterator<Item = ListRow<'a>> {
+    let mut printed_root = None;
+    tasks.filter_map(move |task| {
+        let matched = matches(task);
+        match task.parent_id() {
+            None => {
+                printed_root = matched.then_some(task.id());
+                matched.then_some(ListRow {
+                    task,
+                    indented: false,
+                })
+            }
+            Some(parent) => matched.then_some(ListRow {
+                task,
+                indented: printed_root == Some(parent),
+            }),
+        }
+    })
+}
+
 /// Priority order's sort key: `A` to `Z`, then no priority.
 pub(crate) fn priority_key(task: &Task) -> (bool, Option<metadata::Priority>) {
     let priority = metadata::priority(task.text());
     (priority.is_none(), priority)
 }
 
-/// Stable: `A` to `Z`, then no priority; equal keys keep canonical order.
+/// Stable: `A` to `Z`, then no priority; equal keys keep canonical order. Sorted as a tree.
 pub(crate) fn sort_by_priority(tasks: &mut [&Task]) {
-    tasks.sort_by_key(|task| priority_key(task));
+    sort_tree(tasks, priority_key);
 }
 
 type DueKey = (
@@ -141,9 +209,9 @@ pub(crate) fn due_key(task: &Task) -> DueKey {
     (due.is_none(), due, priority_key(task))
 }
 
-/// Stable, and parses each task once: equal keys keep canonical order.
+/// Stable, and parses each task once: equal keys keep canonical order. Sorted as a tree.
 pub(crate) fn sort_by_due(tasks: &mut [&Task]) {
-    tasks.sort_by_cached_key(|task| due_key(task));
+    sort_tree(tasks, due_key);
 }
 
 #[cfg(test)]
@@ -315,6 +383,98 @@ mod tests {
             Some(done_late)
         );
         assert_ne!(future, late);
+    }
+
+    /// Tasks with `(id, parent, text)`, added in canonical order by `add` and `add_subtask`.
+    fn tree(rows: &[(u64, Option<u64>, &str)]) -> TaskList {
+        let mut list = TaskList::new(ListScope::Global);
+        for (id, parent, text) in rows {
+            let added = match parent {
+                None => list.add(text),
+                Some(parent) => {
+                    list.add_subtask(TaskId::from_shell_integer(*parent).unwrap(), text)
+                }
+            }
+            .unwrap();
+            assert_eq!(added.get(), *id);
+        }
+        list
+    }
+
+    fn sorted_tree(tasks: &[&Task]) -> Vec<u64> {
+        let mut rows = tasks.to_vec();
+        sort_tree(&mut rows, priority_key);
+        ids(rows.into_iter())
+    }
+
+    #[test]
+    fn sort_tree_should_sort_groups_by_head_then_subtasks_within_with_canonical_ties() {
+        let list = tree(&[
+            (1, None, "(C) one"),
+            (2, Some(1), "(B) one b"),
+            (3, Some(1), "(A) one a"),
+            (4, None, "(A) four"),
+            (5, Some(4), "plain"),
+            (6, Some(4), "plain too"),
+            (7, None, "(C) seven"),
+            (8, None, "(B) eight, filtered out"),
+            (9, Some(8), "(A) nine"),
+            (10, Some(8), "(C) ten"),
+            (11, None, "(B) eleven"),
+        ]);
+        let live: Vec<&Task> = list.visible_tasks().collect();
+        assert_eq!(sorted_tree(&live), [4, 5, 6, 8, 9, 10, 11, 1, 3, 2, 7]);
+        // 9 and 10 lost their parent to a filter: each heads its own group, so 11 sorts between.
+        let orphans: Vec<&Task> = list
+            .visible_tasks()
+            .filter(|task| task.id().get() >= 9)
+            .collect();
+        assert_eq!(sorted_tree(&orphans), [9, 11, 10]);
+        let with_root: Vec<&Task> = live
+            .iter()
+            .copied()
+            .filter(|task| task.id().get() != 8)
+            .collect();
+        assert_eq!(sorted_tree(&with_root), [4, 5, 6, 9, 11, 1, 3, 2, 7, 10]);
+        assert!(sorted_tree(&[]).is_empty());
+        // A list without subtasks sorts exactly as the flat stable sort did.
+        let flat = tree(&[
+            (1, None, "plain"),
+            (2, None, "(B) b"),
+            (3, None, "(A) a"),
+            (4, None, "(B) b2"),
+        ]);
+        let mut expected: Vec<&Task> = flat.visible_tasks().collect();
+        expected.sort_by_key(|task| priority_key(task));
+        let rows: Vec<&Task> = flat.visible_tasks().collect();
+        assert_eq!(sorted_tree(&rows), ids(expected.into_iter()));
+        let mut due_rows: Vec<&Task> = list.visible_tasks().collect();
+        sort_by_due(&mut due_rows);
+        assert_eq!(due_rows.len(), 11);
+    }
+
+    #[test]
+    fn list_rows_should_indent_only_under_the_printed_parent() {
+        let list = tree(&[
+            (1, None, "one"),
+            (2, Some(1), "one a"),
+            (3, None, "three"),
+            (4, Some(3), "three a"),
+            (5, None, "five"),
+        ]);
+        let rows = |keep: &[u64]| {
+            list_rows(list.visible_tasks(), |task| keep.contains(&task.id().get()))
+                .map(|row| (row.task.id().get(), row.indented))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows(&[1, 2, 3, 4, 5]),
+            [(1, false), (2, true), (3, false), (4, true), (5, false)]
+        );
+        // 4's parent is filtered out, so 4 is not drawn inside 1's group.
+        assert_eq!(rows(&[1, 2, 4]), [(1, false), (2, true), (4, false)]);
+        assert_eq!(rows(&[2, 4]), [(2, false), (4, false)]);
+        assert!(rows(&[]).is_empty());
     }
 
     #[test]

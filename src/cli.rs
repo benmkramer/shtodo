@@ -3,6 +3,7 @@ use std::{error::Error, ffi::OsString, fmt};
 use crate::{
     metadata::{FilterToken, TaskFilter, parse_due_term, parse_filter_token},
     projection::{TaskOrder, TaskView},
+    task::TaskId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,12 +22,16 @@ pub(crate) enum OutputFormat {
 pub(crate) enum Command {
     Run(ScopeChoice),
     Add(ScopeChoice, Option<OsString>, bool),
+    /// `add --parent <ID>`: the parent's raw ID, then the text and `--print-id` as for `Add`.
+    AddSubtask(ScopeChoice, u64, Option<OsString>, bool),
     List(ScopeChoice, ListFilter),
     Delete(ScopeChoice, u64),
     Done(ScopeChoice, u64),
     Reopen(ScopeChoice, u64),
     Edit(ScopeChoice, u64, OsString),
     Restore(ScopeChoice, u64),
+    /// `parent <ID> <PARENT_ID | none>`.
+    Parent(ScopeChoice, u64, Option<u64>),
     Doctor,
     Help,
     Version,
@@ -39,21 +44,58 @@ pub(crate) struct ListFilter {
     pub(crate) filter: TaskFilter,
     pub(crate) search: Option<String>,
     pub(crate) order: TaskOrder,
+    pub(crate) structure: Structure,
+}
+
+/// `list --roots` and `list --parent <ID>`, kept out of `Projection` so the TUI never sees them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Structure {
+    #[default]
+    Any,
+    Roots,
+    Children(TaskId),
+}
+
+impl Structure {
+    pub(crate) fn matches(self, parent: Option<TaskId>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Roots => parent.is_none(),
+            Self::Children(id) => parent == Some(id),
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum CliError {
-    UnsupportedArguments { argument: OsString },
+    UnsupportedArguments {
+        argument: OsString,
+    },
     MissingTaskId,
     MissingTaskText,
-    InvalidTaskId { value: OsString },
+    InvalidTaskId {
+        value: OsString,
+    },
     DuplicateJsonFlag,
     JsonWithPrintId,
     JsonRequiresTaskCommand,
-    MissingFilterValue { flag: &'static str },
-    InvalidFilterValue { flag: &'static str, value: OsString },
+    MissingFilterValue {
+        flag: &'static str,
+    },
+    InvalidFilterValue {
+        flag: &'static str,
+        value: OsString,
+    },
     ConflictingStateFilters,
-    DuplicateListFlag { flag: &'static str },
+    DuplicateListFlag {
+        flag: &'static str,
+    },
+    MissingParentArguments,
+    /// Only the `parent` command's second argument.
+    InvalidParentArgument {
+        value: OsString,
+    },
+    ConflictingStructureFilters,
 }
 
 impl fmt::Display for CliError {
@@ -76,7 +118,7 @@ impl fmt::Display for CliError {
             }
             Self::JsonRequiresTaskCommand => {
                 formatter.write_str(
-                    "--json requires add, list, delete, done, reopen, edit, or restore",
+                    "--json requires add, list, delete, done, reopen, edit, restore, or parent",
                 )?;
             }
             Self::MissingFilterValue { flag: "--sort" } => {
@@ -93,6 +135,7 @@ impl fmt::Display for CliError {
                         "--tag" => "+project or @context",
                         "--priority" => "a letter A-Z, a range such as A-C, or none",
                         "--due" => "today, tomorrow, overdue, none, any, YYYY-MM-DD, or START..END",
+                        "--parent" => "a task ID",
                         _ => "priority or due",
                     };
                     write!(formatter, "invalid {flag} {value:?}; expected {expected}")?;
@@ -103,6 +146,18 @@ impl fmt::Display for CliError {
             }
             Self::DuplicateListFlag { flag } => {
                 write!(formatter, "{flag} may only be specified once")?;
+            }
+            Self::MissingParentArguments => {
+                formatter.write_str("parent requires a task ID and a parent task ID or none")?
+            }
+            Self::InvalidParentArgument { value } => {
+                write!(
+                    formatter,
+                    "invalid parent {value:?}; expected a task ID or none"
+                )?;
+            }
+            Self::ConflictingStructureFilters => {
+                formatter.write_str("--roots and --parent cannot be combined")?;
             }
         }
         write!(formatter, "\n\n{}", usage())
@@ -148,7 +203,7 @@ where
     } else if let Some(command) = values.get(command_index).and_then(|value| value.to_str()) {
         let positional_count = match command {
             "add" | "delete" | "done" | "reopen" | "restore" => 1,
-            "edit" => 2,
+            "edit" | "parent" => 2,
             // Unsupported commands still need structured rejection of --json.
             _ => 0,
         };
@@ -159,6 +214,9 @@ where
                 json_flags += 1;
             } else if values[command_index] == "add" && values[index] == "--print-id" {
                 index += 1;
+            } else if values[command_index] == "add" && values[index] == "--parent" {
+                // The value is verbatim, so `add --parent --json` is an invalid value.
+                index += 2;
             } else {
                 break;
             }
@@ -179,7 +237,9 @@ where
         Err(CliError::DuplicateJsonFlag)
     } else {
         parse_args(values).and_then(|command| match command {
-            Command::Add(_, _, true) => Err(CliError::JsonWithPrintId),
+            Command::Add(_, _, true) | Command::AddSubtask(_, _, _, true) => {
+                Err(CliError::JsonWithPrintId)
+            }
             Command::Run(_) | Command::Doctor | Command::Help | Command::Version => {
                 Err(CliError::JsonRequiresTaskCommand)
             }
@@ -197,31 +257,11 @@ where
     match values.as_slice() {
         [] => Ok(Command::Run(ScopeChoice::Global)),
         [value] if value == "--local" => Ok(Command::Run(ScopeChoice::Local)),
-        [command] if command == "add" => Ok(Command::Add(ScopeChoice::Global, None, false)),
-        [command, flag] if command == "add" && flag == "--print-id" => {
-            Ok(Command::Add(ScopeChoice::Global, None, true))
+        [command, arguments @ ..] if command == "add" => {
+            parse_add_args(ScopeChoice::Global, command, arguments)
         }
-        [command, flag, text] if command == "add" && flag == "--print-id" => {
-            Ok(Command::Add(ScopeChoice::Global, Some(text.clone()), true))
-        }
-        [command, text] if command == "add" => {
-            Ok(Command::Add(ScopeChoice::Global, Some(text.clone()), false))
-        }
-        [local, command] if local == "--local" && command == "add" => {
-            Ok(Command::Add(ScopeChoice::Local, None, false))
-        }
-        [local, command, flag]
-            if local == "--local" && command == "add" && flag == "--print-id" =>
-        {
-            Ok(Command::Add(ScopeChoice::Local, None, true))
-        }
-        [local, command, flag, text]
-            if local == "--local" && command == "add" && flag == "--print-id" =>
-        {
-            Ok(Command::Add(ScopeChoice::Local, Some(text.clone()), true))
-        }
-        [local, command, text] if local == "--local" && command == "add" => {
-            Ok(Command::Add(ScopeChoice::Local, Some(text.clone()), false))
+        [local, command, arguments @ ..] if local == "--local" && command == "add" => {
+            parse_add_args(ScopeChoice::Local, local, arguments)
         }
         [command, arguments @ ..] if command == "list" => Ok(Command::List(
             ScopeChoice::Global,
@@ -250,6 +290,16 @@ where
         [local, command, id] if local == "--local" && is_lifecycle_command(command) => {
             parse_lifecycle_command(ScopeChoice::Local, command, id, None)
         }
+        [command] | [command, _] if command == "parent" => Err(CliError::MissingParentArguments),
+        [local, command] | [local, command, _] if local == "--local" && command == "parent" => {
+            Err(CliError::MissingParentArguments)
+        }
+        [command, id, parent] if command == "parent" => {
+            parse_parent_command(ScopeChoice::Global, id, parent)
+        }
+        [local, command, id, parent] if local == "--local" && command == "parent" => {
+            parse_parent_command(ScopeChoice::Local, id, parent)
+        }
         [command, id, text] if command == "edit" => {
             parse_lifecycle_command(ScopeChoice::Global, command, id, Some(text))
         }
@@ -265,10 +315,62 @@ where
     }
 }
 
+/// `--print-id` and `--parent <ID>` may each come once, in either order, before the optional
+/// text. A repeated flag starts the text, which is verbatim even if it starts with `-`.
+fn parse_add_args(
+    scope: ScopeChoice,
+    first: &OsString,
+    arguments: &[OsString],
+) -> Result<Command, CliError> {
+    let mut print_id = false;
+    let mut parent = None;
+    let mut arguments = arguments.iter();
+    let mut text = None;
+    while let Some(argument) = arguments.next() {
+        if argument == "--print-id" && !print_id {
+            print_id = true;
+        } else if argument == "--parent" && parent.is_none() {
+            let (value, text) = list_value(&mut arguments, "--parent")?;
+            parent =
+                Some(parse_id_text(text).ok_or_else(|| invalid_list_value("--parent", value))?);
+        } else {
+            text = Some(argument.clone());
+            break;
+        }
+    }
+    if arguments.next().is_some() {
+        return Err(CliError::UnsupportedArguments {
+            argument: first.clone(),
+        });
+    }
+    Ok(match parent {
+        Some(parent) => Command::AddSubtask(scope, parent, text, print_id),
+        None => Command::Add(scope, text, print_id),
+    })
+}
+
+fn parse_parent_command(
+    scope: ScopeChoice,
+    id: &OsString,
+    parent: &OsString,
+) -> Result<Command, CliError> {
+    let id = parse_task_id(id)?;
+    let parent =
+        match parent.to_str() {
+            Some(text) if text.eq_ignore_ascii_case("none") => None,
+            text => Some(text.and_then(parse_id_text).ok_or_else(|| {
+                CliError::InvalidParentArgument {
+                    value: parent.clone(),
+                }
+            })?),
+        };
+    Ok(Command::Parent(scope, id, parent))
+}
+
 fn takes_list_value(argument: &OsString) -> bool {
     matches!(
         argument.to_str(),
-        Some("--tag" | "--priority" | "--due" | "--search" | "--sort")
+        Some("--tag" | "--priority" | "--due" | "--search" | "--sort" | "--parent")
     )
 }
 
@@ -277,6 +379,7 @@ fn parse_list_args(arguments: &[OsString]) -> Result<ListFilter, CliError> {
     let mut list = ListFilter::default();
     let mut state_flag = None;
     let mut sorted = false;
+    let mut structure_flag = None;
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
@@ -336,6 +439,30 @@ fn parse_list_args(arguments: &[OsString]) -> Result<ListFilter, CliError> {
                     _ => return Err(invalid_list_value("--sort", value)),
                 };
                 sorted = true;
+            }
+            Some(flag @ ("--roots" | "--parent")) => {
+                let flag = if flag == "--roots" {
+                    "--roots"
+                } else {
+                    "--parent"
+                };
+                match structure_flag {
+                    Some(previous) if previous == flag => {
+                        return Err(CliError::DuplicateListFlag { flag });
+                    }
+                    Some(_) => return Err(CliError::ConflictingStructureFilters),
+                    None => structure_flag = Some(flag),
+                }
+                list.structure = if flag == "--roots" {
+                    Structure::Roots
+                } else {
+                    let (value, text) = list_value(&mut arguments, "--parent")?;
+                    Structure::Children(
+                        parse_id_text(text)
+                            .and_then(TaskId::from_shell_integer)
+                            .ok_or_else(|| invalid_list_value("--parent", value))?,
+                    )
+                };
             }
             _ => {
                 return Err(CliError::UnsupportedArguments {
@@ -397,15 +524,20 @@ fn parse_lifecycle_command(
 }
 
 fn parse_task_id(value: &OsString) -> Result<u64, CliError> {
-    let id = value
+    value
         .to_str()
+        .and_then(parse_id_text)
+        .ok_or_else(|| CliError::InvalidTaskId {
+            value: value.clone(),
+        })
+}
+
+/// A positive decimal integer with no sign or whitespace, as task IDs are written.
+fn parse_id_text(text: &str) -> Option<u64> {
+    Some(text)
         .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|text| text.parse::<u64>().ok())
         .filter(|id| *id > 0)
-        .ok_or_else(|| CliError::InvalidTaskId {
-            value: value.clone(),
-        })?;
-    Ok(id)
 }
 
 pub(crate) fn usage() -> &'static str {
@@ -420,16 +552,19 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo add\n",
         "  shtodo --local add\n",
         "  shtodo [--local] add --print-id [<TASK>]\n",
+        "  shtodo [--local] add [--print-id] --parent <ID> [<TASK>]\n",
         "  shtodo list\n",
         "  shtodo --local list\n",
         "  shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]...\n",
         "              [--due <WHEN>]... [--search <TEXT>] [--sort priority|due]\n",
+        "              [--roots | --parent <ID>]\n",
         "  shtodo delete <ID>\n",
         "  shtodo --local delete <ID>\n",
         "  shtodo [--local] done <ID>\n",
         "  shtodo [--local] reopen <ID>\n",
         "  shtodo [--local] edit <ID> <TASK>\n",
         "  shtodo [--local] restore <ID>\n",
+        "  shtodo [--local] parent <ID> <PARENT_ID | none>\n",
         "  shtodo [--local] --json <COMMAND> [<ARGS>]\n",
         "  shtodo doctor\n",
         "  shtodo --help\n",
@@ -438,6 +573,7 @@ pub(crate) fn usage() -> &'static str {
         "Commands:\n",
         "  add <TASK>  Add one task without opening the terminal UI.\n",
         "              When TASK is omitted, read it from standard input.\n",
+        "              --parent ID adds it as a subtask at the end of ID's group.\n",
         "  list        List non-deleted tasks with their IDs and states.\n",
         "              --open or --done keeps one state. --tag +project or @context\n",
         "              (repeat: all must match). --priority A, A-C, or none (repeat:\n",
@@ -447,19 +583,27 @@ pub(crate) fn usage() -> &'static str {
         "              --search TEXT matches case-insensitively. --sort priority\n",
         "              lists A to Z, then unprioritized tasks; --sort due lists\n",
         "              the earliest date first, then undated tasks.\n",
+        "              Subtasks print indented under their parent; sorting keeps each\n",
+        "              parent's subtasks together. --roots lists top-level tasks only,\n",
+        "              --parent ID lists ID's subtasks only.\n",
         "              Each flag value is the next argument, even if it starts with -.\n",
-        "  delete <ID> Soft-delete one task by its scope-local ID.\n",
+        "  delete <ID> Soft-delete one task by its scope-local ID, with its subtasks.\n",
         "  done <ID>   Mark one live task done (safe to repeat).\n",
         "  reopen <ID> Mark one live task open (safe to repeat).\n",
         "  edit <ID> <TASK>\n",
         "              Replace one live task's text with a non-empty single line.\n",
         "  restore <ID>\n",
         "              Restore one deleted task; already-live tasks succeed unchanged.\n",
+        "              A parent brings back the subtasks deleted with it.\n",
+        "  parent <ID> <PARENT_ID | none>\n",
+        "              Make ID a subtask of PARENT_ID, or top-level with none.\n",
+        "              One level only: a parent is a top-level task.\n",
         "  doctor      Validate ~/.shtodo/config.toml without opening the terminal UI.\n",
         "\n",
         "Options:\n",
         "  --local     Use the list for the current directory instead of the global list.\n",
         "  --print-id  Put immediately after add; print only the saved task ID.\n",
+        "              It and --parent may come in either order.\n",
         "  --json      Output JSON for shell task commands, including errors.\n",
         "              Put before/after the command or after its arguments.\n",
         "              Cannot be combined with --print-id.\n",
@@ -488,6 +632,9 @@ pub(crate) fn usage() -> &'static str {
         "  shtodo --local restore 3\n",
         "  shtodo add --print-id \"Fix the bug\"\n",
         "  printf 'Run the tests\\n' | shtodo --local add --print-id\n",
+        "  shtodo add --parent 3 \"Write the changelog\"\n",
+        "  shtodo list --parent 3\n",
+        "  shtodo parent 5 none\n",
     )
 }
 
@@ -499,12 +646,315 @@ mod tests {
     use std::os::unix::ffi::OsStringExt as _;
 
     use super::{
-        CliError, Command, ListFilter, OutputFormat, ScopeChoice, parse_args, parse_invocation,
+        CliError, Command, ListFilter, OutputFormat, ScopeChoice, Structure, parse_args,
+        parse_invocation,
     };
     use crate::{
         metadata::{TaskFilter, parse_due_term, parse_filter_token},
         projection::{TaskOrder, TaskView},
+        task::TaskId,
     };
+
+    fn task_id(value: u64) -> TaskId {
+        TaskId::from_shell_integer(value).unwrap()
+    }
+
+    #[test]
+    fn add_should_scan_print_id_and_parent_once_each_in_either_order() {
+        for (prefix, scope) in [
+            (vec![], ScopeChoice::Global),
+            (vec!["--local"], ScopeChoice::Local),
+        ] {
+            let parse = |values: &[&str]| {
+                let mut arguments = prefix.clone();
+                arguments.push("add");
+                arguments.extend(values);
+                parse_args(args(&arguments))
+            };
+            let text = |value: &str| Some(OsString::from(value));
+            assert_eq!(
+                parse(&["--parent", "3", "child"]),
+                Ok(Command::AddSubtask(scope, 3, text("child"), false))
+            );
+            assert_eq!(
+                parse(&["--parent", "3"]),
+                Ok(Command::AddSubtask(scope, 3, None, false))
+            );
+            assert_eq!(
+                parse(&["--print-id", "--parent", "3", "child"]),
+                Ok(Command::AddSubtask(scope, 3, text("child"), true))
+            );
+            assert_eq!(
+                parse(&["--parent", "3", "--print-id"]),
+                Ok(Command::AddSubtask(scope, 3, None, true))
+            );
+            // A repeated flag starts the text, which is taken verbatim.
+            assert_eq!(
+                parse(&["--print-id", "--print-id"]),
+                Ok(Command::Add(scope, text("--print-id"), true))
+            );
+            assert_eq!(
+                parse(&["--parent", "3", "--parent"]),
+                Ok(Command::AddSubtask(scope, 3, text("--parent"), false))
+            );
+            assert_eq!(
+                parse(&["--parent", "3", "-x"]),
+                Ok(Command::AddSubtask(scope, 3, text("-x"), false))
+            );
+            assert!(matches!(
+                parse(&["--parent", "3", "one", "two"]),
+                Err(CliError::UnsupportedArguments { .. })
+            ));
+            assert_eq!(
+                parse(&["--parent"]),
+                Err(CliError::MissingFilterValue { flag: "--parent" })
+            );
+            for value in ["x", "0", "-1", "", "--json", "+3", " 3"] {
+                assert_eq!(
+                    parse(&["--parent", value]),
+                    Err(CliError::InvalidFilterValue {
+                        flag: "--parent",
+                        value: value.into()
+                    }),
+                    "{value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn add_parent_and_list_parent_errors_should_print_identical_messages() {
+        for value in ["x", "0"] {
+            let add = parse_args(args(&["add", "--parent", value]))
+                .unwrap_err()
+                .to_string();
+            let list = parse_args(args(&["list", "--parent", value]))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(add, list);
+            assert!(
+                add.starts_with(&format!(
+                    "invalid --parent {value:?}; expected a task ID\n\nshtodo - "
+                )),
+                "{add}"
+            );
+        }
+        let add = parse_args(args(&["add", "--parent"]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            add,
+            parse_args(args(&["list", "--parent"]))
+                .unwrap_err()
+                .to_string()
+        );
+        assert!(add.starts_with("--parent requires a value\n\nshtodo - "));
+    }
+
+    #[test]
+    fn parse_invocation_should_skip_the_parent_pair_after_add() {
+        let invoke = |values: &[&str]| parse_invocation(args(values));
+        let child = |text: Option<&str>| {
+            Ok(Command::AddSubtask(
+                ScopeChoice::Global,
+                3,
+                text.map(OsString::from),
+                false,
+            ))
+        };
+        assert_eq!(
+            invoke(&["add", "--parent", "3", "--json"]),
+            (OutputFormat::Json, child(None))
+        );
+        assert_eq!(
+            invoke(&["add", "--parent", "3", "x", "--json"]),
+            (OutputFormat::Json, child(Some("x")))
+        );
+        assert_eq!(
+            invoke(&["--json", "add", "--parent", "3", "x"]),
+            (OutputFormat::Json, child(Some("x")))
+        );
+        for values in [
+            vec!["add", "--parent", "3", "--print-id", "--json"],
+            vec!["add", "--print-id", "--parent", "3", "--json"],
+        ] {
+            assert_eq!(
+                invoke(&values),
+                (OutputFormat::Json, Err(CliError::JsonWithPrintId)),
+                "{values:?}"
+            );
+        }
+        assert_eq!(
+            invoke(&["add", "--parent", "--json"]),
+            (
+                OutputFormat::Text,
+                Err(CliError::InvalidFilterValue {
+                    flag: "--parent",
+                    value: "--json".into()
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn parent_should_take_an_id_and_a_parent_id_or_none() {
+        for (prefix, scope) in [
+            (vec![], ScopeChoice::Global),
+            (vec!["--local"], ScopeChoice::Local),
+        ] {
+            let parse = |values: &[&str]| {
+                let mut arguments = prefix.clone();
+                arguments.push("parent");
+                arguments.extend(values);
+                parse_args(args(&arguments))
+            };
+            assert_eq!(parse(&["5", "3"]), Ok(Command::Parent(scope, 5, Some(3))));
+            for none in ["none", "NONE", "None"] {
+                assert_eq!(parse(&["5", none]), Ok(Command::Parent(scope, 5, None)));
+            }
+            assert_eq!(parse(&[]), Err(CliError::MissingParentArguments));
+            assert_eq!(parse(&["5"]), Err(CliError::MissingParentArguments));
+            for id in ["x", "0"] {
+                assert_eq!(
+                    parse(&[id, "3"]),
+                    Err(CliError::InvalidTaskId { value: id.into() })
+                );
+            }
+            for value in ["x", "0", "--json", "-1", "nonee"] {
+                assert_eq!(
+                    parse(&["5", value]),
+                    Err(CliError::InvalidParentArgument {
+                        value: value.into()
+                    })
+                );
+            }
+            assert!(matches!(
+                parse(&["5", "3", "extra"]),
+                Err(CliError::UnsupportedArguments { .. })
+            ));
+        }
+        let message = |values: &[&str]| parse_args(args(values)).unwrap_err().to_string();
+        assert!(
+            message(&["parent", "5"])
+                .starts_with("parent requires a task ID and a parent task ID or none\n\nshtodo - ")
+        );
+        assert!(
+            message(&["parent", "5", "x"])
+                .starts_with(r#"invalid parent "x"; expected a task ID or none"#)
+        );
+        assert!(
+            message(&["parent", "x", "3"])
+                .starts_with(r#"invalid task ID "x"; expected a positive integer"#)
+        );
+        assert!(
+            message(&["parent", "5", "3", "extra"])
+                .starts_with(r#"unsupported shtodo arguments: "parent""#)
+        );
+        assert!(
+            message(&["--local", "parent", "5", "3", "extra"])
+                .starts_with(r#"unsupported shtodo arguments: "--local""#)
+        );
+        let invoke = |values: &[&str]| parse_invocation(args(values));
+        for values in [
+            vec!["parent", "5", "3", "--json"],
+            vec!["parent", "--json", "5", "3"],
+            vec!["--json", "parent", "5", "3"],
+        ] {
+            assert_eq!(
+                invoke(&values),
+                (
+                    OutputFormat::Json,
+                    Ok(Command::Parent(ScopeChoice::Global, 5, Some(3)))
+                ),
+                "{values:?}"
+            );
+        }
+        assert_eq!(
+            invoke(&["parent", "5", "--json"]),
+            (
+                OutputFormat::Text,
+                Err(CliError::InvalidParentArgument {
+                    value: "--json".into()
+                })
+            )
+        );
+        assert!(
+            invoke(&["--json", "doctor"])
+                .1
+                .unwrap_err()
+                .to_string()
+                .starts_with(
+                    "--json requires add, list, delete, done, reopen, edit, restore, or parent"
+                )
+        );
+    }
+
+    #[test]
+    fn parse_list_args_should_accept_roots_and_parent_once_and_never_together() {
+        assert_eq!(list(&[]).unwrap().structure, Structure::Any);
+        assert_eq!(list(&["--roots"]).unwrap().structure, Structure::Roots);
+        assert_eq!(
+            list(&["--open", "--parent", "3", "--tag", "+x"]).unwrap(),
+            ListFilter {
+                view: TaskView::Open,
+                filter: task_filter(&["+x"]),
+                structure: Structure::Children(task_id(3)),
+                ..ListFilter::default()
+            }
+        );
+        for (values, message) in [
+            (
+                vec!["--roots", "--parent", "3"],
+                "--roots and --parent cannot be combined",
+            ),
+            (
+                vec!["--parent", "3", "--roots"],
+                "--roots and --parent cannot be combined",
+            ),
+            (
+                vec!["--roots", "--roots"],
+                "--roots may only be specified once",
+            ),
+            (
+                vec!["--parent", "3", "--parent", "4"],
+                "--parent may only be specified once",
+            ),
+            (vec!["--parent"], "--parent requires a value"),
+            (
+                vec!["--parent", "x"],
+                r#"invalid --parent "x"; expected a task ID"#,
+            ),
+            (
+                vec!["--parent", "--json"],
+                r#"invalid --parent "--json"; expected a task ID"#,
+            ),
+            (vec!["--roots", "3"], r#"unsupported shtodo arguments: "3""#),
+        ] {
+            let error = list_error(&values);
+            assert!(error.starts_with(message), "{values:?}: {error}");
+        }
+        let (format, error) = parse_invocation(args(&["list", "--parent", "--json"]));
+        assert_eq!(format, OutputFormat::Text);
+        assert!(
+            error
+                .unwrap_err()
+                .to_string()
+                .starts_with(r#"invalid --parent "--json""#)
+        );
+        assert_eq!(
+            parse_invocation(args(&["list", "--roots", "--json"])),
+            (
+                OutputFormat::Json,
+                Ok(Command::List(
+                    ScopeChoice::Global,
+                    ListFilter {
+                        structure: Structure::Roots,
+                        ..ListFilter::default()
+                    }
+                ))
+            )
+        );
+    }
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -729,6 +1179,7 @@ mod tests {
             filter: task_filter(&["+work", "@home", "A-B", "none"]),
             search: Some("Fix It".into()),
             order: TaskOrder::Priority,
+            structure: Structure::Any,
         };
         assert_eq!(
             list(&[
@@ -1001,6 +1452,7 @@ mod tests {
                 filter: expected_filter,
                 search: Some("pay".into()),
                 order: TaskOrder::Due,
+                structure: Structure::Any,
             })
         );
         assert_eq!(list(&["--sort", "due"]).unwrap().order, TaskOrder::Due);
@@ -1041,7 +1493,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parse_list_args_should_reject_non_utf8_filter_values() {
-        for flag in ["--tag", "--priority", "--search", "--sort", "--due"] {
+        for flag in [
+            "--tag",
+            "--priority",
+            "--search",
+            "--sort",
+            "--due",
+            "--parent",
+        ] {
             let error = parse_args(vec![
                 OsString::from("list"),
                 OsString::from(flag),
@@ -1054,6 +1513,26 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_should_reject_a_non_utf8_parent_value_like_list() {
+        let value = OsString::from_vec(vec![0xff]);
+        let error = parse_args(vec!["add".into(), "--parent".into(), value.clone()]);
+        assert_eq!(
+            error,
+            Err(CliError::InvalidFilterValue {
+                flag: "--parent",
+                value
+            })
+        );
+        assert!(
+            error
+                .unwrap_err()
+                .to_string()
+                .starts_with("invalid --parent value; expected UTF-8")
+        );
     }
 
     #[test]

@@ -17,20 +17,12 @@ impl TaskObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Mutation {
     Add(String),
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the shell commands arrive in Stage 2")
-    )]
     AddSubtask {
         parent: TaskId,
         text: String,
     },
     /// Nests `id` under `parent`, or promotes it with `None`; both IDs are named, so no
     /// adjacency guard is needed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the shell commands arrive in Stage 2")
-    )]
     SetParent {
         id: TaskId,
         parent: Option<TaskId>,

@@ -61,10 +61,6 @@ impl Task {
         self.deletion_sequence
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "list and JSON output arrive in Stage 2")
-    )]
     pub(crate) fn parent_id(&self) -> Option<TaskId> {
         self.parent_id
     }
@@ -201,6 +197,16 @@ impl TaskList {
 
     pub(crate) fn task(&self, id: TaskId) -> Option<&Task> {
         self.tasks.iter().find(|task| task.id == id)
+    }
+
+    /// The subtasks in a top-level task's group, tombstones included; empty for a subtask.
+    pub(crate) fn subtasks(&self, id: TaskId) -> &[Task] {
+        match self.index_of(id) {
+            Ok(index) if self.tasks[index].parent_id.is_none() => {
+                &self.tasks[block(&self.tasks, index)][1..]
+            }
+            _ => &[],
+        }
     }
 
     pub(crate) fn add(&mut self, text: &str) -> Result<TaskId, ListError> {

@@ -579,12 +579,12 @@ impl App {
                 .enumerate()
                 .filter(|(_, task)| !task.is_deleted())
                 .collect::<Vec<_>>();
-            // Stable, like `projection::sort_by_priority` and `sort_by_due`: equal keys keep
-            // canonical order. A due key parses the text, so each task is parsed once.
+            // The same tree sort as `projection::sort_by_priority` and `sort_by_due`: groups
+            // stay together, equal keys keep canonical order, and each key is computed once.
             if order == TaskOrder::Due {
-                live.sort_by_cached_key(|(_, task)| projection::due_key(task));
+                projection::sort_tree_by(&mut live, |(_, task)| task, projection::due_key);
             } else {
-                live.sort_by_key(|(_, task)| projection::priority_key(task));
+                projection::sort_tree_by(&mut live, |(_, task)| task, projection::priority_key);
             }
             live.into_iter().map(|(index, _)| index).collect()
         });
@@ -3062,6 +3062,28 @@ mod sort_tests {
             list.add(text).unwrap();
         }
         App::new(list)
+    }
+
+    #[test]
+    fn sorted_orders_should_keep_groups_together() {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in ["(C) one due:2026-11-03", "(A) two due:2026-11-09", "three"] {
+            list.add(text).unwrap();
+        }
+        // 1 [4, 5], 2 [6], 3: subtasks sort within their group, never among top-level rows.
+        list.add_subtask(id(1), "(B) four due:2026-11-02").unwrap();
+        list.add_subtask(id(1), "(A) five due:2026-11-01").unwrap();
+        list.add_subtask(id(2), "six").unwrap();
+        let mut app = App::new(list);
+        for (order, rows) in [
+            (TaskOrder::Priority, [2, 6, 1, 5, 4, 3]),
+            (TaskOrder::Due, [1, 5, 4, 2, 6, 3]),
+            (TaskOrder::Manual, [1, 4, 5, 2, 6, 3]),
+        ] {
+            app.apply(Action::ToggleSort).unwrap();
+            assert_eq!(app.order(), order);
+            assert_eq!(visible_ids(&app), rows, "{order:?}");
+        }
     }
 
     #[test]
