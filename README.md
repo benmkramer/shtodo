@@ -59,6 +59,8 @@ shtodo list --open --tag +shtodo --sort priority
 shtodo --json list --priority A-B --search release
 shtodo add "Pay rent due:2026-11-01"
 shtodo list --open --due overdue --due today --sort due
+shtodo add --parent 3 "Write the changelog"
+shtodo list --parent 3
 shtodo --local --json add "Capture a task for an agent"
 shtodo delete 3
 shtodo --local delete 3
@@ -93,6 +95,12 @@ added or edited, so saved text always holds a real date. `shtodo list --due`
 takes `today`, `tomorrow`, `overdue`, `none`, `any`, a date, or a range such
 as `2026-10-01..2026-10-31`, and `--sort due` lists the earliest date first.
 See [due dates](./docs/usage.md#due-dates).
+
+A task can have subtasks, one level deep. `shtodo add --parent 3` adds one,
+`shtodo parent 5 3` and `shtodo parent 5 none` nest and promote, and
+`shtodo list` prints each subtask indented under its parent. `--roots` and
+`--parent 3` list one level. Deleting or restoring a parent also deletes or
+restores the subtasks with it. See [subtasks](./docs/usage.md#subtasks).
 
 For agents and other programs, `--json` returns a versioned object with the
 scope and task data. It supports `list` and every shell task mutation;
@@ -143,9 +151,11 @@ example prompts.
 
 Version one is intentionally local and narrow. It does not include accounts,
 synchronization, sharing, recurring tasks, reminders, times of day, start
-dates, subtasks, or multiple named lists. Priorities, tags, and due dates are
+dates, or multiple named lists. Priorities, tags, and due dates are
 derived from todo.txt tokens in the task text rather than stored separately,
-so they need no migration.
+so they need no migration. Subtasks are one level deep; a list is saved as
+schema 2, which older shtodo versions refuse without writing it, only while
+it has a subtask.
 The TUI supports text search and All/Open/Done views.
 See [Version-one limits] for the complete scope and deferred features.
 

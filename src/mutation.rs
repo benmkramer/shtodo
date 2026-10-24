@@ -17,6 +17,16 @@ impl TaskObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Mutation {
     Add(String),
+    AddSubtask {
+        parent: TaskId,
+        text: String,
+    },
+    /// Nests `id` under `parent`, or promotes it with `None`; both IDs are named, so no
+    /// adjacency guard is needed.
+    SetParent {
+        id: TaskId,
+        parent: Option<TaskId>,
+    },
     SetCompleted {
         id: TaskId,
         completed: bool,
@@ -69,7 +79,7 @@ impl Outcome {
 impl Mutation {
     pub(crate) fn validate(&self) -> Result<(), ListError> {
         match self {
-            Self::Add(text) | Self::EditText { text, .. } => {
+            Self::Add(text) | Self::AddSubtask { text, .. } | Self::EditText { text, .. } => {
                 validated_text(text)?;
             }
             _ => {}
@@ -89,6 +99,12 @@ impl Mutation {
         };
         match self {
             Self::Add(text) => Ok(changed(list.add(text)?)),
+            Self::AddSubtask { parent, text } => Ok(changed(list.add_subtask(*parent, text)?)),
+            Self::SetParent { id, parent } => Ok(if list.set_parent(*id, *parent)? {
+                changed(*id)
+            } else {
+                Outcome::AlreadyInState { id: *id }
+            }),
             Self::RestoreLatest => Ok(match list.restore_latest()? {
                 Some(id) => changed(id),
                 None => Outcome::NothingToRestore,
@@ -203,7 +219,233 @@ impl Mutation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::ListScope;
+    use crate::task::{ListScope, ParentError};
+
+    fn id(value: u64) -> TaskId {
+        TaskId::from_shell_integer(value).unwrap()
+    }
+
+    fn order(list: &TaskList) -> Vec<u64> {
+        list.tasks().iter().map(|task| task.id().get()).collect()
+    }
+
+    /// Groups 1 [4, 5], 2 [6], and 3.
+    fn groups() -> TaskList {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in ["first", "second", "third"] {
+            list.add(text).unwrap();
+        }
+        for (parent, text) in [(1, "first a"), (1, "first b"), (2, "second a")] {
+            list.add_subtask(id(parent), text).unwrap();
+        }
+        list
+    }
+
+    /// Validates as storage does, after stamping the schema version.
+    fn valid(list: &TaskList) -> bool {
+        let mut list = list.clone();
+        list.stamp_schema_version();
+        list.validate().is_ok()
+    }
+
+    fn move_adjacent(list: &TaskList, task: u64, direction: MoveDirection) -> Mutation {
+        let projection = Projection::default();
+        Mutation::MoveAdjacent {
+            id: id(task),
+            direction,
+            neighbor: projection.adjacent(list, id(task), direction),
+            projection,
+        }
+    }
+
+    #[test]
+    fn subtask_intents_should_report_changes_no_ops_and_rejections() {
+        let mut list = groups();
+        assert_eq!(
+            Mutation::AddSubtask {
+                parent: id(2),
+                text: " second b ".into()
+            }
+            .apply(&mut list),
+            Outcome::Changed {
+                id: id(7),
+                celebrate: false
+            }
+        );
+        assert_eq!(order(&list), [1, 4, 5, 2, 6, 7, 3]);
+        let nest = Mutation::SetParent {
+            id: id(3),
+            parent: Some(id(1)),
+        };
+        assert!(nest.apply(&mut list).changed());
+        assert_eq!(nest.apply(&mut list), Outcome::AlreadyInState { id: id(3) });
+        let promote = Mutation::SetParent {
+            id: id(3),
+            parent: None,
+        };
+        assert!(promote.apply(&mut list).changed());
+        assert_eq!(
+            promote.apply(&mut list),
+            Outcome::AlreadyInState { id: id(3) }
+        );
+        assert_eq!(order(&list), [1, 4, 5, 3, 2, 6, 7]);
+        let before = list.clone();
+        assert_eq!(
+            Mutation::AddSubtask {
+                parent: id(1),
+                text: "\n".into()
+            }
+            .apply(&mut list),
+            Outcome::Rejected(ListError::InvalidText)
+        );
+        assert_eq!(
+            Mutation::SetParent {
+                id: id(1),
+                parent: Some(id(2))
+            }
+            .apply(&mut list),
+            Outcome::Rejected(ListError::InvalidParent(ParentError::HasSubtasks(id(1))))
+        );
+        assert_eq!(list, before);
+        assert!(
+            Mutation::AddSubtask {
+                parent: id(1),
+                text: " ".into()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn moving_a_top_level_task_should_swap_groups_around_a_deleted_group() {
+        let mut list = groups();
+        list.delete(id(2)).unwrap();
+        // 1 [4, 5], then the deleted 2 [6], then 3.
+        let request = move_adjacent(&list, 1, MoveDirection::Down);
+        assert!(request.apply(&mut list).changed());
+        assert_eq!(order(&list), [3, 2, 6, 1, 4, 5]);
+        assert!(valid(&list));
+        let request = move_adjacent(&list, 1, MoveDirection::Down);
+        assert_eq!(
+            request.apply(&mut list),
+            Outcome::AlreadyInState { id: id(1) }
+        );
+        assert!(
+            move_adjacent(&list, 1, MoveDirection::Up)
+                .apply(&mut list)
+                .changed()
+        );
+        assert_eq!(order(&list), [1, 4, 5, 2, 6, 3]);
+    }
+
+    #[test]
+    fn moving_a_subtask_should_stay_in_its_group_and_stop_at_the_edges() {
+        let mut list = groups();
+        assert!(
+            move_adjacent(&list, 4, MoveDirection::Down)
+                .apply(&mut list)
+                .changed()
+        );
+        assert_eq!(order(&list), [1, 5, 4, 2, 6, 3]);
+        for (task, direction) in [
+            (4, MoveDirection::Down),
+            (5, MoveDirection::Up),
+            (6, MoveDirection::Up),
+            (6, MoveDirection::Down),
+        ] {
+            let before = list.clone();
+            let request = move_adjacent(&list, task, direction);
+            assert_eq!(
+                request.apply(&mut list),
+                Outcome::AlreadyInState { id: id(task) }
+            );
+            assert_eq!(list, before);
+        }
+        // Filtered: a subtask's siblings are the matching subtasks of its parent.
+        let mut filter = crate::metadata::TaskFilter::default();
+        filter.add(crate::metadata::parse_filter_token("+x").unwrap());
+        let projection = Projection {
+            filter,
+            ..Projection::default()
+        };
+        let mut list = groups();
+        list.edit(id(4), "first a +x").unwrap();
+        list.edit(id(6), "second a +x").unwrap();
+        list.edit(id(3), "third +x").unwrap();
+        assert_eq!(projection.adjacent(&list, id(4), MoveDirection::Down), None);
+        assert_eq!(projection.adjacent(&list, id(6), MoveDirection::Up), None);
+        assert_eq!(projection.adjacent(&list, id(3), MoveDirection::Up), None);
+    }
+
+    #[test]
+    fn the_move_guard_should_conflict_when_a_sibling_is_promoted_or_reparented() {
+        let list = groups();
+        let request = move_adjacent(&list, 4, MoveDirection::Down);
+        let conflicts = |change: &dyn Fn(&mut TaskList)| {
+            let mut changed = list.clone();
+            change(&mut changed);
+            let before = changed.clone();
+            let outcome = request.apply(&mut changed);
+            assert_eq!(changed, before);
+            outcome
+                == Outcome::Conflict {
+                    id: id(4),
+                    kind: ConflictKind::OrderChanged,
+                }
+        };
+        assert!(conflicts(&|list| {
+            list.set_parent(id(5), None).unwrap();
+        }));
+        assert!(conflicts(&|list| {
+            list.set_parent(id(5), Some(id(2))).unwrap();
+        }));
+        assert!(conflicts(&|list| {
+            list.set_parent(id(4), Some(id(2))).unwrap();
+        }));
+        let top = move_adjacent(&list, 1, MoveDirection::Down);
+        let mut nested = list.clone();
+        nested.set_parent(id(3), Some(id(2))).unwrap();
+        nested.set_parent(id(3), None).unwrap();
+        assert!(top.apply(&mut nested.clone()).changed());
+        let mut demoted = list.clone();
+        demoted.delete(id(6)).unwrap();
+        demoted.set_parent(id(2), Some(id(3))).unwrap();
+        assert_eq!(
+            top.apply(&mut demoted),
+            Outcome::Conflict {
+                id: id(1),
+                kind: ConflictKind::OrderChanged
+            }
+        );
+    }
+
+    #[test]
+    fn deleting_an_observed_parent_should_take_the_subtasks_live_at_apply_time() {
+        let mut list = groups();
+        let delete = Mutation::Delete {
+            id: id(1),
+            observed: Some(TaskObservation::new(list.task(id(1)).unwrap())),
+        };
+        list.add_subtask(id(1), "arrived later").unwrap();
+        list.delete(id(4)).unwrap();
+        assert!(delete.apply(&mut list).changed());
+        let sequence = list.task(id(1)).unwrap().deletion_sequence();
+        assert_eq!(list.task(id(5)).unwrap().deletion_sequence(), sequence);
+        assert_eq!(list.task(id(7)).unwrap().deletion_sequence(), sequence);
+        assert_ne!(list.task(id(4)).unwrap().deletion_sequence(), sequence);
+        assert!(valid(&list));
+        assert_eq!(
+            Mutation::Restore {
+                id: id(5),
+                observed: None
+            }
+            .apply(&mut list),
+            Outcome::Rejected(ListError::ParentDeleted(id(1)))
+        );
+        assert!(Mutation::RestoreLatest.apply(&mut list).changed());
+        assert_eq!(list.visible_tasks().count(), 6);
+    }
 
     #[test]
     fn projected_reorder_should_preserve_hidden_slots_and_reject_changed_membership() {

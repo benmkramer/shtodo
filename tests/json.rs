@@ -59,7 +59,7 @@ fn dated(
 ) -> Value {
     json!({
         "id": id, "text": text, "state": state, "deleted": deleted,
-        "priority": priority, "tags": tags, "due": due
+        "priority": priority, "tags": tags, "due": due, "parent_id": null
     })
 }
 
@@ -1016,4 +1016,352 @@ fn json_add_and_edit_should_show_the_rewritten_text_and_unchanged_status() {
         return;
     }
     panic!("the UTC date changed twice while the test ran");
+}
+
+fn subtask(id: u64, text: &str, state: &str, deleted: bool, parent: u64) -> Value {
+    let mut value = task(id, text, state, deleted);
+    value["parent_id"] = json!(parent);
+    value
+}
+
+/// 1 [3 done, 4], 2, and 5 [6], with priorities for sorting.
+fn seed_subtask_tree(home: &Path) {
+    for args in [
+        vec!["add", "(B) one"],
+        vec!["add", "(A) two"],
+        vec!["add", "--parent", "1", "(C) three"],
+        vec!["add", "--parent", "1", "(A) four"],
+        vec!["add", "(C) five"],
+        vec!["add", "--parent", "5", "six"],
+        vec!["done", "3"],
+    ] {
+        success(&run(home, home, &[&["--json"], args.as_slice()].concat()));
+    }
+}
+
+fn text_ids(home: &Path, args: &[&str]) -> Vec<u64> {
+    let output = run(home, home, args);
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| line.split_whitespace().next().unwrap().parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn json_should_carry_parent_id_on_lists_and_every_mutation_reply() {
+    let home = tempfile::tempdir().unwrap();
+    let reply = |args: &[&str]| success(&run(home.path(), home.path(), args));
+    let added = reply(&["--json", "add", "parent"]);
+    assert_eq!(added["task"], task(1, "parent", "open", false));
+    let child = reply(&["add", "--parent", "1", "child", "--json"]);
+    assert_eq!(child["command"], "add");
+    assert_eq!(child["task"], subtask(2, "child", "open", false, 1));
+    assert_eq!(
+        reply(&["--json", "list"])["tasks"],
+        json!([
+            task(1, "parent", "open", false),
+            subtask(2, "child", "open", false, 1)
+        ])
+    );
+    for (args, command, expected, changed) in [
+        (
+            vec!["done", "2"],
+            "done",
+            subtask(2, "child", "done", false, 1),
+            true,
+        ),
+        (
+            vec!["reopen", "2"],
+            "reopen",
+            subtask(2, "child", "open", false, 1),
+            true,
+        ),
+        (
+            vec!["edit", "2", "kid"],
+            "edit",
+            subtask(2, "kid", "open", false, 1),
+            true,
+        ),
+        (
+            vec!["parent", "2", "none"],
+            "parent",
+            task(2, "kid", "open", false),
+            true,
+        ),
+        (
+            vec!["parent", "2", "none"],
+            "parent",
+            task(2, "kid", "open", false),
+            false,
+        ),
+        (
+            vec!["parent", "2", "1"],
+            "parent",
+            subtask(2, "kid", "open", false, 1),
+            true,
+        ),
+        (
+            vec!["parent", "2", "1"],
+            "parent",
+            subtask(2, "kid", "open", false, 1),
+            false,
+        ),
+        (
+            vec!["delete", "1"],
+            "delete",
+            task(1, "parent", "open", true),
+            true,
+        ),
+        (
+            vec!["delete", "2"],
+            "delete",
+            subtask(2, "kid", "open", true, 1),
+            false,
+        ),
+        (
+            vec!["restore", "1"],
+            "restore",
+            task(1, "parent", "open", false),
+            true,
+        ),
+        (
+            vec!["delete", "2"],
+            "delete",
+            subtask(2, "kid", "open", true, 1),
+            true,
+        ),
+        (
+            vec!["restore", "2"],
+            "restore",
+            subtask(2, "kid", "open", false, 1),
+            true,
+        ),
+    ] {
+        let mut arguments = vec!["--json"];
+        arguments.extend(&args);
+        let value = reply(&arguments);
+        assert_eq!(value["command"], command, "{args:?}");
+        assert_eq!(value["task"], expected, "{args:?}");
+        assert_eq!(value["changed"], changed, "{args:?}");
+    }
+}
+
+#[test]
+fn json_lists_should_keep_tree_order_and_return_the_text_mode_ids() {
+    let home = tempfile::tempdir().unwrap();
+    seed_subtask_tree(home.path());
+    for (args, expected) in [
+        (vec!["list"], vec![1, 3, 4, 2, 5, 6]),
+        (vec!["list", "--sort", "priority"], vec![2, 1, 4, 3, 5, 6]),
+        (vec!["list", "--sort", "due"], vec![2, 1, 4, 3, 5, 6]),
+        (vec!["list", "--open"], vec![1, 4, 2, 5, 6]),
+        (vec!["list", "--roots"], vec![1, 2, 5]),
+        (vec!["list", "--parent", "1"], vec![3, 4]),
+        (
+            vec!["list", "--parent", "1", "--sort", "priority"],
+            vec![4, 3],
+        ),
+        // The parents of 4 and 6 are filtered out, so each sorts as its own group.
+        (
+            vec!["list", "--priority", "A", "--priority", "none"],
+            vec![4, 2, 6],
+        ),
+        (
+            vec![
+                "list",
+                "--priority",
+                "A",
+                "--priority",
+                "none",
+                "--sort",
+                "priority",
+            ],
+            vec![4, 2, 6],
+        ),
+        (
+            vec!["list", "--search", "f", "--sort", "priority"],
+            vec![4, 5],
+        ),
+    ] {
+        let value = success(&run(
+            home.path(),
+            home.path(),
+            &[&["--json"], args.as_slice()].concat(),
+        ));
+        assert_eq!(ids(&value), expected, "{args:?}");
+        assert_eq!(text_ids(home.path(), &args), expected, "{args:?}");
+        // Every returned parent comes first, and its returned subtasks follow it as one run.
+        let tasks = value["tasks"].as_array().unwrap();
+        for (position, task) in tasks.iter().enumerate() {
+            if let Some(parent) = task["parent_id"].as_u64()
+                && let Some(parent_position) = tasks.iter().position(|row| row["id"] == parent)
+            {
+                assert!(parent_position < position, "{args:?}");
+                assert!(
+                    tasks[parent_position + 1..position]
+                        .iter()
+                        .all(|row| row["parent_id"] == parent),
+                    "{args:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn json_subtask_errors_should_return_their_codes_and_task_ids() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--json", "add", "--parent"],
+        vec!["--json", "list", "--parent"],
+        vec!["add", "--parent", "x", "--json"],
+        vec!["--json", "list", "--parent", "0"],
+        vec!["--json", "parent", "5"],
+        vec!["--json", "parent", "x", "3"],
+        vec!["--json", "parent", "5", "x"],
+        vec!["--json", "parent", "5", "3", "extra"],
+        vec!["--json", "list", "--roots", "--parent", "3"],
+        vec!["--json", "list", "--roots", "--roots"],
+        vec!["add", "--parent", "3", "--print-id", "--json"],
+        vec!["add", "--print-id", "--parent", "3", "--json"],
+    ] {
+        failure(&run(home.path(), home.path(), &args), "invalid_arguments");
+        assert!(!home.path().join(".shtodo").exists(), "{args:?}");
+    }
+    seed_subtask_tree(home.path());
+    success(&run(home.path(), home.path(), &["--json", "delete", "2"]));
+    let path = home.path().join(".shtodo/global/tasks.json");
+    let before = std::fs::read(&path).unwrap();
+    for (args, code, task_id) in [
+        (vec!["add", "--parent", "9", "x"], "task_not_found", 9),
+        (vec!["parent", "9", "1"], "task_not_found", 9),
+        (vec!["parent", "4", "9"], "task_not_found", 9),
+        (vec!["parent", "2", "1"], "task_deleted", 2),
+        (vec!["add", "--parent", "2", "x"], "task_deleted", 2),
+        (vec!["parent", "4", "2"], "task_deleted", 2),
+        (vec!["parent", "4", "4"], "invalid_parent", 4),
+        (vec!["parent", "5", "4"], "invalid_parent", 4),
+        (vec!["add", "--parent", "4", "x"], "invalid_parent", 4),
+        (vec!["parent", "1", "5"], "invalid_parent", 1),
+    ] {
+        let mut arguments = vec!["--json"];
+        arguments.extend(&args);
+        let value = failure(&run(home.path(), home.path(), &arguments), code);
+        assert_eq!(value["error"]["task_id"], task_id, "{args:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "{args:?}");
+        if code == "task_deleted" {
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("restore {task_id}")),
+                "{value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn json_restore_of_a_subtask_should_name_its_deleted_parent() {
+    let home = tempfile::tempdir().unwrap();
+    seed_subtask_tree(home.path());
+    success(&run(home.path(), home.path(), &["--json", "delete", "5"]));
+    let path = home.path().join(".shtodo/global/tasks.json");
+    let before = std::fs::read(&path).unwrap();
+    let value = failure(
+        &run(home.path(), home.path(), &["--json", "restore", "6"]),
+        "task_deleted",
+    );
+    assert_eq!(value["error"]["task_id"], 5);
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("parent task 5 is deleted"), "{message}");
+    assert!(message.contains("restore 5"), "{message}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let restored = success(&run(home.path(), home.path(), &["--json", "restore", "5"]));
+    assert_eq!(
+        restored["task"],
+        tagged(5, "(C) five", "open", false, Some("C"), &[])
+    );
+    let listed = success(&run(
+        home.path(),
+        home.path(),
+        &["--json", "list", "--parent", "5"],
+    ));
+    assert_eq!(
+        listed["tasks"],
+        json!([subtask(6, "six", "open", false, 5)])
+    );
+}
+
+#[test]
+fn json_lists_with_subtasks_should_be_readable_under_a_writer_lock() {
+    let home = tempfile::tempdir().unwrap();
+    seed_subtask_tree(home.path());
+    let path = home.path().join(".shtodo/global/tasks.json");
+    let before = std::fs::read(&path).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path.with_extension("lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let value = success(&run(
+        home.path(),
+        home.path(),
+        &["--json", "list", "--sort", "priority"],
+    ));
+    assert_eq!(ids(&value), [2, 1, 4, 3, 5, 6]);
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn json_add_should_take_a_repeated_parent_flag_as_subtask_text_in_every_json_placement() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    for scope in [&[][..], &["--local"][..]] {
+        let parent = success(&run(
+            home.path(),
+            project.path(),
+            &[scope, &["--json", "add", "parent"]].concat(),
+        ));
+        assert_eq!(parent["task"]["id"], 1);
+        for (index, placement) in [
+            &["add", "--parent", "1", "--parent", "--json"][..],
+            &["--json", "add", "--parent", "1", "--parent"][..],
+            &["add", "--json", "--parent", "1", "--parent"][..],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let reply = success(&run(
+                home.path(),
+                project.path(),
+                &[scope, placement].concat(),
+            ));
+            assert_eq!(reply["command"], "add", "{scope:?} {placement:?}");
+            assert_eq!(reply["changed"], true);
+            assert_eq!(
+                reply["task"],
+                subtask(index as u64 + 2, "--parent", "open", false, 1),
+                "{scope:?} {placement:?}"
+            );
+        }
+        let list = success(&run(
+            home.path(),
+            project.path(),
+            &[scope, &["--json", "list", "--parent", "1"]].concat(),
+        ));
+        assert_eq!(ids(&list), [2, 3, 4], "{scope:?}");
+    }
+    let global = success(&run(home.path(), project.path(), &["--json", "list"]));
+    let local = success(&run(
+        home.path(),
+        project.path(),
+        &["--local", "--json", "list"],
+    ));
+    assert_eq!(ids(&global), [1, 2, 3, 4]);
+    assert_eq!(ids(&local), [1, 2, 3, 4]);
+    assert_ne!(global["scope"], local["scope"]);
 }

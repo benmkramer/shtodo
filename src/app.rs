@@ -579,12 +579,12 @@ impl App {
                 .enumerate()
                 .filter(|(_, task)| !task.is_deleted())
                 .collect::<Vec<_>>();
-            // Stable, like `projection::sort_by_priority` and `sort_by_due`: equal keys keep
-            // canonical order. A due key parses the text, so each task is parsed once.
+            // The same tree sort as `projection::sort_by_priority` and `sort_by_due`: groups
+            // stay together, equal keys keep canonical order, and each key is computed once.
             if order == TaskOrder::Due {
-                live.sort_by_cached_key(|(_, task)| projection::due_key(task));
+                projection::sort_tree_by(&mut live, |(_, task)| task, projection::due_key);
             } else {
-                live.sort_by_key(|(_, task)| projection::priority_key(task));
+                projection::sort_tree_by(&mut live, |(_, task)| task, projection::priority_key);
             }
             live.into_iter().map(|(index, _)| index).collect()
         });
@@ -1094,16 +1094,14 @@ impl App {
         previous
     }
 
-    /// Canonical neighbor in the projection; reorder and the reorder guard use this.
+    /// Canonical sibling in the projection; only reorder and the reorder guard use this.
     fn adjacent_visible(&self, selected: TaskId, direction: MoveDirection) -> Option<TaskId> {
         self.projection.adjacent(&self.tasks, selected, direction)
     }
 
-    /// Neighbor in display order, for selection movement.
+    /// Neighbor in display order, for selection movement. It walks the displayed rows in every
+    /// order, so subtasks are visited and never trap the selection in a group.
     fn adjacent_displayed(&self, selected: TaskId, direction: MoveDirection) -> Option<TaskId> {
-        if self.sorted.is_none() {
-            return self.adjacent_visible(selected, direction);
-        }
         let mut previous = None;
         let mut tasks = self.visible_tasks();
         while let Some(task) = tasks.next() {
@@ -2860,6 +2858,49 @@ mod sort_tests {
         TaskId::from_shell_integer(value).unwrap()
     }
 
+    #[test]
+    fn selection_should_visit_every_displayed_row_through_a_group_in_manual_order() {
+        let mut list = TaskList::new(ListScope::Global);
+        let parent = list.add("parent").unwrap();
+        list.add("other root").unwrap();
+        list.add_subtask(parent, "child").unwrap();
+        let mut app = App::new(list);
+        assert_eq!(app.order(), TaskOrder::Manual);
+        assert_eq!(visible_ids(&app), [1, 3, 2]);
+        assert_eq!(app.selected(), Some(id(1)));
+        for expected in [3, 2] {
+            assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Transient);
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Unchanged);
+        for expected in [3, 1] {
+            assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Transient);
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Unchanged);
+    }
+
+    #[test]
+    fn a_selection_resting_on_a_sole_subtask_should_still_leave_its_group() {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in ["first", "second", "third"] {
+            list.add(text).unwrap();
+        }
+        let mut app = App::new(list.clone());
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(2)));
+        // Another process nests the selected task under the row above it.
+        list.set_parent(id(2), Some(id(1))).unwrap();
+        assert!(app.reconcile(list));
+        assert_eq!(visible_ids(&app), [1, 2, 3]);
+        assert_eq!(app.selected(), Some(id(2)));
+        assert_eq!(app.apply(Action::MoveDown).unwrap(), Transition::Transient);
+        assert_eq!(app.selected(), Some(id(3)));
+        app.apply(Action::MoveUp).unwrap();
+        assert_eq!(app.apply(Action::MoveUp).unwrap(), Transition::Transient);
+        assert_eq!(app.selected(), Some(id(1)));
+    }
+
     /// Canonical 1..=5; Priority order is 3, 5, 2, 4, 1.
     fn prioritized() -> App {
         let mut list = TaskList::new(ListScope::Global);
@@ -3021,6 +3062,28 @@ mod sort_tests {
             list.add(text).unwrap();
         }
         App::new(list)
+    }
+
+    #[test]
+    fn sorted_orders_should_keep_groups_together() {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in ["(C) one due:2026-11-03", "(A) two due:2026-11-09", "three"] {
+            list.add(text).unwrap();
+        }
+        // 1 [4, 5], 2 [6], 3: subtasks sort within their group, never among top-level rows.
+        list.add_subtask(id(1), "(B) four due:2026-11-02").unwrap();
+        list.add_subtask(id(1), "(A) five due:2026-11-01").unwrap();
+        list.add_subtask(id(2), "six").unwrap();
+        let mut app = App::new(list);
+        for (order, rows) in [
+            (TaskOrder::Priority, [2, 6, 1, 5, 4, 3]),
+            (TaskOrder::Due, [1, 5, 4, 2, 6, 3]),
+            (TaskOrder::Manual, [1, 4, 5, 2, 6, 3]),
+        ] {
+            app.apply(Action::ToggleSort).unwrap();
+            assert_eq!(app.order(), order);
+            assert_eq!(visible_ids(&app), rows, "{order:?}");
+        }
     }
 
     #[test]

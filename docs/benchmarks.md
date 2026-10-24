@@ -20,6 +20,9 @@ and an optional priority sort; their cost is in the
 Due-date filters, `--sort due`, the JSON `due` field, and relative-word
 rewriting are measured in the
 [due dates shell comparison](./benchmarks/2026-10-21-due-dates-cli-comparison.md).
+Subtasks, `add --parent`, `parent`, the structure filters, tree sort, and the
+JSON `parent_id` field are measured in the
+[subtasks shell comparison](./benchmarks/2026-10-24-subtasks-cli-comparison.md).
 The unreleased TUI priority styling, sort, and filter editor are measured in
 the [tags and priority TUI comparison](./benchmarks/2026-10-21-tags-and-priority-tui-comparison.md),
 and TUI due-date styling, Due order, and due filter tokens in the
@@ -148,6 +151,18 @@ fields. The owner's decision on accepting it is recorded as question 12 in the
 [plan's decisions table](./plans/2026-10-21-tags-and-priority.md#decisions-before-stage-0-exits).
 Text listing does no token work. Filtered and sorted cases are recorded for
 information.
+
+## Subtasks shell commands: October 24, 2026
+
+The [paired shell comparison](./benchmarks/2026-10-24-subtasks-cli-comparison.md)
+measures one-level subtasks against `74747a0` in two runs with different
+seeds. At 10,000 records, text `list` is within +0.06 to +0.28 ms on the four
+existing fixtures, and `list --json` is +1.9% to +6.7% (+0.16 to +0.52 ms),
+the cost of the always-present `parent_id` field. On a fixture of groups of
+one task and four subtasks, against the same records without links on the
+same build, `list`, `list --json`, both tree sorts, and `add --parent` are
++1.5% to +4.8% (at most +0.75 ms). The macOS release binary grows by
+16,528 bytes (+1.22%).
 
 ## Due dates shell commands: October 21, 2026
 
@@ -489,7 +504,7 @@ and the fuller shell lifecycle have their own
 | --- | --- | --- | --- |
 | Interaction | Built-in keyboard TUI and small CLI | Rich CLI | Bash CLI |
 | Shell task lifecycle | Add, list, done, reopen, edit, delete, restore | Add, list, modify, done, delete | Add, list, replace, do, delete |
-| Organization | Global and exact-directory lists; TUI text search and All/Open/Done tabs; todo.txt `+project`/`@context` tags with shell `list` filters | Projects, tags, contexts, filters | Text files, `+projects`, `@contexts`, text filtering |
+| Organization | Global and exact-directory lists; one-level subtasks; TUI text search and All/Open/Done tabs; todo.txt `+project`/`@context` tags with shell `list` filters | Projects, tags, contexts, filters | Text files, `+projects`, `@contexts`, text filtering |
 | Priority and scheduling | todo.txt letter priorities and `due:YYYY-MM-DD` due dates, with `list --due`, `--sort priority`, and `--sort due`; no reminders or recurrence | Priority, due dates, recurrence | Letter priorities; dates/text conventions, no core recurrence scheduler |
 | Data and integration | Local versioned JSON; no supported import/export | TaskChampion storage; JSON import/export and hooks | Human-editable text; add-ons |
 | Sync | None | Configured TaskChampion sync | External file tooling; no core sync engine |

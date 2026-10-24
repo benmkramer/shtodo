@@ -15,7 +15,7 @@ use serde::Deserialize;
 use crate::{
     cli::ScopeChoice,
     mutation::{Mutation, Outcome},
-    task::{ListScope, SCHEMA_VERSION, TaskList},
+    task::{ListScope, SCHEMA_VERSION, SUBTASK_SCHEMA_VERSION, TaskList},
 };
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -225,6 +225,8 @@ impl Store {
         if !outcome.changed() {
             return Ok(MutationReply { snapshot, outcome });
         }
+        // The lowest schema that holds the result: schema 1 until a list has a subtask.
+        snapshot.list.stamp_schema_version();
         snapshot
             .list
             .validate()
@@ -331,10 +333,12 @@ impl Store {
     // Fixture construction only; no production caller can save a cached list.
     #[cfg(test)]
     pub(crate) fn save(&self, list: &TaskList) -> Result<()> {
+        let mut list = list.clone();
+        list.stamp_schema_version();
         list.validate()?;
         ensure_scope_matches(list.scope(), &self.scope)?;
         let guard = self.acquire(ScopePresence::AllowMissing, SHELL_LOCK_BUDGET)?;
-        guard.replace(&serialized(list)?, &mut |_| Ok(()))?;
+        guard.replace(&serialized(&list)?, &mut |_| Ok(()))?;
         guard.sync_directory()
     }
 }
@@ -531,7 +535,7 @@ fn parse_snapshot(bytes: &[u8], path: &Path, expected_scope: &ListScope) -> Resu
     }
     let probe: VersionProbe = serde_json::from_slice(bytes)
         .wrap_err_with(|| format!("could not read schema version from {}", path.display()))?;
-    if probe.schema_version != SCHEMA_VERSION {
+    if probe.schema_version != SCHEMA_VERSION && probe.schema_version != SUBTASK_SCHEMA_VERSION {
         return Err(eyre!(
             "unsupported schema version {} in {}",
             probe.schema_version,
@@ -566,13 +570,301 @@ mod tests {
     #[cfg(unix)]
     use super::canonical_path_string;
     use super::{
-        Store, load_read_only, load_snapshot, paths_for_home, project_folder_name, resolve_home,
-        resolve_scope,
+        SHELL_LOCK_BUDGET, ScopePresence, SnapshotToken, Store, load_read_only, load_snapshot,
+        paths_for_home, project_folder_name, resolve_home, resolve_scope,
     };
     use crate::{
         cli::ScopeChoice,
-        task::{ListScope, TaskList},
+        mutation::{Mutation, Outcome},
+        task::{ListError, ListScope, ParentError, TaskId, TaskList},
     };
+
+    /// Pretty-printed exactly as beta.4 writes it: a done task and a tombstone.
+    const BETA4_SNAPSHOT: &str = r#"{
+  "schema_version": 1,
+  "scope": {
+    "kind": "global"
+  },
+  "next_task_id": 3,
+  "next_deletion_sequence": 2,
+  "tasks": [
+    {
+      "id": 1,
+      "text": "Ship the release",
+      "completed": true,
+      "deletion_sequence": null
+    },
+    {
+      "id": 2,
+      "text": "Gone",
+      "completed": false,
+      "deletion_sequence": 1
+    }
+  ]
+}
+"#;
+
+    fn mutate(store: &Store, mutation: &Mutation) -> Outcome {
+        store
+            .mutate(mutation, ScopePresence::AllowMissing, SHELL_LOCK_BUDGET)
+            .unwrap()
+            .outcome
+    }
+
+    fn stored(store: &Store) -> String {
+        std::fs::read_to_string(&store.paths().data_file).unwrap()
+    }
+
+    #[test]
+    fn a_beta4_snapshot_should_load_and_save_as_schema_one_with_its_other_bytes_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        std::fs::create_dir_all(&store.paths().directory).unwrap();
+        std::fs::write(&store.paths().data_file, BETA4_SNAPSHOT).unwrap();
+
+        let list = store.load().unwrap();
+        assert_eq!(list.tasks().len(), 2);
+        assert!(list.tasks().iter().all(|task| task.parent_id().is_none()));
+        assert!(mutate(&store, &Mutation::Add("Third".into())).changed());
+
+        let expected = BETA4_SNAPSHOT
+            .replace(r#""next_task_id": 3"#, r#""next_task_id": 4"#)
+            .replace(
+                "      \"deletion_sequence\": 1\n    }\n",
+                "      \"deletion_sequence\": 1\n    },\n    {\n      \"id\": 3,\n      \"text\": \"Third\",\n      \"completed\": false,\n      \"deletion_sequence\": null\n    }\n",
+            );
+        assert_eq!(stored(&store), expected);
+        assert!(!stored(&store).contains("parent_id"));
+    }
+
+    #[test]
+    fn subtasks_should_write_schema_two_until_the_last_promotion() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        mutate(&store, &Mutation::Add("parent".into()));
+        mutate(&store, &Mutation::Add("other".into()));
+        assert!(stored(&store).contains(r#""schema_version": 1,"#));
+        let added = mutate(
+            &store,
+            &Mutation::AddSubtask {
+                parent: TaskId::from_shell_integer(1).unwrap(),
+                text: "child".into(),
+            },
+        );
+        let child = TaskId::from_shell_integer(3).unwrap();
+        assert_eq!(
+            added,
+            Outcome::Changed {
+                id: child,
+                celebrate: false
+            }
+        );
+        let bytes = stored(&store);
+        assert!(bytes.contains(r#""schema_version": 2,"#));
+        assert_eq!(bytes.matches(r#""parent_id""#).count(), 1);
+        assert!(bytes.contains("      \"deletion_sequence\": null,\n      \"parent_id\": 1\n"));
+        let loaded = store.load().unwrap();
+        assert_eq!(
+            loaded
+                .tasks()
+                .iter()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 3, 2]
+        );
+        assert_eq!(
+            loaded.task(child).unwrap().parent_id().map(TaskId::get),
+            Some(1)
+        );
+
+        assert!(
+            mutate(
+                &store,
+                &Mutation::SetParent {
+                    id: child,
+                    parent: None
+                }
+            )
+            .changed()
+        );
+        let bytes = stored(&store);
+        assert!(bytes.contains(r#""schema_version": 1,"#));
+        assert!(!bytes.contains("parent_id"));
+        assert_eq!(
+            store
+                .load()
+                .unwrap()
+                .tasks()
+                .iter()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 3, 2]
+        );
+    }
+
+    #[test]
+    fn load_should_reject_schema_one_links_future_versions_and_bad_trees_without_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        let task = |id: u64, parent: Option<u64>, deleted: Option<u64>| {
+            let parent = parent.map_or(String::new(), |parent| format!(r#","parent_id":{parent}"#));
+            let deleted = deleted.map_or("null".to_owned(), |sequence| sequence.to_string());
+            format!(
+                r#"{{"id":{id},"text":"t{id}","completed":false,"deletion_sequence":{deleted}{parent}}}"#
+            )
+        };
+        let document = |version: u64, tasks: &[String]| {
+            format!(
+                r#"{{"schema_version":{version},"scope":{{"kind":"global"}},"next_task_id":9,"next_deletion_sequence":9,"tasks":[{}]}}"#,
+                tasks.join(",")
+            )
+        };
+        let valid = document(2, &[task(1, None, None), task(2, Some(1), None)]);
+        std::fs::create_dir_all(&store.paths().directory).unwrap();
+        std::fs::write(&store.paths().data_file, &valid).unwrap();
+        assert!(store.load().is_ok());
+        let invalid = [
+            document(1, &[task(1, None, None), task(2, Some(1), None)]),
+            document(3, &[task(1, None, None), task(2, Some(1), None)]),
+            document(2, &[task(1, Some(1), None)]),
+            document(2, &[task(2, Some(1), None), task(1, None, None)]),
+            document(2, &[task(1, None, None), task(2, Some(7), None)]),
+            document(
+                2,
+                &[
+                    task(1, None, None),
+                    task(3, None, None),
+                    task(2, Some(1), None),
+                ],
+            ),
+            document(
+                2,
+                &[
+                    task(1, None, None),
+                    task(2, Some(1), None),
+                    task(3, Some(2), None),
+                ],
+            ),
+            document(2, &[task(1, None, Some(1)), task(2, Some(1), None)]),
+            document(2, &[task(1, None, Some(1)), task(2, Some(1), Some(2))]),
+            document(2, &[task(1, None, Some(1)), task(2, None, Some(1))]),
+        ];
+        for document in invalid {
+            std::fs::write(&store.paths().data_file, &document).unwrap();
+            assert!(store.load().is_err(), "{document}");
+            assert!(
+                store
+                    .mutate(
+                        &Mutation::Add("x".into()),
+                        ScopePresence::AllowMissing,
+                        SHELL_LOCK_BUDGET
+                    )
+                    .is_err()
+            );
+            assert_eq!(stored(&store), document);
+            assert!(!store.paths().temp_file.exists());
+        }
+    }
+
+    #[test]
+    fn a_schema_two_file_without_links_should_load_skip_no_ops_and_save_as_schema_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        std::fs::create_dir_all(&store.paths().directory).unwrap();
+        let bytes = BETA4_SNAPSHOT.replace(r#""schema_version": 1"#, r#""schema_version": 2"#);
+        std::fs::write(&store.paths().data_file, &bytes).unwrap();
+
+        assert!(load_snapshot(&store.paths().data_file, &ListScope::Global).is_ok());
+        assert!(load_read_only(temp.path(), &ListScope::Global).is_ok());
+        let done = TaskId::from_shell_integer(1).unwrap();
+        let reply = store
+            .mutate(
+                &Mutation::SetCompleted {
+                    id: done,
+                    completed: true,
+                },
+                ScopePresence::AllowMissing,
+                SHELL_LOCK_BUDGET,
+            )
+            .unwrap();
+        assert_eq!(reply.outcome, Outcome::AlreadyInState { id: done });
+        assert_eq!(
+            reply.snapshot.token,
+            SnapshotToken::Present(bytes.clone().into_bytes())
+        );
+        assert_eq!(stored(&store), bytes);
+
+        assert!(
+            mutate(
+                &store,
+                &Mutation::SetCompleted {
+                    id: done,
+                    completed: false
+                }
+            )
+            .changed()
+        );
+        assert_eq!(
+            stored(&store),
+            BETA4_SNAPSHOT.replace(r#""completed": true"#, r#""completed": false"#)
+        );
+    }
+
+    #[test]
+    fn rejected_and_no_op_subtask_mutations_should_never_reach_the_temp_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path(), ListScope::Global).unwrap();
+        mutate(&store, &Mutation::Add("parent".into()));
+        let parent = TaskId::from_shell_integer(1).unwrap();
+        mutate(
+            &store,
+            &Mutation::AddSubtask {
+                parent,
+                text: "child".into(),
+            },
+        );
+        let child = TaskId::from_shell_integer(2).unwrap();
+        let before = stored(&store);
+        let requests = [
+            (
+                Mutation::SetParent {
+                    id: child,
+                    parent: Some(parent),
+                },
+                Outcome::AlreadyInState { id: child },
+            ),
+            (
+                Mutation::SetParent {
+                    id: parent,
+                    parent: Some(child),
+                },
+                Outcome::Rejected(ListError::InvalidParent(ParentError::ParentIsSubtask(
+                    child,
+                ))),
+            ),
+            (
+                Mutation::AddSubtask {
+                    parent: child,
+                    text: "grandchild".into(),
+                },
+                Outcome::Rejected(ListError::InvalidParent(ParentError::ParentIsSubtask(
+                    child,
+                ))),
+            ),
+        ];
+        for (request, expected) in requests {
+            let reply = store
+                .mutate_with_hook(
+                    &request,
+                    ScopePresence::AllowMissing,
+                    SHELL_LOCK_BUDGET,
+                    |step| panic!("{request:?} reached {step:?}"),
+                )
+                .unwrap();
+            assert_eq!(reply.outcome, expected);
+            assert_eq!(stored(&store), before);
+        }
+    }
 
     #[test]
     fn idle_handles_should_not_create_storage_or_exclude_another_client() {
@@ -782,7 +1074,7 @@ mod tests {
         std::fs::create_dir_all(&paths.directory).unwrap();
         let documents = [
             "{",
-            r#"{"schema_version":2}"#,
+            r#"{"schema_version":3}"#,
             r#"{"schema_version":1,"scope":{"kind":"global"},"next_task_id":1,"next_deletion_sequence":1,"tasks":[{"id":0,"text":"bad","completed":false,"deletion_sequence":null}]}"#,
             r#"{"schema_version":1,"scope":{"kind":"project","path":"/tmp/other"},"next_task_id":1,"next_deletion_sequence":1,"tasks":[]}"#,
         ];
@@ -799,14 +1091,14 @@ mod tests {
     fn load_should_reject_future_version_without_replacing_file() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("tasks.json");
-        std::fs::write(&path, br#"{"schema_version":2}"#).unwrap();
+        std::fs::write(&path, br#"{"schema_version":3}"#).unwrap();
 
         let error = load_snapshot(&path, &ListScope::Global).unwrap_err();
 
-        assert!(error.to_string().contains("schema version 2"));
+        assert!(error.to_string().contains("schema version 3"));
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            r#"{"schema_version":2}"#
+            r#"{"schema_version":3}"#
         );
     }
 

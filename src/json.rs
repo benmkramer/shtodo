@@ -37,6 +37,8 @@ struct Task<'a> {
     /// A `"YYYY-MM-DD"` string, or `null`.
     #[serde(serialize_with = "serialize_due")]
     due: Option<metadata::Date>,
+    /// The parent's scope-local ID, or `null` for a top-level task.
+    parent_id: Option<u64>,
 }
 
 fn serialize_due<S: Serializer>(
@@ -59,6 +61,7 @@ impl<'a> From<&'a task::Task> for Task<'a> {
             priority: metadata::priority(task.text()).map(metadata::Priority::letter),
             tags: metadata::distinct_tags(task.text()),
             due: metadata::due(task.text()),
+            parent_id: task.parent_id().map(task::TaskId::get),
         }
     }
 }
@@ -164,7 +167,16 @@ fn error_details(error: &Report) -> (&'static str, Option<u64>) {
     match error.downcast_ref::<task::ListError>() {
         Some(task::ListError::InvalidText) => ("invalid_task_text", None),
         Some(task::ListError::TaskNotFound(id)) => ("task_not_found", Some(id.get())),
-        Some(task::ListError::TaskDeleted(id)) => ("task_deleted", Some(id.get())),
+        Some(
+            task::ListError::TaskDeleted(id)
+            // The parent to restore first, which may differ from the requested ID.
+            | task::ListError::ParentDeleted(id),
+        ) => ("task_deleted", Some(id.get())),
+        Some(task::ListError::InvalidParent(
+            task::ParentError::SelfParent(id)
+            | task::ParentError::ParentIsSubtask(id)
+            | task::ParentError::HasSubtasks(id),
+        )) => ("invalid_parent", Some(id.get())),
         _ => ("command_failed", None),
     }
 }
@@ -216,12 +228,15 @@ mod tests {
             serde_json::to_value(Task::from(list.task(tagged).unwrap())).unwrap(),
             serde_json::json!({
                 "id": 1, "text": "(A) Fix the bug +shtodo @laptop +shtodo.", "state": "open",
-                "deleted": false, "priority": "A", "tags": ["+shtodo", "@laptop"], "due": null
+                "deleted": false, "priority": "A", "tags": ["+shtodo", "@laptop"], "due": null,
+                "parent_id": null
             })
         );
         let deleted = serde_json::to_string(&Task::from(list.task(plain).unwrap())).unwrap();
         assert!(
-            deleted.ends_with(r#""deleted":true,"priority":null,"tags":[],"due":null}"#),
+            deleted.ends_with(
+                r#""deleted":true,"priority":null,"tags":[],"due":null,"parent_id":null}"#
+            ),
             "{deleted}"
         );
     }
@@ -239,14 +254,74 @@ mod tests {
         let json = |id| serde_json::to_string(&Task::from(list.task(id).unwrap())).unwrap();
         assert_eq!(
             json(dated),
-            r#"{"id":1,"text":"(A) Pay rent due:2026-11-01. +home","state":"open","deleted":false,"priority":"A","tags":["+home"],"due":"2026-11-01"}"#
+            r#"{"id":1,"text":"(A) Pay rent due:2026-11-01. +home","state":"open","deleted":false,"priority":"A","tags":["+home"],"due":"2026-11-01","parent_id":null}"#
         );
         assert!(
-            json(deleted)
-                .ends_with(r#""deleted":true,"priority":null,"tags":[],"due":"0007-03-09"}"#),
+            json(deleted).ends_with(
+                r#""deleted":true,"priority":null,"tags":[],"due":"0007-03-09","parent_id":null}"#
+            ),
             "{}",
             json(deleted)
         );
-        assert!(json(invalid).ends_with(r#""tags":[],"due":null}"#));
+        assert!(json(invalid).ends_with(r#""tags":[],"due":null,"parent_id":null}"#));
+    }
+
+    #[test]
+    fn task_objects_should_carry_parent_id_after_due_for_live_and_deleted_tasks() {
+        let mut list = task::TaskList::new(task::ListScope::Global);
+        let parent = list.add("parent").unwrap();
+        let child = list.add_subtask(parent, "child").unwrap();
+        let gone = list.add_subtask(parent, "gone").unwrap();
+        list.delete(gone).unwrap();
+        let json = |id| serde_json::to_string(&Task::from(list.task(id).unwrap())).unwrap();
+        assert!(
+            json(parent).ends_with(r#","due":null,"parent_id":null}"#),
+            "{}",
+            json(parent)
+        );
+        assert!(
+            json(child).ends_with(r#","due":null,"parent_id":1}"#),
+            "{}",
+            json(child)
+        );
+        assert!(
+            json(gone)
+                .ends_with(r#""deleted":true,"priority":null,"tags":[],"due":null,"parent_id":1}"#),
+            "{}",
+            json(gone)
+        );
+    }
+
+    #[test]
+    fn parent_errors_should_map_to_task_deleted_and_invalid_parent_with_the_stated_ids() {
+        let id = |value| task::TaskId::from_shell_integer(value).unwrap();
+        for (error, code, task_id) in [
+            (task::ListError::ParentDeleted(id(3)), "task_deleted", 3),
+            (
+                task::ListError::InvalidParent(task::ParentError::SelfParent(id(5))),
+                "invalid_parent",
+                5,
+            ),
+            (
+                task::ListError::InvalidParent(task::ParentError::ParentIsSubtask(id(4))),
+                "invalid_parent",
+                4,
+            ),
+            (
+                task::ListError::InvalidParent(task::ParentError::HasSubtasks(id(3))),
+                "invalid_parent",
+                3,
+            ),
+        ] {
+            let message = error.to_string();
+            let reply = serde_json::to_value(error_reply(&Report::from(error))).unwrap();
+            assert_eq!(reply["error"]["code"], code);
+            assert_eq!(reply["error"]["task_id"], task_id);
+            assert_eq!(reply["error"]["message"], message);
+        }
+        assert_eq!(
+            task::ListError::InvalidParent(task::ParentError::ParentIsSubtask(id(4))).to_string(),
+            "task 4 is a subtask; subtasks cannot have subtasks"
+        );
     }
 }

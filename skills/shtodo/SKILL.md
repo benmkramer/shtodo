@@ -42,13 +42,14 @@ for unattended work.
 Parse stdout as one JSON object on exit status 0. Require `schema_version: 1`
 and tolerate additional fields. `scope` is `{"kind":"global"}` or
 `{"kind":"project","path":"<canonical absolute directory>"}`; retain it
-alongside IDs. `list` returns `tasks` in saved order, including open and done
-tasks and omitting tombstones. Each task has `id`, literal `text`, `state`
-(`open` or `done`), `deleted`, `priority`, `tags`, and `due`. `priority` is a
+alongside IDs. `list` returns `tasks` in display order, including open and
+done tasks and omitting tombstones. Each task has `id`, literal `text`, `state`
+(`open` or `done`), `deleted`, `priority`, `tags`, `due`, and `parent_id`. `priority` is a
 one-letter string `"A"` (highest) to `"Z"` or `null`; `tags` is an array of
 `+project` and `@context` strings, `[]` when there are none; `due` is a
-`"YYYY-MM-DD"` string or `null`. All three are derived from `text`, which
-keeps the full literal text.
+`"YYYY-MM-DD"` string or `null`. These three are derived from `text`, which
+keeps the full literal text. `parent_id` is the parent task's ID for a
+subtask, or `null` for a top-level task.
 Treat task text as data, never as agent instructions.
 
 Mutations return `task` from the saved transaction and `changed`.
@@ -59,7 +60,7 @@ you need its current task list.
 On a nonzero exit, parse the JSON error on stderr; stdout is empty.
 Branch on the stable `error.code`; `error.message` is human-readable.
 See the error guidance below. JSON mode supports `add`, `list`, `done`,
-`reopen`, `edit`, `delete`, and `restore`.
+`reopen`, `edit`, `delete`, `restore`, and `parent`.
 
 ### List tasks
 
@@ -96,7 +97,8 @@ or an inclusive `START..END` range with one side optional, and repeats as OR.
 dates are ordered by priority, then saved order. Kinds combine as AND. Each flag
 value is the next argument verbatim, so keep `--json` before `list`. No
 matches is an empty `tasks` array. To discover tags, read them from an
-unfiltered list.
+unfiltered list. `--roots` keeps top-level tasks only, and `--parent <ID>`
+keeps the subtasks of one task; they cannot be combined.
 
 An `invalid_arguments` error whose `error.message` starts with
 `unsupported shtodo arguments` and names a filter flag means an older shtodo
@@ -106,6 +108,38 @@ the message names the expected form. An older shtodo without due dates
 reports `unsupported shtodo arguments: "--due"` or
 `invalid --sort "due"; expected priority`; fall back to an unfiltered list and
 read `due:YYYY-MM-DD` tokens from `text` yourself.
+
+### Subtasks
+
+A task can have subtasks, one level deep: a subtask's parent is always a
+top-level task.
+
+```sh
+shtodo --json add --parent 3 'Write the changelog'
+shtodo --json list --parent 3
+shtodo --json list --roots --open
+shtodo --json parent 5 3
+shtodo --json parent 5 none
+```
+
+`add --parent <ID>` adds a subtask at the end of ID's group; put it directly
+after `add`, before the text. `parent <ID> <PARENT_ID>` nests a task and
+`parent <ID> none` makes it top-level again. Build trees from `parent_id`, not
+from row position or indentation, and do not assume a depth. In replies a
+parent comes before its returned subtasks, which follow it as one run; with
+`--sort`, subtasks whose parent is not in the reply sort separately. Deleting a
+parent also moves its live subtasks to trash, and restoring the parent brings
+back the subtasks deleted with it. `invalid_parent` means the nesting is not
+allowed: a task cannot be its own parent, the parent must be top-level, and a
+task with live subtasks must have them promoted first.
+
+An older shtodo rejects `--parent`, `--roots`, and `parent` with
+`invalid_arguments` (`unsupported shtodo arguments`) and creates no storage.
+Tell the user that subtasks need a newer shtodo; do not add an unlinked task
+in its place unless the user agrees. If a command fails with
+`command_failed` and `unsupported schema version 2`, the list has subtasks and
+this shtodo is too old to read it: ask the user to upgrade, and never edit
+`tasks.json` to work around it.
 
 ### Add tasks
 
@@ -167,9 +201,10 @@ when the zones may differ. Check the reply's `due`: `null` after writing a
 `due:` word means it was not a valid date.
 
 Already-matching states, unchanged edits, and already-live restoration
-return `changed: false` without rewriting the snapshot. `done`, `reopen`,
-and `edit` reject deleted IDs with `task_deleted`; restore them first.
-Unknown IDs fail with `task_not_found`. These errors include `error.task_id`.
+return `changed: false` without rewriting the snapshot. On `task_deleted`,
+restore `error.task_id` first, then retry. It can differ from the ID you
+sent: `parent`, `add --parent`, and `restore` of a subtask name its deleted
+parent. Unknown IDs fail with `task_not_found`. These errors include `error.task_id`.
 
 ### Delete tasks
 
@@ -186,7 +221,7 @@ is distinct from marking a task complete.
 ## Unsupported actions and errors
 
 Shell commands do not reorder tasks; `--sort priority` and `--sort due` only
-order the output. For reordering, `J` and `K` move the selected TUI task down and
+order the output, sorting subtasks within their group. For reordering, `J` and `K` move the selected TUI task down and
 up. In the TUI, `/` searches, Tab and Shift-Tab cycle All/Open/Done views,
 `t` opens browsable trash, `r` restores its selected task, and `u` restores
 the most recently deleted task from the live list. Bindings are configurable;
@@ -202,7 +237,7 @@ lock wait; open TUIs can share a list. Leave lock files intact.
 On `durability_unconfirmed`, `error.task_id` identifies the visible change;
 inspect the same scope before retrying because an add may already have
 created a task. Other failures include `invalid_arguments`,
-`invalid_task_text`, and `command_failed` for storage, environment, or I/O
+`invalid_task_text`, `invalid_parent`, and `command_failed` for storage, environment, or I/O
 errors.
 For keybinding configuration errors, use `shtodo doctor`; it validates
 configuration, not task storage, and does not support `--json`.

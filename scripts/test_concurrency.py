@@ -328,6 +328,29 @@ class ConcurrentUsage(unittest.TestCase):
             tui.wait_for(b"by due")
             self.assertIn(b"5  open  gamma due:2099-02-01", cli(self.home, "list").stdout)
 
+    def test_shell_subtask_writes_follow_idle_refresh_in_tree_order_and_u_restores_the_group(self):
+        for args in (["add", "alpha"], ["add", "gamma"], ["add", "--parent", "1", "beta"]):
+            self.assertEqual(cli(self.home, *args).returncode, 0)
+        words = ("alpha", "beta", "gamma", "plain")
+        with Tui(self.home) as tui:
+            self.wait_rows(tui, ["alpha", "beta", "gamma"], words)
+            # A new subtask lands right after its group's last subtask.
+            reply = cli(self.home, "add", "--parent", "1", "plain")
+            self.assertEqual(reply.returncode, 0, reply.stderr)
+            self.wait_rows(tui, ["alpha", "beta", "plain", "gamma"], words)
+            # Promotion places the row right after its former group.
+            reply = cli(self.home, "parent", "3", "none")
+            self.assertEqual(reply.returncode, 0, reply.stderr)
+            self.wait_rows(tui, ["alpha", "plain", "beta", "gamma"], words)
+            # Deleting the parent hides its group; u in the TUI brings the whole group back.
+            reply = cli(self.home, "delete", "1")
+            self.assertEqual(reply.stdout, b"Deleted 1 with 1 subtask: alpha\n")
+            self.wait_rows(tui, ["beta", "gamma"], words)
+            tui.send(b"u")
+            self.wait_rows(tui, ["alpha", "plain", "beta", "gamma"], words)
+            wait_tasks(self.home, ["alpha", "plain", "beta", "gamma"])
+            self.assertIn(b"4  open    plain", cli(self.home, "list").stdout)
+
     def test_trash_stays_open_and_refreshes_external_restoration_and_new_deletion(self):
         self.seed()
         self.assertEqual(cli(self.home, "delete", "1").returncode, 0)
