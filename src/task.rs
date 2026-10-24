@@ -828,6 +828,14 @@ mod tests {
         );
         assert_eq!(list, deleted);
         assert_ne!(before, deleted);
+        // A valid parent with an exhausted ID space changes nothing.
+        list.next_task_id = u64::MAX;
+        let exhausted = list.clone();
+        assert_eq!(
+            list.add_subtask(TaskId(1), "x"),
+            Err(ListError::TaskIdExhausted)
+        );
+        assert_eq!(list, exhausted);
     }
 
     #[test]
@@ -951,6 +959,15 @@ mod tests {
             list.delete(TaskId(5)),
             Err(ListError::TaskNotFound(TaskId(5)))
         );
+        // An exhausted sequence space deletes neither the parent nor any of its subtasks.
+        let mut exhausted = groups();
+        exhausted.next_deletion_sequence = u64::MAX;
+        let before = exhausted.clone();
+        assert_eq!(
+            exhausted.delete(TaskId(1)),
+            Err(ListError::DeletionSequenceExhausted)
+        );
+        assert_eq!(exhausted, before);
     }
 
     #[test]
