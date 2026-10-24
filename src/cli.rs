@@ -208,13 +208,18 @@ where
             _ => 0,
         };
         index += 1;
+        // Like the add parser, each flag counts once; a repeat is the start of the text.
+        let add = command == "add";
+        let (mut print_id, mut parent) = (false, false);
         while index < values.len() {
             if values[index] == "--json" {
                 values.remove(index);
                 json_flags += 1;
-            } else if values[command_index] == "add" && values[index] == "--print-id" {
+            } else if add && values[index] == "--print-id" && !print_id {
+                print_id = true;
                 index += 1;
-            } else if values[command_index] == "add" && values[index] == "--parent" {
+            } else if add && values[index] == "--parent" && !parent {
+                parent = true;
                 // The value is verbatim, so `add --parent --json` is an invalid value.
                 index += 2;
             } else {
@@ -749,6 +754,70 @@ mod tests {
                 .to_string()
         );
         assert!(add.starts_with("--parent requires a value\n\nshtodo - "));
+    }
+
+    #[test]
+    fn parse_invocation_should_stop_the_add_flag_scan_at_a_repeated_flag() {
+        let invoke = |values: &[&str]| parse_invocation(args(values));
+        let child = |scope| {
+            Ok(Command::AddSubtask(
+                scope,
+                1,
+                Some(OsString::from("--parent")),
+                false,
+            ))
+        };
+        // The add parser takes a second --parent as the text, so the scan must too.
+        for (values, scope) in [
+            (
+                vec!["add", "--parent", "1", "--parent", "--json"],
+                ScopeChoice::Global,
+            ),
+            (
+                vec!["--json", "add", "--parent", "1", "--parent"],
+                ScopeChoice::Global,
+            ),
+            (
+                vec!["add", "--json", "--parent", "1", "--parent"],
+                ScopeChoice::Global,
+            ),
+            (
+                vec!["--local", "add", "--parent", "1", "--parent", "--json"],
+                ScopeChoice::Local,
+            ),
+        ] {
+            assert_eq!(
+                invoke(&values),
+                (OutputFormat::Json, child(scope)),
+                "{values:?}"
+            );
+        }
+        assert_eq!(
+            invoke(&["add", "--parent", "1", "--parent"]),
+            (OutputFormat::Text, child(ScopeChoice::Global))
+        );
+        // A second --print-id is text too; with --json it is still JsonWithPrintId.
+        for values in [
+            vec!["add", "--print-id", "--print-id", "--json"],
+            vec!["add", "--parent", "1", "--print-id", "--print-id", "--json"],
+        ] {
+            assert_eq!(
+                invoke(&values),
+                (OutputFormat::Json, Err(CliError::JsonWithPrintId)),
+                "{values:?}"
+            );
+        }
+        assert_eq!(
+            invoke(&["add", "--print-id", "--print-id"]),
+            (
+                OutputFormat::Text,
+                Ok(Command::Add(
+                    ScopeChoice::Global,
+                    Some(OsString::from("--print-id")),
+                    true
+                ))
+            )
+        );
     }
 
     #[test]

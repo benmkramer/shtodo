@@ -1315,3 +1315,53 @@ fn json_lists_with_subtasks_should_be_readable_under_a_writer_lock() {
     assert_eq!(ids(&value), [2, 1, 4, 3, 5, 6]);
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
+
+#[test]
+fn json_add_should_take_a_repeated_parent_flag_as_subtask_text_in_every_json_placement() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    for scope in [&[][..], &["--local"][..]] {
+        let parent = success(&run(
+            home.path(),
+            project.path(),
+            &[scope, &["--json", "add", "parent"]].concat(),
+        ));
+        assert_eq!(parent["task"]["id"], 1);
+        for (index, placement) in [
+            &["add", "--parent", "1", "--parent", "--json"][..],
+            &["--json", "add", "--parent", "1", "--parent"][..],
+            &["add", "--json", "--parent", "1", "--parent"][..],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let reply = success(&run(
+                home.path(),
+                project.path(),
+                &[scope, placement].concat(),
+            ));
+            assert_eq!(reply["command"], "add", "{scope:?} {placement:?}");
+            assert_eq!(reply["changed"], true);
+            assert_eq!(
+                reply["task"],
+                subtask(index as u64 + 2, "--parent", "open", false, 1),
+                "{scope:?} {placement:?}"
+            );
+        }
+        let list = success(&run(
+            home.path(),
+            project.path(),
+            &[scope, &["--json", "list", "--parent", "1"]].concat(),
+        ));
+        assert_eq!(ids(&list), [2, 3, 4], "{scope:?}");
+    }
+    let global = success(&run(home.path(), project.path(), &["--json", "list"]));
+    let local = success(&run(
+        home.path(),
+        project.path(),
+        &["--local", "--json", "list"],
+    ));
+    assert_eq!(ids(&global), [1, 2, 3, 4]);
+    assert_eq!(ids(&local), [1, 2, 3, 4]);
+    assert_ne!(global["scope"], local["scope"]);
+}

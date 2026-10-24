@@ -2232,3 +2232,37 @@ fn subtask_storage_errors_should_exit_one_with_their_messages_and_write_nothing(
         assert_eq!(std::fs::read(&path).unwrap(), before, "{arguments:?}");
     }
 }
+
+#[test]
+fn add_should_take_a_repeated_parent_flag_as_subtask_text_with_or_without_json() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    for scope in [&[][..], &["--local"][..]] {
+        let at = |arguments: &[&str]| {
+            let output = run_with_home_at(home.path(), project.path(), arguments);
+            assert!(output.status.success(), "{arguments:?}: {output:?}");
+            assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        at(&[scope, &["add", "parent"]].concat());
+        assert_eq!(
+            at(&[scope, &["add", "--parent", "1", "--parent"]].concat()),
+            "Added: --parent\n"
+        );
+        for placement in [
+            &["add", "--parent", "1", "--parent", "--json"][..],
+            &["--json", "add", "--parent", "1", "--parent"][..],
+        ] {
+            let reply: serde_json::Value =
+                serde_json::from_str(&at(&[scope, placement].concat())).unwrap();
+            assert_eq!(reply["command"], "add", "{scope:?} {placement:?}");
+            assert_eq!(reply["changed"], true);
+            assert_eq!(reply["task"]["text"], "--parent", "{scope:?} {placement:?}");
+            assert_eq!(reply["task"]["parent_id"], 1, "{scope:?} {placement:?}");
+        }
+        assert_eq!(
+            at(&[scope, &["list"]].concat()),
+            "1  open  parent\n2  open    --parent\n3  open    --parent\n4  open    --parent\n"
+        );
+    }
+}
