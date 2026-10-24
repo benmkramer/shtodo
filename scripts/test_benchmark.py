@@ -117,6 +117,123 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(comparison.SETUP_STATUS[cases["current_due"]], "by due")
         self.assertEqual(comparison.SETUP_STATUS[cases["current_priority"]], "by priority")
 
+    def test_nested_fixture_regroups_the_mixed_records_under_the_invariants(self):
+        import benchmark_concurrency_comparison as comparison
+
+        for size in (0, 100, 1003, 10000):
+            mixed = comparison.mixed_fixture(size)
+            nested = comparison.nested_fixture(size)
+            flat = comparison.nested_flat_fixture(size)
+            tasks = nested["tasks"]
+            self.assertEqual(nested["schema_version"], 2 if size else 1)
+            self.assertEqual(flat["schema_version"], 1)
+            self.assertEqual([(task["id"], task["text"], task["completed"]) for task in tasks],
+                             [(task["id"], task["text"], task["completed"]) for task in mixed["tasks"]])
+            self.assertEqual(sum(task["deletion_sequence"] is not None for task in tasks),
+                             sum(task["deletion_sequence"] is not None for task in mixed["tasks"]))
+            # The flat twin drops the links and numbers its tombstones uniquely, as schema 1 needs.
+            self.assertEqual([(task["id"], task["text"], task["completed"], task["deletion_sequence"] is None)
+                              for task in flat["tasks"]],
+                             [(task["id"], task["text"], task["completed"], task["deletion_sequence"] is None)
+                              for task in tasks])
+            self.assertFalse(any("parent_id" in task for task in flat["tasks"]))
+            flat_sequences = [task["deletion_sequence"] for task in flat["tasks"] if task["deletion_sequence"]]
+            self.assertEqual(flat_sequences, list(range(1, len(flat_sequences) + 1)))
+            self.assertEqual(flat["next_deletion_sequence"], len(flat_sequences) + 1)
+            by_id = {task["id"]: task for task in tasks}
+            sequences = [task["deletion_sequence"] for task in tasks if task["deletion_sequence"]]
+            self.assertTrue(all(sequence < nested["next_deletion_sequence"] for sequence in sequences))
+            head = None
+            whole = singles = 0
+            for index, task in enumerate(tasks):
+                # Groups of one top-level task and four subtasks, in storage order.
+                self.assertEqual(task.get("parent_id"), None if index % 5 == 0 else tasks[index - index % 5]["id"])
+                if "parent_id" not in task:
+                    head = task
+                    continue
+                self.assertEqual(task["parent_id"], head["id"])
+                if head["deletion_sequence"] is not None:
+                    self.assertEqual(task["deletion_sequence"], head["deletion_sequence"])
+                elif task["deletion_sequence"] is not None:
+                    singles += 1
+            whole = sum(1 for task in tasks if "parent_id" not in task and task["deletion_sequence"])
+            # A subtask may share only its parent's sequence; every other sequence is unique.
+            shared = [task["deletion_sequence"] for task in tasks
+                      if task.get("parent_id") and by_id[task["parent_id"]]["deletion_sequence"]]
+            self.assertEqual(len(sequences) - len(shared), len(set(sequences)))
+            if size >= 100:
+                self.assertGreater(whole, 0)
+                self.assertGreater(singles, 0)
+        binary = benchmark.executable(str(benchmark.ROOT / "target/release/shtodo"))
+        with tempfile.TemporaryDirectory() as root:
+            for value in (comparison.nested_fixture(1003), comparison.nested_flat_fixture(1003)):
+                output = self.run_on_fixture(binary, Path(root), value, ["list"])
+                self.assertEqual(output, comparison.expected_rows(value, "list"))
+
+    def run_on_fixture(self, binary, root, value, command):
+        import json
+
+        home = root / "home"
+        directory = home / ".shtodo/global"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "tasks.json").write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+        (directory / "tmp").mkdir(exist_ok=True)
+        return benchmark.capture([binary, *command], benchmark.isolated_env(home), home)
+
+    def test_tree_model_matches_the_binary_for_filters_sorts_and_json(self):
+        import json
+        import benchmark_concurrency_comparison as comparison
+
+        def task(id, text, parent=None, deleted=None, completed=False):
+            value = dict(id=id, text=text, completed=completed, deletion_sequence=deleted)
+            return value | (dict(parent_id=parent) if parent else {})
+
+        value = dict(schema_version=2, scope=dict(kind="global"), next_task_id=9,
+                     next_deletion_sequence=3, tasks=[
+                         task(1, "(C) one"), task(2, "(A) one a", 1), task(3, "(B) one b", 1, completed=True),
+                         task(4, "(B) four due:2000-01-01"), task(5, "four a", 4, deleted=1),
+                         task(6, "(A) six", deleted=2), task(7, "six a", 6, deleted=2), task(8, "(Z) eight")])
+        rows = lambda operation: comparison.expected_rows(value, operation)
+        self.assertEqual(rows("list"), "1  open  (C) one\n2  open    (A) one a\n3  done    (B) one b\n"
+                         "4  open  (B) four due:2000-01-01\n8  open  (Z) eight\n")
+        ids = lambda output: [int(line.split()[0]) for line in output.splitlines()]
+        self.assertEqual(ids(rows("list_sort")), [4, 1, 2, 3, 8])
+        self.assertEqual(ids(rows("list_sort_due")), [4, 1, 2, 3, 8])
+        self.assertEqual(ids(rows("list_roots")), [1, 4, 8])
+        self.assertEqual(rows("list_parent"), "")
+        self.assertEqual([(row["id"], row["parent_id"]) for row in rows("list_json_sort_due")],
+                         [(4, None), (1, None), (2, 1), (3, 1), (8, None)])
+        binary = benchmark.executable(str(benchmark.ROOT / "target/release/shtodo"))
+        with tempfile.TemporaryDirectory() as root:
+            for operation in ("list", "list_sort", "list_sort_due", "list_roots", "list_json",
+                              "list_json_sort_due"):
+                output = self.run_on_fixture(binary, Path(root), value, comparison.READ_OPERATIONS[operation])
+                if operation.startswith("list_json"):
+                    output = json.loads(output)["tasks"]
+                self.assertEqual(output, rows(operation), operation)
+            nested = comparison.nested_fixture(1003)
+            self.assertEqual(ids(comparison.expected_rows(nested, "list_parent")), [7, 8, 9, 10])
+            output = self.run_on_fixture(binary, Path(root), nested, comparison.READ_OPERATIONS["list_parent"])
+            self.assertEqual(output, comparison.expected_rows(nested, "list_parent"))
+
+    def test_nested_mutation_models_match_the_binary(self):
+        import json
+        import benchmark_concurrency_comparison as comparison
+
+        binary = benchmark.executable(str(benchmark.ROOT / "target/release/shtodo"))
+        nested = comparison.nested_fixture(1003)
+        with tempfile.TemporaryDirectory() as root:
+            for operation in ("add_parent", "parent_none"):
+                command, expected = comparison.cli_case(nested, "nested", operation)
+                self.run_on_fixture(binary, Path(root), nested, command)
+                actual = json.loads((Path(root) / "home/.shtodo/global/tasks.json").read_text())
+                self.assertEqual(actual, expected, operation)
+                self.assertEqual(actual["schema_version"], 2)
+        ids = [task["id"] for task in comparison.cli_case(nested, "nested", "add_parent")[1]["tasks"]]
+        self.assertEqual(ids[5:12], [6, 7, 8, 9, 10, 1004, 11])
+        ids = [task["id"] for task in comparison.cli_case(nested, "nested", "parent_none")[1]["tasks"]]
+        self.assertEqual(ids[5:11], [6, 7, 9, 10, 8, 11])
+
     @unittest.skipUnless((benchmark.ROOT / "target/benchmark-tools/taskbook/node_modules/.bin/tb").exists(),
                          "optional Taskbook installation unavailable")
     def test_taskbook_delete_can_be_restored_and_reset_clears_archive(self):
