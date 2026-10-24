@@ -228,10 +228,11 @@ least one subtask, including one in trash, is saved as schema 2. Older
 binaries refuse schema 2 without writing it: shell commands exit 1 with
 `unsupported schema version 2 in <path>` (`command_failed` with `--json`),
 and an older TUI that is already open shows `Storage unavailable` and blocks
-changes. Nothing is migrated in place. To make a list readable by an older
-binary again, restore any deleted group that has subtasks, promote every
-subtask with `parent <ID> none`, and delete again what should stay deleted;
-the next save is schema 1.
+changes. Nothing is migrated in place. A subtask in trash still holds its
+link, so to make a list readable by an older binary again, restore every
+deleted subtask too, restoring its parent first when the parent is in trash.
+Then promote each subtask with `parent <ID> none`, and delete again what
+should stay deleted; the next save is schema 1.
 
 ### Filtering and sorting the list
 

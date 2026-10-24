@@ -74,7 +74,8 @@ All notable changes to shtodo are documented in this file.
   one in trash, and as byte-identical schema 1 otherwise. Older shtodo
   versions refuse schema 2 without writing it (`unsupported schema version 2`),
   and an older TUI already open blocks changes until the list is schema 1
-  again. Promoting every subtask makes the next save schema 1.
+  again. Restoring and promoting every subtask, including those in trash,
+  makes the next save schema 1.
 - `add --parent` with nothing after it is now a usage error; it used to save
   the text `--parent`.
 - TUI `J`/`K` move a task among its siblings: a top-level task moves with its
