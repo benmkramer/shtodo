@@ -47,6 +47,17 @@ All notable changes to shtodo are documented in this file.
   a hint line listing tags in the current rows with counts, and Enter
   completion of a unique tag prefix. The status line shows the accepted filter
   and sort.
+- Subtasks, one level deep: `shtodo add --parent <ID>` adds one at the end of
+  its parent's group, and `shtodo parent <ID> <PARENT_ID | none>` nests or
+  promotes a task. Deleting a parent moves its live subtasks to trash with
+  it, and restoring it (shell `restore` or TUI `u`) brings them back;
+  `delete` and `restore` report `with N subtasks`.
+- `shtodo list` indents a subtask under its printed parent, `--roots` and
+  `--parent <ID>` list one level, and `--sort priority` and `--sort due`
+  sort as a tree, keeping each group together.
+- JSON task objects include `parent_id`, a number or `null`; `tasks` keeps
+  each returned group together with its parent first. New error code
+  `invalid_parent` for `add --parent` and `parent`.
 
 ### Changed
 
@@ -59,6 +70,17 @@ All notable changes to shtodo are documented in this file.
 - The new `toggle_sort` (`s`) and `edit_filter` (`f`) defaults yield to
   existing Normal bindings on those keys; such configs load unchanged and the
   new action is unbound until given a free key.
+- A list is saved as schema 2 while it has at least one subtask, including
+  one in trash, and as byte-identical schema 1 otherwise. Older shtodo
+  versions refuse schema 2 without writing it (`unsupported schema version 2`),
+  and an older TUI already open blocks changes until the list is schema 1
+  again. Promoting every subtask makes the next save schema 1.
+- `add --parent` with nothing after it is now a usage error; it used to save
+  the text `--parent`.
+- TUI `J`/`K` move a task among its siblings: a top-level task moves with its
+  subtasks, and a subtask stays in its group.
+- `restore` of a subtask whose parent is in trash fails with `task_deleted`,
+  whose `task_id` names the parent to restore first.
 
 ## [0.1.0-beta.4] - 2026-10-05
 

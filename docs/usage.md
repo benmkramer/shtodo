@@ -9,7 +9,8 @@ shtodo add "Fix the bug"
 shtodo --local add "Run the tests"
 shtodo list
 shtodo --local list
-shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]... [--search <TEXT>] [--sort priority]
+shtodo [--local] list [--open | --done] [--tag <TAG>]... [--priority <P>]... [--due <WHEN>]...
+              [--search <TEXT>] [--sort priority|due] [--roots | --parent <ID>]
 shtodo delete 3
 shtodo --local delete 3
 shtodo [--local] done 3
@@ -17,6 +18,9 @@ shtodo [--local] reopen 3
 shtodo [--local] edit 3 "New text"
 shtodo [--local] restore 3
 shtodo [--local] add --print-id "Fix the bug"
+shtodo [--local] add [--print-id] --parent 3 "Write the changelog"
+shtodo [--local] parent 5 3
+shtodo [--local] parent 5 none
 shtodo list --json
 shtodo --local --json add "Fix the bug"
 shtodo doctor
@@ -50,6 +54,14 @@ task_id=$(shtodo add --print-id "Fix the bug")
 shtodo done "$task_id"
 printf 'Run the tests\n' | shtodo --local add --print-id
 ```
+
+To add a [subtask](#subtasks), use `shtodo [--local] add [--print-id] --parent <ID> [<TASK>]`.
+`--print-id` and `--parent <ID>` may come in either order directly after
+`add`, each at most once, before the optional text. A second occurrence of a
+flag starts the text, so `add --print-id --print-id` still saves the text
+`--print-id`. The `--parent` value is the next argument, exactly as given,
+and must be a positive task ID. `add --parent` with nothing after it is a
+usage error; earlier versions saved the text `--parent`.
 
 ### Shell listing and task lifecycle
 
@@ -147,6 +159,80 @@ shtodo edit 3 "Pay rent due:2026-12-01"     # change the date by editing the tex
 - Search still matches the full literal text, so `/due:2026-11` finds those
   tokens as text.
 
+### Subtasks
+
+A task can have subtasks, one level deep. A subtask is an ordinary task with
+its own scope-local ID, state, and text, plus a link to its parent, which must
+be a top-level task. Subtasks of subtasks are not supported.
+
+```sh
+shtodo add "Ship the release"
+shtodo add --parent 1 "Write the changelog"
+shtodo add --parent 1 "Tag the build"
+shtodo list
+shtodo list --parent 1
+shtodo parent 3 none
+```
+
+Saved order is tree order: each top-level task is followed by its subtasks,
+and a new subtask goes at the end of its parent's group. `shtodo list` prints
+a subtask with two more spaces before its text when its parent is the
+top-level row printed just above its group:
+
+```text
+1  open  Ship the release
+2  done    Write the changelog
+3  open    Tag the build
+4  open  Pay rent due:2026-11-01
+```
+
+Stored text never starts with whitespace, so the extra spaces always mean
+"subtask under the row above". A list without subtasks prints exactly as
+before.
+
+`shtodo [--local] parent <ID> <PARENT_ID>` makes ID a subtask of PARENT_ID,
+at the end of that group; `parent <ID> none` (ASCII case-insensitive) makes
+ID top-level again, right after its former parent's group. Moving a subtask
+to another parent is one `parent` call. A task that has live subtasks cannot
+become a subtask; promote its subtasks first. A no-op does not rewrite the
+snapshot:
+
+| Case | Output |
+| --- | --- |
+| Moved under a parent | `5 is now under 3: Write the changelog` |
+| Already under that parent | `5 is already under 3: Write the changelog` |
+| Promoted | `5 is now top-level: Write the changelog` |
+| Already top-level | `5 is already top-level: Write the changelog` |
+
+What each lifecycle action does to a group:
+
+| Action | Effect |
+| --- | --- |
+| Add a subtask | New ID at the end of the parent's group. The parent must exist, be live, and be top-level |
+| Complete, reopen, or edit a parent | Only the parent changes; subtasks keep their states. Completing the last open subtask does not complete the parent |
+| Delete a top-level task | It and its live subtasks go to trash together: `Deleted 1 with 2 subtasks: Ship the release` (`with 1 subtask` for one) |
+| Delete a subtask | Only that subtask; if its parent is already in trash, it is `Already deleted` |
+| Restore a top-level task | It and the subtasks deleted with it: `Restored 1 with 2 subtasks: Ship the release`. Subtasks deleted earlier stay in trash |
+| Restore a subtask | Restored in place under its live parent. If the parent is in trash, it fails with ``parent task 1 is deleted; run `shtodo restore 1` first`` |
+| TUI `u` | Restores the latest deletion: one task, or a parent with the subtasks deleted with it |
+| `parent ID P` on a task with deleted subtasks | Those subtasks become top-level tasks in trash, left in place |
+
+Without subtasks, delete and restore output is unchanged. In the TUI,
+subtasks currently appear as ordinary rows in tree order. `J` and `K` move a
+task among its siblings only: a top-level task moves with its whole group,
+and a subtask stays inside its group.
+
+**Compatibility.** A list without subtasks is saved as schema 1, byte for
+byte as before, so every earlier shtodo reads and writes it. A list with at
+least one subtask, including one in trash, is saved as schema 2. Older
+binaries refuse schema 2 without writing it: shell commands exit 1 with
+`unsupported schema version 2 in <path>` (`command_failed` with `--json`),
+and an older TUI that is already open shows `Storage unavailable` and blocks
+changes. Nothing is migrated in place. To make a list readable by an older
+binary again, restore any deleted group that has subtasks, promote every
+subtask with `parent <ID> none`, and delete again what should stay deleted;
+the next save is schema 1.
+
 ### Filtering and sorting the list
 
 `shtodo list` accepts filters after `list`, in any order. They combine with
@@ -161,6 +247,8 @@ AND across kinds:
 | `--search <TEXT>` | Tasks whose full text contains TEXT, ignoring case, like TUI `/` search. At most once |
 | `--sort priority` | All matching tasks ordered `A` to `Z`, then tasks without a priority. At most one `--sort` |
 | `--sort due` | All matching tasks by due date, earliest first, then tasks without one. Equal dates are ordered by priority, then saved order. At most one `--sort` |
+| `--roots` | Only top-level tasks. At most once |
+| `--parent <ID>` | Only the subtasks of task ID, unindented because ID itself is not printed. An unknown or deleted ID matches nothing. At most once, and not with `--roots` |
 
 `--sort` values are case-sensitive: only `priority` and `due` are accepted.
 `--due` takes one of these values, with ASCII case-insensitive words:
@@ -189,6 +277,8 @@ shtodo --local list --priority none --search "release notes"
 shtodo list --open --sort priority
 shtodo list --open --due overdue --due today --sort due
 shtodo list --due 2026-10-01..2026-10-31 --tag +home
+shtodo list --roots --open
+shtodo list --parent 3 --sort priority
 ```
 
 Without `--sort`, filtered output keeps the saved order and the same
@@ -200,6 +290,14 @@ reordering stays in the TUI. Only relative `--due` values (`today`,
 dates, `none`, `any`, and `--sort due` never do. A `--tag` value is normalized like
 a derived tag, so `--tag +shtodo.` means `--tag +shtodo`. A filter that
 matches nothing prints nothing and exits 0.
+
+Filters are exact for subtasks too: `list --open` shows open tasks only, even
+when their parent is done. A subtask that matches while its parent does not
+is printed unindented, so it is never drawn inside an unrelated group. Both
+sorts sort as a tree: groups are ordered by their top-level task's key, and
+subtasks are ordered within their group. A subtask whose parent was filtered
+out sorts as its own group, so with `--sort` its siblings need not be
+adjacent. On a list without subtasks, both sorts order exactly as before.
 
 Each flag value is the next argument, exactly as given, even if it starts with
 `-`. So `shtodo list --search --json` searches for the text `--json`, and
@@ -223,7 +321,12 @@ error code is `invalid_arguments`:
 | `--due soon`, `--due week`, `--due ""`, `--due ..`, `--due 2026-02-30`, `--due due:today`, `--due --json`, `--due tomorrow..today` | `invalid --due "soon"; expected today, tomorrow, overdue, none, any, YYYY-MM-DD, or START..END` |
 | `--sort` with no value | `--sort requires a value; expected priority or due` |
 | `--sort manual`, `--sort Due`, `--sort ""`, `--sort --json` | `invalid --sort "manual"; expected priority or due` |
-| A repeated `--open`, `--done`, `--search`, or `--sort`, including `--sort priority --sort due` | `--search may only be specified once` |
+| A repeated `--open`, `--done`, `--search`, `--sort`, `--roots`, or `--parent`, including `--sort priority --sort due` | `--search may only be specified once` |
+| `--parent` with no value, in `list` or `add` | `--parent requires a value` |
+| `--parent x`, `0`, `-1`, `""`, or `--json`, in `list` or `add` | `invalid --parent "x"; expected a task ID` |
+| `--roots` with `--parent` | `--roots and --parent cannot be combined` |
+| `parent` with fewer than two arguments | `parent requires a task ID and a parent task ID or none` |
+| `parent 5 x`, `parent 5 0`, `parent 5 --json` | `invalid parent "x"; expected a task ID or none` |
 | A filter value that is not UTF-8 | `invalid --tag value; expected UTF-8` |
 
 Empty values are rejected on purpose, so an unset shell variable cannot
@@ -266,6 +369,7 @@ The rest of the shell lifecycle accepts the same positive scope-local IDs:
 | `shtodo [--local] reopen <ID>` | Set a live task incomplete | `Reopened 3: Fix the bug` | `Already open 3: Fix the bug` |
 | `shtodo [--local] edit <ID> "New text"` | Replace a live task's text | `Edited 3: New text` | `Unchanged 3: New text` |
 | `shtodo [--local] restore <ID>` | Clear a task's tombstone | `Restored 3: Fix the bug` | `Already live 3: Fix the bug` |
+| `shtodo [--local] parent <ID> <PARENT_ID \| none>` | Nest or promote a live task ([subtasks](#subtasks)) | `5 is now under 3: Write the changelog` | `5 is already under 3: Write the changelog` |
 
 `done` and `reopen` set explicit states, so retries never toggle a task.
 Unchanged edits compare the trimmed, validated text. These no-op successes,
@@ -276,18 +380,23 @@ canonical ordering. Restoration preserves the original text, completion, ID,
 and canonical position, and does not change how TUI `u` selects the latest
 remaining tombstone.
 
-`done`, `reopen`, and `edit` reject deleted IDs and point to the scoped
-`restore` command to run first. Unknown IDs fail. All shell mutations use the
+`done`, `reopen`, `edit`, and `parent` reject deleted IDs and point to the
+scoped `restore` command to run first. `add --parent` and `parent` reject a
+parent in trash the same way, naming the parent. Unknown IDs fail. Errors
+specific to subtasks also exit 1: `task 5 cannot be its own parent`,
+`task 4 is a subtask; subtasks cannot have subtasks`, and
+`task 3 has subtasks; promote them first`. All shell mutations use the
 selected scope's existing writer lock, save changes atomically, and report
 success only after persistence succeeds. Even no-op mutations fail while
 another writer holds that lock. Invalid keybinding configuration does not
-block `add`, `list`, `delete`, `done`, `reopen`, `edit`, or `restore`.
+block `add`, `list`, `delete`, `done`, `reopen`, `edit`, `restore`, or
+`parent`.
 
 ### JSON output for agents
 
-Use `--json` with `add`, `list`, `delete`, `done`, `reopen`, `edit`, or
-`restore`. Put it before the command, immediately after the command, or after
-all its positional arguments. For `list`, it may also go between filters, but
+Use `--json` with `add`, `list`, `delete`, `done`, `reopen`, `edit`,
+`restore`, or `parent`. Put it before the command, immediately after the
+command, or after all its positional arguments. For `list`, it may also go between filters, but
 not right after a flag that takes a value. `--local` still goes before the
 command:
 
@@ -297,6 +406,8 @@ shtodo --json list --open --tag +shtodo --sort priority
 shtodo --local --json add 'Fix the bug'
 shtodo --local done --json 3
 shtodo --local edit 3 'Updated text' --json
+shtodo --json add --parent 3 'Write the changelog'
+shtodo parent 5 3 --json
 printf '%s\n' 'Run the tests' | shtodo --local add --json
 ```
 
@@ -308,7 +419,7 @@ listing. List filters and `--sort priority` select and order the same task
 objects, as do `--due` and `--sort due`; the reply does not repeat the filter:
 
 ```json
-{"schema_version":1,"command":"list","scope":{"kind":"global"},"tasks":[{"id":1,"text":"(A) Fix the bug +shtodo @laptop due:2026-11-01","state":"open","deleted":false,"priority":"A","tags":["+shtodo","@laptop"],"due":"2026-11-01"},{"id":2,"text":"Run the tests","state":"open","deleted":false,"priority":null,"tags":[],"due":null}]}
+{"schema_version":1,"command":"list","scope":{"kind":"global"},"tasks":[{"id":1,"text":"(A) Fix the bug +shtodo @laptop due:2026-11-01","state":"open","deleted":false,"priority":"A","tags":["+shtodo","@laptop"],"due":"2026-11-01","parent_id":null},{"id":2,"text":"Run the tests","state":"open","deleted":false,"priority":null,"tags":[],"due":null,"parent_id":1}]}
 ```
 
 Mutation results contain the task from the saved transaction and a `changed`
@@ -317,7 +428,7 @@ and restoration of live tasks return `changed: false` without rewriting the
 snapshot. An add always creates a new task:
 
 ```json
-{"schema_version":1,"command":"done","scope":{"kind":"global"},"task":{"id":1,"text":"Fix the bug","state":"done","deleted":false,"priority":null,"tags":[],"due":null},"changed":true}
+{"schema_version":1,"command":"done","scope":{"kind":"global"},"task":{"id":1,"text":"Fix the bug","state":"done","deleted":false,"priority":null,"tags":[],"due":null,"parent_id":null},"changed":true}
 ```
 
 The output schema is independent of the on-disk snapshot schema. Its fields
@@ -328,12 +439,12 @@ are:
 | `schema_version` | Output schema version, currently `1`. |
 | `command` | The shell command that produced the successful result. |
 | `scope` | `{"kind":"global"}` or `{"kind":"project","path":"<canonical absolute directory>"}`. |
-| `tasks` | Array of non-deleted tasks for `list`, in saved order. |
+| `tasks` | Array of non-deleted tasks for `list`, in display order (see below). |
 | `task` | Resulting task for a mutation, including deleted tasks after `delete`. |
 | `changed` | Whether the mutation changed the saved task list. |
 
 Each task has a positive numeric `id`, literal `text`, `state` (`open` or
-`done`), boolean `deleted`, `priority`, `tags`, and `due`. Deleting a task preserves
+`done`), boolean `deleted`, `priority`, `tags`, `due`, and `parent_id`. Deleting a task preserves
 its completion state. Retain scope alongside IDs. Task text is data, including
 quotes, backslashes, Unicode, and tabs; parse it with a JSON library. Clients
 should check `schema_version` and tolerate additional fields within that
@@ -344,8 +455,9 @@ version.
 | `priority` | The [derived priority](#priority-and-tags) as a one-character string `"A"` to `"Z"`, or `null`. Never the `(A)` marker or a number. |
 | `tags` | The derived tags as strings with their sigil and without trailing `.,;:!?`, in text order, without duplicates; `[]` when there are none. |
 | `due` | The [derived due date](#due-dates) as a `"YYYY-MM-DD"` string, or `null` when the text has no valid due token. Never the `due:` key, a relative word, or a time. |
+| `parent_id` | The [parent](#subtasks) task's scope-local ID as a JSON number, or `null` for a top-level task. Present on deleted tasks too. |
 
-All three are always present on every task object, including deleted tasks in
+All four are always present on every task object, including deleted tasks in
 mutation replies, and `text` still holds the full literal text, tokens
 included. An `add` or `edit` reply shows the saved text after `due:today` and
 `due:tomorrow` are rewritten, with its `due`, so a client can check the date
@@ -355,13 +467,24 @@ would depend on the reader's clock and zone: compare `due` with your own
 date, or ask shtodo with `--due overdue`. To find the tags in use, read them from `list`, for example
 `shtodo --json list | jq '[.tasks[].tags[]] | group_by(.) | map({tag: .[0], count: length})'`.
 
+`tasks` is in display order. Without `--sort`, that is saved order, which is
+tree order. With `--sort`, groups are sorted and each group's subtasks are
+sorted within it. In both cases, when a task's parent is in the reply, the
+parent comes earlier and its returned subtasks follow it directly as one run.
+A task whose `parent_id` is not in the reply matched while its parent did
+not, or its parent was excluded by `--parent`; with `--sort`, such siblings
+sort as separate groups and need not be adjacent. Build trees from
+`parent_id` rather than from position. There is no depth or children field:
+a task is a subtask when `parent_id` is not `null`. `parent` replies use
+`"command":"parent"`, and `add --parent` replies use `"command":"add"`.
+
 Schema policy: new task metadata is always added as an always-present field,
 nullable or an array, and never signaled by an absent field. Adding such a
 field does not change `schema_version`; `due` was added this way in version
-1. The version changes only when an existing field changes meaning, a field is
-removed, or an enumerated value gains members clients must handle, such as a
-third `state`. The field name `parent_id` (a number or `null`) is reserved for
-a planned feature and is not emitted yet.
+1, and so was `parent_id`. The version changes only when an existing field
+changes meaning, a field is removed, or an enumerated value gains members
+clients must handle, such as a third `state`. New error codes may be added
+for new commands or flags; existing commands keep their codes.
 
 Failures write one JSON object and a newline to stderr, leave stdout empty,
 and exit nonzero. Error messages are for people; branch on `error.code`:
@@ -371,9 +494,13 @@ and exit nonzero. Error messages are for people; branch on `error.code`:
 ```
 
 Codes are `invalid_arguments`, `invalid_task_text`, `task_not_found`,
-`task_deleted`, `busy`, `durability_unconfirmed`, and `command_failed` for
-other storage, environment, or I/O failures. `task_id` is included when an
-error identifies a task. `durability_unconfirmed` means the change is already
+`task_deleted`, `invalid_parent`, `busy`, `durability_unconfirmed`, and
+`command_failed` for other storage, environment, or I/O failures.
+`invalid_parent` comes only from `add --parent` and `parent`: a task cannot be
+its own parent, a parent must be top-level, and a task with live subtasks
+cannot be nested. `task_id` is included when an error identifies a task. For
+`task_deleted` it names the task that must be restored first, which is a
+different task when the request names a subtask whose parent is in trash. `durability_unconfirmed` means the change is already
 visible but synchronization failed; inspect the same scope before retrying,
 especially for adds. A lost response can also leave an add's outcome
 uncertain, so JSON does not make repeated adds idempotent.
@@ -680,7 +807,10 @@ after the other writer finishes. These budgets limit lock acquisition, not the
 disk work after acquisition. Different scopes use independent locks. Older
 versions hold the lock for their entire TUI session: close that older session
 to let new mutations proceed. New TUIs and `list` can still read its last
-complete snapshot.
+complete snapshot. An older TUI that is open when another process adds a
+list's first subtask stops writing: refresh shows
+`Storage unavailable: unsupported schema version 2`, keeps its last list and
+draft, and blocks mutations until the list has no subtasks again.
 
 Interactive actions use the task and values displayed when you press the key.
 Completion sets the intended state, so two stale completion actions cannot
@@ -722,8 +852,8 @@ may allow an edit. This is not a record of every intervening task event.
 
 Version one is intentionally local and narrow. It does not include accounts,
 synchronization, network access, sharing or collaboration, recurring tasks,
-reminders, notifications, times of day, start or threshold dates, subtasks,
-or multiple named lists. Priorities, tags, and due dates exist only as
+reminders, notifications, times of day, start or threshold dates, or
+multiple named lists. Subtasks are one level deep. Priorities, tags, and due dates exist only as
 todo.txt tokens in the task text ([priority and tags](#priority-and-tags),
 [due dates](#due-dates)), with shell `list` filters, `--sort priority`, and
 `--sort due`. Due dates are calendar days; relative input is limited to
