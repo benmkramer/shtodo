@@ -478,6 +478,49 @@ mod tests {
     }
 
     #[test]
+    fn indent_then_outdent_should_save_schema_two_then_schema_one() {
+        let (_home, store, mut session, _now) = fixture();
+        let data = || std::fs::read_to_string(&store.paths().data_file).unwrap();
+        session.action(&store, Action::MoveDown).unwrap();
+        session.action(&store, Action::IndentTask).unwrap();
+        assert_eq!(session.app.message(), None);
+        assert!(data().contains(r#""schema_version": 2,"#));
+        assert!(data().contains(r#""parent_id": 1"#));
+        assert_eq!(
+            session.app.tasks().task(id(2)).unwrap().parent_id(),
+            Some(id(1))
+        );
+        assert_eq!(session.app.selected(), Some(id(2)));
+        session.action(&store, Action::OutdentTask).unwrap();
+        assert!(data().contains(r#""schema_version": 1,"#));
+        assert!(!data().contains("parent_id"));
+        assert_eq!(session.app.tasks().task(id(2)).unwrap().parent_id(), None);
+        assert_eq!(session.app.selected(), Some(id(2)));
+    }
+
+    #[test]
+    fn indent_under_an_externally_deleted_parent_should_show_the_storage_error_and_save_nothing() {
+        let (_home, store, mut session, now) = fixture();
+        session.action(&store, Action::MoveDown).unwrap();
+        // Another process deletes task 1 before the TUI refreshes.
+        write(
+            &store,
+            Mutation::Delete {
+                id: id(1),
+                observed: None,
+            },
+        );
+        let before = std::fs::read(&store.paths().data_file).unwrap();
+        session.action(&store, Action::IndentTask).unwrap();
+        assert_eq!(std::fs::read(&store.paths().data_file).unwrap(), before);
+        let message = session.app.message().unwrap_or_default().to_owned();
+        assert!(message.contains("task 1"), "{message}");
+        session.refresh_using(&store, || now);
+        assert_eq!(displayed(&session), [2]);
+        assert_eq!(session.app.tasks().task(id(2)).unwrap().parent_id(), None);
+    }
+
+    #[test]
     fn refresh_should_rebuild_due_order_and_a_new_day_should_only_restyle() {
         let (_home, store, mut session, now) = fixture();
         session.action(&store, Action::ToggleSort).unwrap();

@@ -575,6 +575,15 @@ fn notice_text(notice: &Notice, keymap: &Keymap, width: usize) -> String {
         }
         Notice::FinishTag(tags) => clip_entries("Finish the tag: ", tags, ", ", width),
         Notice::RestoreParentFirst(parent) => format!("Restore parent {} first", parent.get()),
+        Notice::AlreadySubtask => {
+            match binding_label(keymap, Mode::Normal, BindingId::OutdentTask) {
+                Some(key) => format!("Already a subtask; {key} promotes"),
+                None => "Already a subtask".into(),
+            }
+        }
+        Notice::NoTaskAbove => "No task above to nest under".into(),
+        Notice::HasSubtasks => "Has subtasks; promote them first".into(),
+        Notice::AlreadyTopLevel => "Already top-level".into(),
     }
 }
 
@@ -757,12 +766,29 @@ fn help_lines(keymap: &Keymap, mode: Mode) -> Vec<Line<'static>> {
         mode_name(mode),
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    lines.extend(keymap.bindings_for(mode).map(|binding| {
-        Line::from(format!(
+    let row = |binding: &ResolvedBinding| {
+        format!(
             "{} {}",
             binding.labels().collect::<Vec<_>>().join(" / "),
             binding.description()
-        ))
+        )
+    };
+    // Nest and promote share one row while both are bound.
+    let outdent = keymap
+        .bindings_for(mode)
+        .find(|binding| binding.id() == BindingId::OutdentTask);
+    let indent_bound = keymap
+        .bindings_for(mode)
+        .any(|binding| binding.id() == BindingId::IndentTask);
+    lines.extend(keymap.bindings_for(mode).filter_map(|binding| {
+        match (binding.id(), outdent) {
+            (BindingId::IndentTask, Some(outdent)) => {
+                Some(format!("{}, {}", row(binding), row(outdent)))
+            }
+            (BindingId::OutdentTask, _) if indent_bound => None,
+            _ => Some(row(binding)),
+        }
+        .map(Line::from)
     }));
     lines.extend(keymap.unbound_actions_for(mode).filter_map(|id| {
         id.config_name()
@@ -1450,6 +1476,7 @@ mod tests {
             "Enter apply search",
             "Esc cancel search",
             "A add subtask",
+            "> nest, < promote",
             "Insert",
             "Left move cursor left",
             "Right move cursor right",
@@ -2562,6 +2589,100 @@ mod tests {
         let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
         assert!(help.contains("Unbound: add_subtask (config)"), "{help}");
         assert!(help.contains("A toggle complete"), "{help}");
+    }
+
+    #[test]
+    fn help_should_share_one_nest_and_promote_row_and_list_unbound_halves_separately() {
+        let mut app = subtask_app();
+        app.apply(Action::OpenHelp).unwrap();
+        let help = |keymap: &Keymap| buffer_text(&render_app_with_keymap(&app, keymap, 100, 30));
+        let text = help(&Keymap::defaults());
+        assert!(text.contains("> nest, < promote"), "{text}");
+        assert!(!text.contains("Unbound"), "{text}");
+
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::IndentTask, &["ctrl-l", "]"]),
+            override_for(BindingId::OutdentTask, &["ctrl-h"]),
+        ])
+        .unwrap();
+        assert!(help(&keymap).contains("Ctrl-l / ] nest, Ctrl-h promote"));
+
+        let keymap = Keymap::with_overrides(&[override_for(BindingId::MoveUp, &["<"])]).unwrap();
+        let text = help(&keymap);
+        assert!(text.contains("> nest"), "{text}");
+        assert!(!text.contains("promote"), "{text}");
+        assert!(text.contains("Unbound: outdent_task (config)"), "{text}");
+
+        let keymap = Keymap::with_overrides(&[override_for(BindingId::MoveDown, &[">"])]).unwrap();
+        let text = help(&keymap);
+        assert!(text.contains("< promote"), "{text}");
+        assert!(!text.contains("nest"), "{text}");
+        assert!(text.contains("Unbound: indent_task (config)"), "{text}");
+
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::MoveDown, &[">"]),
+            override_for(BindingId::MoveUp, &["<"]),
+        ])
+        .unwrap();
+        let text = help(&keymap);
+        assert!(
+            !text.contains("nest") && !text.contains("promote"),
+            "{text}"
+        );
+        assert!(text.contains("Unbound: indent_task (config)"), "{text}");
+        assert!(text.contains("Unbound: outdent_task (config)"), "{text}");
+
+        // The long-alias keymap still shows every subtask row at 80x24.
+        let keymap = Keymap::with_overrides(&[override_for(
+            BindingId::OpenHelp,
+            &[
+                "α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "λ", "μ", "ν", "ξ", "ο", "π", "ρ", "σ",
+            ],
+        )])
+        .unwrap();
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+        assert!(text.contains("A add subtask"), "{text}");
+        assert!(text.contains("> nest, < promote"), "{text}");
+        assert!(text.contains("σ show help"), "{text}");
+    }
+
+    #[test]
+    fn nest_and_promote_notices_should_name_configured_keys() {
+        let mut list = TaskList::new(ListScope::Global);
+        let ship = list.add("Ship").unwrap();
+        list.add_subtask(ship, "Tag").unwrap();
+        let mut app = App::new(list);
+        let footer = |app: &App, keymap: &Keymap| {
+            buffer_row(&render_app_with_keymap(app, keymap, 60, 8), 60, 7)
+        };
+        let defaults = Keymap::defaults();
+        app.apply(Action::IndentTask).unwrap();
+        assert!(
+            footer(&app, &defaults).starts_with("NORMAL  No task above to nest under"),
+            "{}",
+            footer(&app, &defaults)
+        );
+        app.apply(Action::OutdentTask).unwrap();
+        assert!(footer(&app, &defaults).starts_with("NORMAL  Already top-level"));
+        app.apply(Action::MoveDown).unwrap();
+        app.apply(Action::IndentTask).unwrap();
+        assert!(footer(&app, &defaults).starts_with("NORMAL  Already a subtask; < promotes"));
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::OutdentTask, &["ctrl-h"])]).unwrap();
+        assert!(footer(&app, &keymap).starts_with("NORMAL  Already a subtask; Ctrl-h promotes"));
+        let keymap = Keymap::with_overrides(&[override_for(BindingId::MoveUp, &["<"])]).unwrap();
+        let text = footer(&app, &keymap);
+        assert!(text.starts_with("NORMAL  Already a subtask"), "{text}");
+        assert!(!text.contains("promotes"), "{text}");
+
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("Pay rent").unwrap();
+        let ship = list.add("Ship").unwrap();
+        list.add_subtask(ship, "Tag").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::MoveDown).unwrap();
+        app.apply(Action::IndentTask).unwrap();
+        assert!(footer(&app, &defaults).starts_with("NORMAL  Has subtasks; promote them first"));
     }
 
     #[test]

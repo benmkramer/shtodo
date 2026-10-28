@@ -400,8 +400,8 @@ mod tests {
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::Defaults);
-        assert_eq!(loaded.keymap().configurable_action_count(), 38);
-        assert_eq!(loaded.keymap().active_binding_count(), 51);
+        assert_eq!(loaded.keymap().configurable_action_count(), 40);
+        assert_eq!(loaded.keymap().active_binding_count(), 53);
         assert!(!home.path().join(".shtodo").exists());
     }
 
@@ -417,7 +417,7 @@ move_down = ["x", "ctrl-n"]
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::File);
-        assert_eq!(loaded.keymap().active_binding_count(), 51);
+        assert_eq!(loaded.keymap().active_binding_count(), 53);
         assert_eq!(
             labels_for(loaded.keymap(), BindingId::MoveDown),
             vec!["x", "Ctrl-n"]
@@ -802,7 +802,7 @@ commit_edit = ["ctrl-s"]
             labels_for(loaded.keymap(), BindingId::EditFilter),
             vec!["Ctrl-f"]
         );
-        assert_eq!(loaded.keymap().configurable_action_count(), 38);
+        assert_eq!(loaded.keymap().configurable_action_count(), 40);
         for name in ["toggle_sort", "edit_filter"] {
             for mode in ["insert", "help", "trash"] {
                 let home = configured_home(&format!("[keybindings.{mode}]\n{name} = [\"o\"]\n"));
@@ -850,6 +850,44 @@ commit_edit = ["ctrl-s"]
     }
 
     #[test]
+    fn load_should_accept_indent_and_outdent_in_normal_mode_and_keep_bindings_that_claim_them() {
+        let home = configured_home(
+            "[keybindings.normal]\nindent_task = [\"ctrl-l\"]\noutdent_task = [\"ctrl-h\"]\n",
+        );
+        let loaded = load(home.path()).unwrap();
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::IndentTask),
+            vec!["Ctrl-l"]
+        );
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::OutdentTask),
+            vec!["Ctrl-h"]
+        );
+        for name in ["indent_task", "outdent_task"] {
+            for mode in ["insert", "help", "trash"] {
+                let home = configured_home(&format!("[keybindings.{mode}]\n{name} = [\"o\"]\n"));
+                assert_eq!(
+                    diagnostic_paths(load(home.path()).unwrap_err()),
+                    vec![format!("keybindings.{mode}.{name}")]
+                );
+            }
+        }
+        let home =
+            configured_home("[keybindings.normal]\nmove_down = [\">\"]\nmove_up = [\"<\"]\n");
+        let loaded = load(home.path()).unwrap();
+        assert_eq!(labels_for(loaded.keymap(), BindingId::MoveDown), vec![">"]);
+        assert_eq!(labels_for(loaded.keymap(), BindingId::MoveUp), vec!["<"]);
+        assert_eq!(
+            loaded
+                .keymap()
+                .unbound_actions_for(crate::app::Mode::Normal)
+                .collect::<Vec<_>>(),
+            vec![BindingId::IndentTask, BindingId::OutdentTask]
+        );
+        assert_eq!(loaded.keymap().configurable_action_count(), 40);
+    }
+
+    #[test]
     fn load_should_preserve_existing_normal_bindings_that_claim_new_search_defaults() {
         for (key, label) in [
             ("f", "f"),
@@ -867,7 +905,7 @@ commit_edit = ["ctrl-s"]
                 labels_for(loaded.keymap(), BindingId::ToggleComplete),
                 vec![label]
             );
-            assert_eq!(loaded.keymap().configurable_action_count(), 38);
+            assert_eq!(loaded.keymap().configurable_action_count(), 40);
             assert_eq!(
                 loaded
                     .keymap()

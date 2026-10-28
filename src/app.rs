@@ -242,6 +242,14 @@ pub(crate) enum Notice {
     FinishTag(Vec<String>),
     /// Trash restore of a subtask whose parent, named here, is still in trash.
     RestoreParentFirst(TaskId),
+    /// Nest was requested on a subtask.
+    AlreadySubtask,
+    /// Nest was requested with no displayed top-level row above.
+    NoTaskAbove,
+    /// Nest was requested on a task with live subtasks.
+    HasSubtasks,
+    /// Promote was requested on a top-level task.
+    AlreadyTopLevel,
 }
 
 /// Filter-mode preview. It never leaves `App`, so no shell or `Mutation` value can carry it.
@@ -423,6 +431,8 @@ impl App {
                     | Action::RestoreSelected
                     | Action::MoveTaskDown
                     | Action::MoveTaskUp
+                    | Action::IndentTask
+                    | Action::OutdentTask
             ) {
                 return Ok(Transition::Unchanged);
             }
@@ -437,6 +447,8 @@ impl App {
                         | Action::RestoreSelected
                         | Action::MoveTaskDown
                         | Action::MoveTaskUp
+                        | Action::IndentTask
+                        | Action::OutdentTask
                 ))
         {
             return Ok(Transition::Unchanged);
@@ -675,6 +687,8 @@ impl App {
                 | Action::ToggleSort
                 | Action::EditFilter
                 | Action::AddSubtask
+                | Action::IndentTask
+                | Action::OutdentTask
                 | Action::OpenTrash
                 | Action::OpenHelp
                 | Action::Quit
@@ -700,6 +714,8 @@ impl App {
             Action::ToggleSort => self.toggle_sort(),
             Action::EditFilter => self.start_filter(),
             Action::AddSubtask => self.start_add_subtask(),
+            Action::IndentTask => self.indent_selected(),
+            Action::OutdentTask => self.outdent_selected(),
             Action::OpenTrash => self.open_trash(),
             Action::OpenHelp => self.open_help(),
             Action::Quit => Transition::Quit,
@@ -1215,6 +1231,56 @@ impl App {
             completed: !task.completed(),
         };
         Ok(self.submit(mutation))
+    }
+
+    /// Nests the selected top-level task under the nearest displayed top-level row above it.
+    fn indent_selected(&mut self) -> Transition {
+        let Some(task) = self.selected_task() else {
+            return Transition::Unchanged;
+        };
+        let id = task.id();
+        let notice = if task.parent_id().is_some() {
+            Notice::AlreadySubtask
+        } else if let Some(parent) = self
+            .displayed_rows()
+            .map(|row| row.task)
+            .take_while(|row| row.id() != id)
+            .filter(|row| row.parent_id().is_none())
+            .last()
+            .map(Task::id)
+        {
+            if self
+                .tasks
+                .subtasks(id)
+                .iter()
+                .any(|subtask| !subtask.is_deleted())
+            {
+                Notice::HasSubtasks
+            } else {
+                return self.submit(Mutation::SetParent {
+                    id,
+                    parent: Some(parent),
+                });
+            }
+        } else {
+            Notice::NoTaskAbove
+        };
+        self.notice = Some(notice);
+        Transition::Transient
+    }
+
+    fn outdent_selected(&mut self) -> Transition {
+        let Some(task) = self.selected_task() else {
+            return Transition::Unchanged;
+        };
+        if task.parent_id().is_none() {
+            self.notice = Some(Notice::AlreadyTopLevel);
+            return Transition::Transient;
+        }
+        self.submit(Mutation::SetParent {
+            id: task.id(),
+            parent: None,
+        })
     }
 
     fn delete_selected(&mut self) -> Result<Transition, ListError> {
@@ -4241,6 +4307,62 @@ mod subtask_tests {
         );
         assert_eq!(app.mode(), Mode::Normal);
         assert!(app.editor().is_none());
+    }
+
+    fn prepared(app: &mut App, selected: u64, action: Action) -> Option<Mutation> {
+        app.selected = Some(id(selected));
+        app.notice = None;
+        app.prepare(action).unwrap();
+        app.take_mutation()
+    }
+
+    fn nest(task: u64, parent: Option<u64>) -> Option<Mutation> {
+        Some(Mutation::SetParent {
+            id: id(task),
+            parent: parent.map(id),
+        })
+    }
+
+    #[test]
+    fn indent_and_outdent_should_submit_set_parent_or_show_a_notice() {
+        let mut app = App::new(tree());
+        // Rows: 1 [4, 5], 2, 3 [6, 7], 8.
+        assert_eq!(prepared(&mut app, 2, Action::IndentTask), nest(2, Some(1)));
+        assert_eq!(prepared(&mut app, 8, Action::IndentTask), nest(8, Some(3)));
+        assert_eq!(prepared(&mut app, 6, Action::OutdentTask), nest(6, None));
+        for (selected, action, notice) in [
+            (4, Action::IndentTask, Notice::AlreadySubtask),
+            (1, Action::IndentTask, Notice::NoTaskAbove),
+            (3, Action::IndentTask, Notice::HasSubtasks),
+            (2, Action::OutdentTask, Notice::AlreadyTopLevel),
+        ] {
+            assert_eq!(prepared(&mut app, selected, action), None);
+            assert_eq!(app.notice(), Some(&notice));
+        }
+        // The nearest displayed top-level row counts, a context row included.
+        search(&mut app, "match");
+        assert_eq!(rows(&app)[2], (3, true));
+        assert_eq!(prepared(&mut app, 8, Action::IndentTask), nest(8, Some(3)));
+        app.apply(Action::ClearSearch).unwrap();
+        search(&mut app, "eight");
+        assert_eq!(prepared(&mut app, 8, Action::IndentTask), None);
+        assert_eq!(app.notice(), Some(&Notice::NoTaskAbove));
+    }
+
+    #[test]
+    fn indent_then_outdent_should_keep_the_selection_in_any_sort_order() {
+        let mut app = App::new(tree());
+        app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Priority);
+        app.selected = Some(id(2));
+        app.apply(Action::IndentTask).unwrap();
+        assert_eq!(app.tasks().task(id(2)).unwrap().parent_id(), Some(id(1)));
+        assert_eq!(app.selected(), Some(id(2)));
+        assert_eq!(ids(&app), [1, 4, 5, 2, 3, 6, 7, 8]);
+        app.apply(Action::OutdentTask).unwrap();
+        assert_eq!(app.tasks().task(id(2)).unwrap().parent_id(), None);
+        assert_eq!(app.selected(), Some(id(2)));
+        assert_eq!(ids(&app), [1, 4, 5, 2, 3, 6, 7, 8]);
     }
 
     #[test]
