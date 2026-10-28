@@ -199,6 +199,11 @@ impl TaskList {
         self.tasks.iter().find(|task| task.id == id)
     }
 
+    /// The canonical index of a live or deleted task; the same linear scan as `task`.
+    pub(crate) fn position(&self, id: TaskId) -> Option<usize> {
+        self.tasks.iter().position(|task| task.id == id)
+    }
+
     /// The subtasks in a top-level task's group, tombstones included; empty for a subtask.
     pub(crate) fn subtasks(&self, id: TaskId) -> &[Task] {
         match self.index_of(id) {
@@ -450,7 +455,7 @@ impl TaskList {
     /// The adjacent live sibling: a top-level task's neighbors are top-level tasks, and a
     /// subtask's are the subtasks of the same parent.
     pub(crate) fn adjacent_visible(&self, id: TaskId, direction: MoveDirection) -> Option<TaskId> {
-        adjacent_sibling(self.visible_tasks(), id, direction, |_| true)
+        adjacent_sibling(self.visible_tasks().map(|task| (task, true)), id, direction)
     }
 
     /// Swap two non-deleted siblings without moving any other canonical slots. Top-level
@@ -574,7 +579,7 @@ pub(crate) fn required_schema_version(tasks: &[Task]) -> u64 {
 }
 
 /// The canonical slots of `index`'s root and every subtask after it, tombstones included.
-fn block(tasks: &[Task], index: usize) -> std::ops::Range<usize> {
+pub(crate) fn block(tasks: &[Task], index: usize) -> std::ops::Range<usize> {
     let end = tasks[index + 1..]
         .iter()
         .position(|task| task.parent_id.is_none())
@@ -596,20 +601,19 @@ fn swap_blocks(tasks: &mut [Task], first: usize, second: usize) {
     span[..middle_len + second.len()].rotate_left(middle_len); // second, middle, first
 }
 
-/// One pass in canonical order over live `tasks`. A top-level task's siblings are the matching
-/// top-level tasks; a subtask's are the matching subtasks of its parent. A target that does
-/// not match has no neighbor, as before subtasks.
+/// One pass in canonical order over live `rows`, each a task and whether it is displayed. A
+/// top-level task's siblings are the displayed top-level tasks; a subtask's are the displayed
+/// subtasks of its parent. A target that is not displayed has no neighbor.
 pub(crate) fn adjacent_sibling<'a>(
-    tasks: impl Iterator<Item = &'a Task>,
+    rows: impl Iterator<Item = (&'a Task, bool)>,
     id: TaskId,
     direction: MoveDirection,
-    matches: impl Fn(&Task) -> bool,
 ) -> Option<TaskId> {
     let mut previous_root = None;
     let mut previous_child = None;
     // The target's parent, once the target is found while moving down.
     let mut target_parent: Option<Option<TaskId>> = None;
-    for task in tasks {
+    for (task, displayed) in rows {
         if task.parent_id.is_none() {
             previous_child = None;
         }
@@ -617,13 +621,13 @@ pub(crate) fn adjacent_sibling<'a>(
             if parent.is_some() && task.parent_id.is_none() {
                 return None;
             }
-            if task.parent_id == parent && matches(task) {
+            if task.parent_id == parent && displayed {
                 return Some(task.id);
             }
             continue;
         }
         if task.id == id {
-            if !matches(task) {
+            if !displayed {
                 return None;
             }
             match direction {
@@ -631,7 +635,7 @@ pub(crate) fn adjacent_sibling<'a>(
                 MoveDirection::Up => return previous_child,
                 MoveDirection::Down => target_parent = Some(task.parent_id),
             }
-        } else if matches(task) {
+        } else if displayed {
             if task.parent_id.is_none() {
                 previous_root = Some(task.id);
             } else {
@@ -700,6 +704,17 @@ mod tests {
         list.add_subtask(fourth, "fifth").unwrap();
         list.stamp_schema_version();
         list
+    }
+
+    #[test]
+    fn position_should_find_live_and_deleted_tasks_in_canonical_order() {
+        let mut list = groups();
+        assert_eq!(list.position(TaskId(1)), Some(0));
+        assert_eq!(list.position(TaskId(5)), Some(2));
+        assert_eq!(list.position(TaskId(6)), Some(4));
+        list.delete(TaskId(2)).unwrap();
+        assert_eq!(list.position(TaskId(2)), Some(3));
+        assert_eq!(list.position(TaskId(99)), None);
     }
 
     #[test]

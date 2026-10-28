@@ -238,6 +238,8 @@ pub(crate) enum Notice {
     ManualOrderRequired,
     /// Enter on a tag prefix shared by these tags, in hint-line order.
     FinishTag(Vec<String>),
+    /// Trash restore of a subtask whose parent, named here, is still in trash.
+    RestoreParentFirst(TaskId),
 }
 
 /// Filter-mode preview. It never leaves `App`, so no shell or `Mutation` value can carry it.
@@ -543,9 +545,20 @@ impl App {
         self.order
     }
 
-    /// The transient TUI projection, in display order. Storage visibility stays unchanged.
+    /// The transient TUI projection, in display order, context rows included. Storage
+    /// visibility stays unchanged.
     pub(crate) fn visible_tasks(&self) -> impl Iterator<Item = &Task> {
-        self.ordered_live_tasks().filter(|task| self.matches(task))
+        self.displayed_rows().map(|row| row.task)
+    }
+
+    /// Displayed rows with their context flag and group progress, in display order.
+    pub(crate) fn displayed_rows(&self) -> impl Iterator<Item = projection::DisplayedRow<'_>> {
+        projection::displayed_rows(self.ordered_live_tasks(), |task| self.matches(task))
+    }
+
+    /// The rows that match the view, search, and filter; context rows are not matches.
+    pub(crate) fn match_count(&self) -> usize {
+        self.displayed_rows().filter(|row| !row.context).count()
     }
 
     /// Live tasks in display order: canonical, or the cached Priority or Due order.
@@ -750,6 +763,13 @@ impl App {
             self.message = Some("Nothing to restore".into());
             return Ok(Transition::Transient);
         };
+        if let Some(parent) = task
+            .parent_id()
+            .filter(|parent| self.tasks.task(*parent).is_some_and(Task::is_deleted))
+        {
+            self.notice = Some(Notice::RestoreParentFirst(parent));
+            return Ok(Transition::Transient);
+        }
         let request = Mutation::Restore {
             id: task.id(),
             observed: Some(TaskObservation::new(task)),
@@ -1078,13 +1098,17 @@ impl App {
     fn reconciled_selection(&self) -> Option<TaskId> {
         let mut previous = None;
         let mut passed_selected = self.selected.is_none();
+        // Displayed rows are a subsequence of the live tasks in the same order, so one walk
+        // over both finds where a hidden selection was.
+        let mut displayed = self.visible_tasks().peekable();
         for task in self.ordered_live_tasks() {
+            let shown = displayed.next_if(|row| row.id() == task.id()).is_some();
             if Some(task.id()) == self.selected {
-                if self.matches(task) {
+                if shown {
                     return self.selected;
                 }
                 passed_selected = true;
-            } else if self.matches(task) {
+            } else if shown {
                 if passed_selected {
                     return Some(task.id());
                 }
@@ -1201,9 +1225,10 @@ impl App {
         if self.tasks == tasks {
             return false;
         }
-        let ordinal = self
-            .visible_tasks()
-            .position(|task| Some(task.id()) == self.selected)
+        let shown = self.visible_tasks().map(Task::id).collect::<Vec<_>>();
+        let ordinal = shown
+            .iter()
+            .position(|id| Some(*id) == self.selected)
             .unwrap_or(0);
         let trash_ordinal = self
             .tasks
@@ -1218,16 +1243,16 @@ impl App {
         self.tasks = tasks;
         self.rebuild_order();
         self.refresh_tag_counts();
-        if !self
-            .selected
-            .is_some_and(|id| self.tasks.task(id).is_some_and(|task| self.matches(task)))
-        {
-            let selected = self
-                .visible_tasks()
-                .nth(ordinal)
-                .or_else(|| self.visible_tasks().last())
-                .map(Task::id);
-            self.selected = selected;
+        let displayed = self.visible_tasks().map(Task::id).collect::<Vec<_>>();
+        if !self.selected.is_some_and(|id| displayed.contains(&id)) {
+            // The next row the user saw that is still shown, so a group that left together
+            // does not skip the rows after it; otherwise the row now at the same position.
+            self.selected = shown
+                .iter()
+                .skip(ordinal + 1)
+                .find(|id| displayed.contains(id))
+                .or_else(|| displayed.get(ordinal).or(displayed.last()))
+                .copied();
         }
         if let Some(trash) = &mut self.trash {
             let deleted = self.tasks.deleted_tasks();
@@ -4037,5 +4062,219 @@ mod due_filter_tests {
                 .collect::<Vec<_>>(),
             [1, 2, 3, 8, 5, 6, 7, 4]
         );
+    }
+}
+
+#[cfg(test)]
+mod subtask_tests {
+    use super::*;
+    use crate::task::ListScope;
+
+    fn id(value: u64) -> TaskId {
+        TaskId::from_shell_integer(value).unwrap()
+    }
+
+    fn ids(app: &App) -> Vec<u64> {
+        app.visible_tasks().map(|task| task.id().get()).collect()
+    }
+
+    /// Group 1 [4 match, 5 done], 2, group 3 [6, 7 match], 8 match.
+    fn tree() -> TaskList {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "one +home",
+            "two",
+            "three",
+            "four match",
+            "five",
+            "six",
+            "seven match",
+        ] {
+            list.add(text).unwrap();
+        }
+        for (task, parent) in [(4, 1), (5, 1), (6, 3), (7, 3)] {
+            list.set_parent(id(task), Some(id(parent))).unwrap();
+        }
+        list.add("eight match").unwrap();
+        list.set_completed(id(5), true).unwrap();
+        list.set_completed(id(1), true).unwrap();
+        assert_eq!(
+            list.visible_tasks()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 4, 5, 2, 3, 6, 7, 8]
+        );
+        list
+    }
+
+    fn search(app: &mut App, query: &str) {
+        app.apply(Action::StartSearch).unwrap();
+        for character in query.chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+        app.apply(Action::CommitEdit).unwrap();
+    }
+
+    fn rows(app: &App) -> Vec<(u64, bool)> {
+        app.displayed_rows()
+            .map(|row| (row.task.id().get(), row.context))
+            .collect()
+    }
+
+    #[test]
+    fn context_rows_should_show_in_search_open_and_filter_views_without_counting_as_matches() {
+        let mut app = App::new(tree());
+        search(&mut app, "match");
+        assert_eq!(
+            rows(&app),
+            [(1, true), (4, false), (3, true), (7, false), (8, false)]
+        );
+        assert_eq!(app.match_count(), 3);
+        // Open hides the done parent 1, but its open matching subtask brings it back as context.
+        app.apply(Action::ClearSearch).unwrap();
+        app.apply(Action::CycleView).unwrap();
+        assert_eq!(app.view(), TaskView::Open);
+        assert_eq!(
+            rows(&app),
+            [
+                (1, true),
+                (4, false),
+                (2, false),
+                (3, false),
+                (6, false),
+                (7, false),
+                (8, false)
+            ]
+        );
+        assert_eq!(app.match_count(), 6);
+        // A filter on the parent's tag shows the parent only; its subtasks do not match.
+        app.apply(Action::CycleView).unwrap();
+        app.apply(Action::CycleView).unwrap();
+        assert_eq!(app.view(), TaskView::All);
+        app.apply(Action::EditFilter).unwrap();
+        for character in "+home".chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(rows(&app), [(1, false)]);
+        assert_eq!(app.match_count(), 1);
+    }
+
+    #[test]
+    fn a_filter_preview_should_drive_context_rows_while_typing() {
+        let mut list = tree();
+        list.edit(id(7), "seven match +x").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        app.apply(Action::InsertChar('+')).unwrap();
+        app.apply(Action::InsertChar('x')).unwrap();
+        assert_eq!(app.mode(), Mode::Filter);
+        assert_eq!(rows(&app), [(3, true), (7, false)]);
+        assert_eq!(app.match_count(), 1);
+        app.apply(Action::CancelEdit).unwrap();
+        assert_eq!(app.match_count(), 8);
+    }
+
+    #[test]
+    fn selection_should_visit_subtasks_and_context_rows_and_moves_stay_among_siblings() {
+        let mut app = App::new(tree());
+        search(&mut app, "match");
+        assert_eq!(app.selected(), Some(id(1)));
+        for expected in [4, 3, 7, 8] {
+            app.apply(Action::MoveDown).unwrap();
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        // J on the context parent 3 moves its group among displayed top-level rows.
+        app.apply(Action::MoveUp).unwrap();
+        app.apply(Action::MoveUp).unwrap();
+        assert_eq!(app.selected(), Some(id(3)));
+        assert_eq!(
+            app.prepare(Action::MoveTaskDown).unwrap(),
+            Transition::Submit
+        );
+        let request = app.take_mutation().unwrap();
+        let Mutation::MoveAdjacent {
+            id: moved,
+            neighbor,
+            ..
+        } = &request
+        else {
+            panic!("{request:?}");
+        };
+        assert_eq!((*moved, *neighbor), (id(3), Some(id(8))));
+        let mut latest = app.tasks().clone();
+        assert!(request.apply(&mut latest).changed());
+        assert_eq!(
+            latest
+                .visible_tasks()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 4, 5, 2, 8, 3, 6, 7]
+        );
+        // A subtask's only displayed sibling is itself, so K finds no neighbor.
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(7)));
+        assert_eq!(app.prepare(Action::MoveTaskUp).unwrap(), Transition::Submit);
+        let Some(Mutation::MoveAdjacent { neighbor, .. }) = app.take_mutation() else {
+            panic!("expected a move");
+        };
+        assert_eq!(neighbor, None);
+    }
+
+    #[test]
+    fn selection_should_survive_reparenting_and_fall_back_in_display_order_after_a_co_delete() {
+        let mut list = tree();
+        let mut app = App::new(list.clone());
+        for _ in 0..5 {
+            app.apply(Action::MoveDown).unwrap();
+        }
+        assert_eq!(app.selected(), Some(id(6)));
+        list.set_parent(id(6), None).unwrap();
+        assert!(app.reconcile(list.clone()));
+        assert_eq!(ids(&app), [1, 4, 5, 2, 3, 7, 6, 8]);
+        assert_eq!(app.selected(), Some(id(6)));
+        list.set_parent(id(6), Some(id(1))).unwrap();
+        assert!(app.reconcile(list.clone()));
+        assert_eq!(ids(&app), [1, 4, 5, 6, 2, 3, 7, 8]);
+        assert_eq!(app.selected(), Some(id(6)));
+        // Deleting 1 moves its group to trash; the selection takes the next displayed row.
+        list.delete(id(1)).unwrap();
+        assert!(app.reconcile(list));
+        assert_eq!(ids(&app), [2, 3, 7, 8]);
+        assert_eq!(app.selected(), Some(id(2)));
+    }
+
+    #[test]
+    fn trash_restore_of_a_subtask_under_a_deleted_parent_should_name_the_parent_and_submit_nothing()
+    {
+        let mut list = tree();
+        list.delete(id(3)).unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::OpenTrash).unwrap();
+        let trash = app
+            .tasks()
+            .deleted_tasks()
+            .iter()
+            .map(|task| task.id().get())
+            .collect::<Vec<_>>();
+        assert_eq!(trash, [3, 6, 7]);
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(6)));
+        assert_eq!(
+            app.apply(Action::RestoreSelected).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.notice(), Some(&Notice::RestoreParentFirst(id(3))));
+        assert_eq!(app.take_mutation(), None);
+        // The parent row restores the group.
+        app.apply(Action::MoveUp).unwrap();
+        assert_eq!(
+            app.prepare(Action::RestoreSelected).unwrap(),
+            Transition::Submit
+        );
+        assert!(matches!(
+            app.take_mutation(),
+            Some(Mutation::Restore { id: restored, .. }) if restored == id(3)
+        ));
     }
 }
