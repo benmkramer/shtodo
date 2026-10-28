@@ -404,6 +404,7 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
 
     // A subtask's draft starts two columns further right, under its indented marker.
     let editor_indent = editor.map_or(0, |editor| match editor.kind() {
+        EditKind::AddSubtask(_) => SUBTASK_INDENT,
         EditKind::Edit(id)
             if app
                 .tasks()
@@ -420,17 +421,22 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
             editor_window(editor.buffer(), editor.cursor(), editor_width);
         (editor.kind(), visible, cursor_column)
     });
-    let detached = editor_view.is_some_and(|(kind, _, _)| match kind {
-        EditKind::Add => true,
-        EditKind::Edit(id) => !rows.iter().any(|row| row.task.id() == id),
-        EditKind::Search | EditKind::Filter => false,
+    // Where a detached draft row goes: a new subtask after its group's last displayed row,
+    // anything else at the end.
+    let detached_at = editor_view.and_then(|(kind, _, _)| match kind {
+        EditKind::Add => Some(rows.len()),
+        EditKind::AddSubtask(parent) => Some(
+            rows.iter()
+                .rposition(|row| row.task.id() == parent || row.task.parent_id() == Some(parent))
+                .map_or(rows.len(), |index| index + 1),
+        ),
+        EditKind::Edit(id) => (!rows.iter().any(|row| row.task.id() == id)).then_some(rows.len()),
+        EditKind::Search | EditKind::Filter => None,
     });
-    let selected_index = if detached {
-        Some(rows.len())
-    } else {
+    let selected_index = detached_at.or_else(|| {
         rows.iter()
             .position(|row| Some(row.task.id()) == app.selected())
-    };
+    });
     // Style only the rows the list can show: the window a fresh `ListState` scrolls to, which
     // ends at the selected row once it is past the first screen.
     let height = usize::from(area.height);
@@ -439,20 +445,25 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         "the layout keeps list rows at the minimum terminal size"
     );
     let start = selected_index.map_or(0, |index| (index + 1).saturating_sub(height));
-    let mut items = rows
-        .iter()
-        .skip(start)
-        .take(height)
-        .map(|row| match editor_view {
-            Some((EditKind::Edit(id), visible, _)) if row.task.id() == id => {
-                editor_item(visible, editor_indent)
+    let total = rows.len() + usize::from(detached_at.is_some());
+    let items = (start..total.min(start + height))
+        .map(|index| {
+            let row = match detached_at {
+                Some(at) if index == at => None,
+                Some(at) if index > at => Some(&rows[index - 1]),
+                _ => Some(&rows[index]),
+            };
+            match (row, editor_view) {
+                (Some(row), Some((EditKind::Edit(id), visible, _))) if row.task.id() == id => {
+                    editor_item(visible, editor_indent)
+                }
+                (Some(row), _) => task_item(row, app.today()),
+                (None, view) => {
+                    editor_item(view.map_or("", |(_, visible, _)| visible), editor_indent)
+                }
             }
-            _ => task_item(row, app.today()),
         })
         .collect::<Vec<_>>();
-    if detached && let Some((_, visible, _)) = editor_view {
-        items.push(editor_item(visible, editor_indent));
-    }
     let selected_index = selected_index.map(|index| index.saturating_sub(start));
 
     let list = List::new(items)
@@ -1438,6 +1449,7 @@ mod tests {
             "Esc clear search",
             "Enter apply search",
             "Esc cancel search",
+            "A add subtask",
             "Insert",
             "Left move cursor left",
             "Right move cursor right",
@@ -2497,6 +2509,59 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position((super::ROW_PREFIX_WIDTH + 2 + draft, 4));
+    }
+
+    #[test]
+    fn add_subtask_editor_should_follow_the_group_indented_with_the_cursor_two_columns_right() {
+        let footer = buffer_row(&render_app(&subtask_app(), 40, 8), 40, 7);
+        // From the parent and from one of its subtasks, the draft row follows the whole group.
+        for moves in [0, 2] {
+            let mut app = subtask_app();
+            for _ in 0..moves {
+                app.apply(Action::MoveDown).unwrap();
+            }
+            app.apply(Action::AddSubtask).unwrap();
+            for character in "Draft".chars() {
+                app.apply(Action::InsertChar(character)).unwrap();
+            }
+            let backend = TestBackend::new(40, 8);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, &Keymap::defaults()))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            assert_eq!(
+                display_row(&buffer, 4).trim_end(),
+                "    ○ Tag the build due:2026-10-20"
+            );
+            assert_eq!(display_row(&buffer, 5).trim_end(), "›   ○ Draft");
+            assert_eq!(
+                display_row(&buffer, 6).trim_end(),
+                "  ○ Pay rent due:2026-11-01"
+            );
+            terminal
+                .backend_mut()
+                .assert_cursor_position((super::ROW_PREFIX_WIDTH + 2 + 5, 5));
+            app.apply(Action::CancelEdit).unwrap();
+            assert_eq!(buffer_row(&render_app(&app, 40, 8), 40, 7), footer);
+        }
+    }
+
+    #[test]
+    fn help_should_list_add_subtask_with_its_configured_key_or_as_unbound() {
+        let mut app = subtask_app();
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app(&app, 100, 30));
+        assert!(help.contains("A add subtask"), "{help}");
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::AddSubtask, &["ctrl-a"])]).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+        assert!(help.contains("Ctrl-a add subtask"), "{help}");
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::ToggleComplete, &["A"])]).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+        assert!(help.contains("Unbound: add_subtask (config)"), "{help}");
+        assert!(help.contains("A toggle complete"), "{help}");
     }
 
     #[test]

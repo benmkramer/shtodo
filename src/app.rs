@@ -25,6 +25,8 @@ pub(crate) use crate::projection::TaskView;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EditKind {
     Add,
+    /// A new subtask of this top-level task.
+    AddSubtask(TaskId),
     Edit(TaskId),
     Search,
     Filter,
@@ -413,6 +415,7 @@ impl App {
             if matches!(
                 action,
                 Action::StartAdd
+                    | Action::AddSubtask
                     | Action::StartEdit
                     | Action::ToggleComplete
                     | Action::Delete
@@ -671,6 +674,7 @@ impl App {
                 | Action::ClearSearch
                 | Action::ToggleSort
                 | Action::EditFilter
+                | Action::AddSubtask
                 | Action::OpenTrash
                 | Action::OpenHelp
                 | Action::Quit
@@ -695,6 +699,7 @@ impl App {
             Action::ClearSearch => self.clear_search(),
             Action::ToggleSort => self.toggle_sort(),
             Action::EditFilter => self.start_filter(),
+            Action::AddSubtask => self.start_add_subtask(),
             Action::OpenTrash => self.open_trash(),
             Action::OpenHelp => self.open_help(),
             Action::Quit => Transition::Quit,
@@ -1336,14 +1341,17 @@ impl App {
         let visible = self.tasks.task(id).is_some_and(|task| self.displays(task));
         if matches!(
             request,
-            Mutation::Add(_) | Mutation::RestoreLatest | Mutation::Restore { .. }
+            Mutation::Add(_)
+                | Mutation::AddSubtask { .. }
+                | Mutation::RestoreLatest
+                | Mutation::Restore { .. }
         ) {
             if visible {
                 dirty |= self.selected != Some(id);
                 self.selected = Some(id);
             } else {
                 self.reconcile_selection();
-                let action = if matches!(request, Mutation::Add(_)) {
+                let action = if matches!(request, Mutation::Add(_) | Mutation::AddSubtask { .. }) {
                     "Added"
                 } else {
                     "Restored"
@@ -1353,7 +1361,10 @@ impl App {
         } else if matches!(request, Mutation::EditText { .. }) && !visible {
             self.message = Some(format!("Edited task is {HIDDEN}"));
         }
-        if matches!(request, Mutation::Add(_) | Mutation::EditText { .. }) {
+        if matches!(
+            request,
+            Mutation::Add(_) | Mutation::AddSubtask { .. } | Mutation::EditText { .. }
+        ) {
             dirty |= self.editor.is_some();
             self.editor = None;
             self.mode = Mode::Normal;
@@ -1429,12 +1440,25 @@ impl App {
     }
 
     fn start_add(&mut self) -> Transition {
+        self.open_add_editor(EditKind::Add)
+    }
+
+    /// Adds under the selected top-level task, or beside the selected subtask.
+    fn start_add_subtask(&mut self) -> Transition {
+        let Some(task) = self.selected_task() else {
+            return Transition::Unchanged;
+        };
+        let parent = task.parent_id().unwrap_or(task.id());
+        self.open_add_editor(EditKind::AddSubtask(parent))
+    }
+
+    fn open_add_editor(&mut self, kind: EditKind) -> Transition {
         if self.mode != Mode::Normal {
             return Transition::Unchanged;
         }
         self.mode = Mode::Insert;
         self.editor = Some(Editor {
-            kind: EditKind::Add,
+            kind,
             buffer: String::new(),
             cursor: 0,
             original: None,
@@ -1650,6 +1674,7 @@ impl App {
         let text = metadata::normalize_due(text, || today).into_owned();
         let request = match editor.kind {
             EditKind::Add => Mutation::Add(text),
+            EditKind::AddSubtask(parent) => Mutation::AddSubtask { parent, text },
             EditKind::Edit(id) => {
                 if editor.original.as_deref() == Some(&text) {
                     self.mode = Mode::Normal;
@@ -4126,6 +4151,96 @@ mod subtask_tests {
         app.displayed_rows()
             .map(|row| (row.task.id().get(), row.context))
             .collect()
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+    }
+
+    #[test]
+    fn add_subtask_should_submit_under_the_selected_top_level_task_or_the_subtask_parent() {
+        let mut app = App::new(tree());
+        // Top-level 1, its subtask 4, and the context parent 3 under a search.
+        for (selected, parent) in [(1, 1), (4, 1), (2, 2)] {
+            app.selected = Some(id(selected));
+            assert_eq!(
+                app.apply(Action::AddSubtask).unwrap(),
+                Transition::Transient
+            );
+            assert_eq!(app.mode(), Mode::Insert);
+            assert_eq!(
+                app.editor().unwrap().kind(),
+                EditKind::AddSubtask(id(parent))
+            );
+            type_text(&mut app, "new");
+            assert_eq!(app.prepare(Action::CommitEdit).unwrap(), Transition::Submit);
+            assert_eq!(
+                app.take_mutation(),
+                Some(Mutation::AddSubtask {
+                    parent: id(parent),
+                    text: "new".into()
+                })
+            );
+            assert_eq!(
+                app.apply(Action::CancelEdit).unwrap(),
+                Transition::Transient
+            );
+        }
+        search(&mut app, "match");
+        app.selected = Some(id(3));
+        app.apply(Action::AddSubtask).unwrap();
+        assert_eq!(app.editor().unwrap().kind(), EditKind::AddSubtask(id(3)));
+
+        // Escape cancels without a mutation.
+        let before = app.tasks().clone();
+        assert_eq!(
+            app.apply(Action::CancelEdit).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.editor().is_none());
+        assert_eq!(app.tasks(), &before);
+
+        // A matching subtask is saved at the end of its group and selected.
+        app.apply(Action::AddSubtask).unwrap();
+        type_text(&mut app, "nine match");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.selected(), Some(id(9)));
+        assert_eq!(app.message, None);
+        assert_eq!(app.tasks().task(id(9)).unwrap().parent_id(), Some(id(3)));
+        assert_eq!(ids(&app), [1, 4, 3, 7, 9, 8]);
+    }
+
+    #[test]
+    fn a_hidden_new_subtask_should_show_the_hidden_message_and_keep_the_selection() {
+        let mut app = App::new(tree());
+        search(&mut app, "match");
+        app.selected = Some(id(7));
+        app.apply(Action::AddSubtask).unwrap();
+        type_text(&mut app, "nine");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.tasks().task(id(9)).unwrap().parent_id(), Some(id(3)));
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Added task is hidden by the current view, search, or filter")
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.editor().is_none());
+        assert_eq!(app.selected(), Some(id(7)));
+    }
+
+    #[test]
+    fn add_subtask_should_do_nothing_without_a_selected_task() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        assert_eq!(
+            app.apply(Action::AddSubtask).unwrap(),
+            Transition::Unchanged
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.editor().is_none());
     }
 
     #[test]

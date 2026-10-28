@@ -400,8 +400,8 @@ mod tests {
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::Defaults);
-        assert_eq!(loaded.keymap().configurable_action_count(), 37);
-        assert_eq!(loaded.keymap().active_binding_count(), 50);
+        assert_eq!(loaded.keymap().configurable_action_count(), 38);
+        assert_eq!(loaded.keymap().active_binding_count(), 51);
         assert!(!home.path().join(".shtodo").exists());
     }
 
@@ -417,7 +417,7 @@ move_down = ["x", "ctrl-n"]
         let loaded = load(home.path()).unwrap();
 
         assert_eq!(loaded.source(), ConfigSource::File);
-        assert_eq!(loaded.keymap().active_binding_count(), 50);
+        assert_eq!(loaded.keymap().active_binding_count(), 51);
         assert_eq!(
             labels_for(loaded.keymap(), BindingId::MoveDown),
             vec!["x", "Ctrl-n"]
@@ -802,7 +802,7 @@ commit_edit = ["ctrl-s"]
             labels_for(loaded.keymap(), BindingId::EditFilter),
             vec!["Ctrl-f"]
         );
-        assert_eq!(loaded.keymap().configurable_action_count(), 37);
+        assert_eq!(loaded.keymap().configurable_action_count(), 38);
         for name in ["toggle_sort", "edit_filter"] {
             for mode in ["insert", "help", "trash"] {
                 let home = configured_home(&format!("[keybindings.{mode}]\n{name} = [\"o\"]\n"));
@@ -812,6 +812,41 @@ commit_edit = ["ctrl-s"]
                 );
             }
         }
+    }
+
+    #[test]
+    fn load_should_accept_add_subtask_in_normal_mode_and_keep_bindings_that_claim_a() {
+        let home = configured_home("[keybindings.normal]\nadd_subtask = [\"ctrl-a\"]\n");
+        let loaded = load(home.path()).unwrap();
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::AddSubtask),
+            vec!["Ctrl-a"]
+        );
+        for mode in ["insert", "help", "trash"] {
+            let home = configured_home(&format!("[keybindings.{mode}]\nadd_subtask = [\"o\"]\n"));
+            assert_eq!(
+                diagnostic_paths(load(home.path()).unwrap_err()),
+                vec![format!("keybindings.{mode}.add_subtask")]
+            );
+        }
+        // The configuration.md example and a config that already uses A both load unchanged.
+        let home = configured_home(
+            "[keybindings.normal]\nadd_task = [\"a\"]\ntoggle_complete = [\"A\"]\n",
+        );
+        let loaded = load(home.path()).unwrap();
+        assert_eq!(labels_for(loaded.keymap(), BindingId::StartAdd), vec!["a"]);
+        assert_eq!(
+            labels_for(loaded.keymap(), BindingId::ToggleComplete),
+            vec!["A"]
+        );
+        assert_eq!(
+            loaded
+                .keymap()
+                .unbound_actions_for(crate::app::Mode::Normal)
+                .collect::<Vec<_>>(),
+            vec![BindingId::AddSubtask]
+        );
+        assert!(!home.path().join(".shtodo/global").exists());
     }
 
     #[test]
@@ -832,7 +867,7 @@ commit_edit = ["ctrl-s"]
                 labels_for(loaded.keymap(), BindingId::ToggleComplete),
                 vec![label]
             );
-            assert_eq!(loaded.keymap().configurable_action_count(), 37);
+            assert_eq!(loaded.keymap().configurable_action_count(), 38);
             assert_eq!(
                 loaded
                     .keymap()

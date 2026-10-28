@@ -15,6 +15,7 @@ pub(crate) enum Action {
     ClearSearch,
     ToggleSort,
     EditFilter,
+    AddSubtask,
     OpenTrash,
     CloseTrash,
     RestoreSelected,

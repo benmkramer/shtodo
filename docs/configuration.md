@@ -89,6 +89,15 @@ Help then shows `Unbound: toggle_sort (config)` and
 `Unbound: edit_filter (config)`. To enable either action, assign a free Normal key, for example
 `toggle_sort = ["o"]` or `edit_filter = ["F"]`. There is no fallback key.
 
+### Existing bindings and the new subtask default
+
+The Normal-mode default for `add_subtask` (`A`) follows the same rule. If
+your config already assigns `A` to another Normal action, the config still
+loads, that action keeps the key, and Help shows
+`Unbound: add_subtask (config)`. The example above with `add_task = ["a"]`
+is unaffected, because `a` and `A` are different keys. To enable the action,
+assign a free Normal key, for example `add_subtask = ["ctrl-a"]`.
+
 Conflicts between explicit bindings and conflicts with older defaults are
 still configuration errors. `Ctrl-C` remains fixed. `shtodo doctor` reports
 the number of supported configurable actions and the effective active keys,
@@ -135,6 +144,7 @@ invalid. Trash `close_trash` remains independent and defaults to `t` and Esc.
 | `clear_search`    | `esc`        |
 | `toggle_sort`     | `s`          |
 | `edit_filter`     | `f`          |
+| `add_subtask`     | `A`          |
 | `open_trash`      | `t`          |
 | `open_help`       | `?`          |
 | `quit`            | `q`          |
