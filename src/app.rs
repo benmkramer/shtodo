@@ -469,9 +469,16 @@ impl App {
                 if self.is_trash_view() {
                     task.is_deleted()
                 } else {
-                    self.matches(task)
+                    self.displays(task)
                 }
             })
+    }
+
+    /// Whether `task` is a displayed row: a match, or a context row for a matching subtask.
+    fn displays(&self, task: &Task) -> bool {
+        self.tasks.position(task.id()).is_some_and(|index| {
+            projection::displays_with(&self.tasks, index, |task| self.matches(task))
+        })
     }
 
     pub(crate) fn view(&self) -> TaskView {
@@ -1326,7 +1333,7 @@ impl App {
     fn finish_success(&mut self, request: &Mutation, id: TaskId, celebrate: bool) -> bool {
         let mut dirty = false;
         self.message = None;
-        let visible = self.tasks.task(id).is_some_and(|task| self.matches(task));
+        let visible = self.tasks.task(id).is_some_and(|task| self.displays(task));
         if matches!(
             request,
             Mutation::Add(_) | Mutation::RestoreLatest | Mutation::Restore { .. }
@@ -4119,6 +4126,38 @@ mod subtask_tests {
         app.displayed_rows()
             .map(|row| (row.task.id().get(), row.context))
             .collect()
+    }
+
+    #[test]
+    fn every_action_should_work_on_a_selected_context_row() {
+        let mut app = App::new(tree());
+        search(&mut app, "match");
+        app.selected = Some(id(3));
+        assert_eq!(app.selected_task().map(Task::id), Some(id(3)));
+        assert_eq!(
+            app.prepare(Action::ToggleComplete).unwrap(),
+            Transition::Submit
+        );
+        assert_eq!(
+            app.take_mutation(),
+            Some(Mutation::SetCompleted {
+                id: id(3),
+                completed: true
+            })
+        );
+        assert_eq!(app.prepare(Action::Delete).unwrap(), Transition::Submit);
+        assert!(matches!(
+            app.take_mutation(),
+            Some(Mutation::Delete { id: deleted, .. }) if deleted == id(3)
+        ));
+        assert_eq!(app.apply(Action::StartEdit).unwrap(), Transition::Transient);
+        assert_eq!(app.editor().unwrap().kind(), EditKind::Edit(id(3)));
+        // The edited parent still shows as context, so it is not reported hidden.
+        app.apply(Action::InsertChar('!')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.tasks().task(id(3)).unwrap().text(), "three!");
+        assert_eq!(app.message, None);
+        assert_eq!(app.selected(), Some(id(3)));
     }
 
     #[test]
