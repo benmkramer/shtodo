@@ -429,8 +429,9 @@ def token_tui_fixture(home, size, builder):
     return path.stat().st_size
 
 
-# TUI cases per fixture: (case label, binary label, keys sent before timing, operations).
-# The sorted cases and Filter mode need this branch's binary, so they run for it only.
+# TUI cases per fixture: (case label, binary label, keys sent before timing, operations), plus
+# the fixture kind when it differs from the key. The sorted cases and Filter mode need this
+# branch's binary, so they run for it only.
 TUI_CASES = {
     "mixed": [("baseline", "baseline", b"", ("toggle_to_frame", "help_to_frame", "search_keystroke")),
               ("current", "current", b"", ("toggle_to_frame", "help_to_frame", "search_keystroke")),
@@ -443,10 +444,27 @@ TUI_CASES = {
               ("current", "current", b"", ("toggle_to_frame", "search_keystroke", "filter_keystroke")),
               ("current_priority", "current", b"s", ("toggle_to_frame",)),
               ("current_due", "current", b"ss", ("toggle_to_frame",))],
+    # The control cannot read schema 2, so each nested case pairs with nested-flat on the same
+    # build and in the same rounds. `J` and `>` are information only, each in its own TUI.
+    "nested": [("current", "current", b"", ("toggle_to_frame", "search_keystroke"), "nested"),
+               ("current_flat", "current", b"", ("toggle_to_frame", "search_keystroke"), "nested-flat"),
+               ("current_priority", "current", b"s", ("toggle_to_frame",), "nested"),
+               ("current_flat_priority", "current", b"s", ("toggle_to_frame",), "nested-flat"),
+               ("current_move", "current", b"", ("move_to_frame",), "nested"),
+               ("current_indent", "current", b"j", ("indent_to_frame",), "nested")],
 }
 # The status text each sort setup waits for before timing.
 SETUP_STATUS = {b"s": "by priority", b"ss": "by due"}
-TUI_FIXTURES = {"tagged": tagged_fixture, "dated": dated_fixture}
+TUI_FIXTURES = {"tagged": tagged_fixture, "dated": dated_fixture, "nested": nested_fixture,
+                "nested-flat": nested_flat_fixture}
+# The task each toggle completes: the first displayed row. The nested fixtures delete the first
+# group, so task 6, the head of the second group, is first in both.
+TUI_TARGETS = {"tagged": (1, "task 00000001"), "dated": (1, "task 00000001"),
+               "nested": (6, "Task 6 café"), "nested-flat": (6, "Task 6 café")}
+# `J` on the first group moves it below the third (11 to 15); `K` moves it back.
+NESTED_MOVED = (6, 11)
+# `>` nests task 7 under 6 again after an untimed `<` promotes it.
+NESTED_INDENTED = 7
 # On the dated fixture both keystrokes end on the same rows, the tasks due on the run date: the
 # search finds the date's literal token, and the filter's final `y` completes `due:today`.
 DATED_SEARCH = f"/due:{RUN_DATE}"
@@ -458,11 +476,37 @@ KEYSTROKES = {
     ("dated", "search_keystroke"): (DATED_SEARCH[:-1].encode(), DATED_SEARCH[-1].encode(),
                                     DATED_SEARCH, "SEARCH"),
     ("dated", "filter_keystroke"): (b"fdue:toda", b"y", "f:due:today", "FILTER"),
+    # The space narrows `7` to the IDs ending in 7, which are all subtasks (position 2 of each
+    # group of five): a tenth of the records, and their parents become context rows. The view
+    # row pads with spaces, so this frame is acknowledged by its match count instead.
+    ("nested", "search_keystroke"): (b"/7", b" ", "/7 ", "SEARCH"),
 }
+
+
+def search_matches(value, query):
+    """The live tasks a search matches, the count the view row shows; context rows excluded."""
+    return sum(task["deletion_sequence"] is None and query in task["text"].lower()
+               for task in value["tasks"])
 
 
 def footer(value):
     return "".join(value.screen[-1])
+
+
+def row_with(value, text):
+    return next(("".join(row) for row in value.screen[2:-1] if text in "".join(row)), "")
+
+
+def indented(value, text, expected):
+    # The selected row is `› ` then, for a subtask, two columns of indent before the marker.
+    row = row_with(value, text)
+    return row.startswith("›") and row.startswith("›   ") == expected
+
+
+def setup_done(value, setup):
+    if setup == b"j":
+        return "".join(value.screen[3]).startswith("›")
+    return SETUP_STATUS[setup] in "".join(value.screen[1])
 
 
 def measure_tui(args, binaries, rng):
@@ -475,12 +519,13 @@ def measure_tui(args, binaries, rng):
                     cases = []
                     specs = list(TUI_CASES[kind])
                     rng.shuffle(specs)
-                    for label, binary, setup, operations in specs:
+                    for label, binary, setup, operations, *fixture_kind in specs:
                         home = root / f"{kind}-{size}-{label}"
-                        if kind in TUI_FIXTURES:
-                            size_bytes = token_tui_fixture(home, size, TUI_FIXTURES[kind])
-                            # Task 1 is selected first; sorting keeps it selected, now further down.
-                            target, marker_text = 1, "task 00000001"
+                        fixture_kind = fixture_kind[0] if fixture_kind else kind
+                        if fixture_kind in TUI_FIXTURES:
+                            size_bytes = token_tui_fixture(home, size, TUI_FIXTURES[fixture_kind])
+                            # The first row is selected; sorting keeps it selected, maybe further down.
+                            target, marker_text = TUI_TARGETS[fixture_kind]
                         else:
                             size_bytes = fixture(home, size)
                             target, marker_text = 2, "Task 2 café"
@@ -489,13 +534,14 @@ def measure_tui(args, binaries, rng):
                         wait_screen(tui, lambda value: footer(value).startswith("NORMAL"))
                         if setup:
                             tui.send(setup)
-                            wait_screen(tui, lambda value, status=SETUP_STATUS[setup]: status in "".join(
-                                value.screen[1]))
+                            wait_screen(tui, lambda value, setup=setup: setup_done(value, setup))
                         value = json.loads((home / ".shtodo/global/tasks.json").read_text())
                         completed = value["tasks"][target - 1]["completed"]
+                        matches = search_matches(value, KEYSTROKES[("nested", "search_keystroke")][2][1:])
                         cases.append(dict(label=label, binary=binary, home=home, tui=tui, kind=kind,
-                                          records=size, snapshot_bytes=size_bytes, target=target,
-                                          marker_text=marker_text, completed=completed,
+                                          fixture=fixture_kind, records=size, snapshot_bytes=size_bytes,
+                                          target=target, marker_text=marker_text, completed=completed,
+                                          moved=False, matches=matches,
                                           samples={operation: [] for operation in operations}))
                     for round_index in range(-args.warmups, args.runs):
                         order = [(case, operation) for case in cases for operation in case["samples"]]
@@ -512,20 +558,41 @@ def measure_tui(args, binaries, rng):
                             elif operation == "help_to_frame":
                                 predicate = lambda value: footer(value).startswith("HELP")
                                 key = b"?"
+                            elif operation == "move_to_frame":
+                                case["moved"] = not case["moved"]
+                                first = f"Task {NESTED_MOVED[case['moved']]} café"
+                                predicate = lambda value, first=first: first in "".join(value.screen[2])
+                                key = b"J" if case["moved"] else b"K"
+                            elif operation == "indent_to_frame":
+                                text = f"Task {NESTED_INDENTED} café"
+                                tui.send(b"<")
+                                wait_screen(tui, lambda value, text=text: indented(value, text, False))
+                                predicate = lambda value, text=text: indented(value, text, True)
+                                key = b">"
                             else:
                                 opening, key, status, mode = KEYSTROKES[(case["kind"], operation)]
                                 tui.send(opening)
                                 wait_screen(tui, lambda value, mode=mode, status=status[:-1]: footer(
                                     value).startswith(mode) and "".join(value.screen[1]).rstrip().endswith(status))
                                 predicate = lambda value, status=status: status in "".join(value.screen[1])
+                                if case["kind"] == "nested":
+                                    predicate = lambda value, count=f"· {case['matches']} matches": count in "".join(
+                                        value.screen[1])
                             started = time.perf_counter_ns()
                             tui.send(key)
                             wait_screen(tui, predicate)
                             elapsed = (time.perf_counter_ns() - started) / 1_000_000
-                            if operation == "toggle_to_frame":
+                            if operation in ("toggle_to_frame", "move_to_frame", "indent_to_frame"):
                                 value = json.loads((case["home"] / ".shtodo/global/tasks.json").read_text())
-                                assert value["tasks"][case["target"] - 1]["completed"] == case["completed"]
                                 assert len(value["tasks"]) == size
+                                tasks = {task["id"]: task for task in value["tasks"]}
+                                ids = [task["id"] for task in value["tasks"]]
+                            if operation == "toggle_to_frame":
+                                assert tasks[case["target"]]["completed"] == case["completed"]
+                            elif operation == "move_to_frame":
+                                assert (ids.index(NESTED_MOVED[1]) < ids.index(NESTED_MOVED[0])) == case["moved"]
+                            elif operation == "indent_to_frame":
+                                assert tasks[NESTED_INDENTED].get("parent_id") == NESTED_MOVED[0]
                             else:
                                 tui.send(b"?" if operation == "help_to_frame" else b"\x1b")
                                 wait_screen(tui, lambda value: footer(value).startswith("NORMAL"))
@@ -533,7 +600,7 @@ def measure_tui(args, binaries, rng):
                                 case["samples"][operation].append(elapsed)
                     for case in cases:
                         for operation, samples in case["samples"].items():
-                            results.append(dict(binary=case["label"], fixture=kind, records=size,
+                            results.append(dict(binary=case["label"], fixture=case["fixture"], records=size,
                                                 snapshot_bytes=case["snapshot_bytes"], operation=operation,
                                                 samples_ms=samples, statistics=benchmark.summary(samples)))
                 print(f"TUI {kind} {size} records complete", flush=True)
@@ -544,15 +611,21 @@ def measure_idle(args, binaries):
     groups = []
     with tempfile.TemporaryDirectory(prefix="shtodo-paired-idle-") as directory, contextlib.ExitStack() as stack:
         tuis = []
-        for size in (0, 1000, 10000):
-            for label, binary in binaries.items():
-                home = Path(directory) / f"{size}-{label}"
+        # Mixed for both binaries; nested, when asked for, on the current binary only.
+        scopes = [(size, label, "mixed") for size in (0, 1000, 10000) for label in binaries]
+        if "nested" in args.kinds:
+            scopes += [(size, "current", "nested") for size in (1000, 10000)]
+        for size, label, kind in scopes:
+            home = Path(directory) / f"{size}-{label}-{kind}"
+            if kind == "nested":
+                size_bytes = token_tui_fixture(home, size, nested_fixture)
+            else:
                 size_bytes = fixture(home, size)
-                with patch.object(test_concurrency, "BINARY", Path(binary)):
-                    tui = stack.enter_context(test_concurrency.Tui(home))
-                tuis.append(tui)
-                groups.append(dict(binary=label, records=size, clients=1, snapshot_bytes=size_bytes,
-                                   idle_output_bytes=[]))
+            with patch.object(test_concurrency, "BINARY", Path(binaries[label])):
+                tui = stack.enter_context(test_concurrency.Tui(home))
+            tuis.append(tui)
+            groups.append(dict(binary=label, fixture=kind, records=size, clients=1,
+                               snapshot_bytes=size_bytes, idle_output_bytes=[]))
         drain_all(tuis, args.idle_warmup)
         for sample in range(args.idle_samples):
             counts = drain_all(tuis, args.idle_seconds)
@@ -610,7 +683,7 @@ def main():
                   baseline_commit=benchmark.optional_command(["git", "rev-parse", "origin/main"]),
                   current_git_status=benchmark.optional_command(["git", "status", "--short"]),
                   rustc=benchmark.optional_command(["rustc", "--version"]),
-                  method="Paired release binaries on independent temporary global scopes. CLI cases shuffled each round; snapshot reset and correctness checks outside timers; null stdout; process launch/exit included. Plain fixtures match the historical short open-task workload; mixed fixtures have Unicode and one-third tombstones. TUI cases shuffled each round; input ends at an acknowledged marker/mode frame, including rendering and PTY/harness work; completion persisted before frame. Idle runs six independent scopes together, one TUI each, with wait4 CPU including initialization/warmup and no terminal output after warmup. Warm caches, local storage; not a throughput ceiling or a cross-platform result.",
+                  method="Paired release binaries on independent temporary global scopes. CLI cases shuffled each round; snapshot reset and correctness checks outside timers; null stdout; process launch/exit included. Plain fixtures match the historical short open-task workload; mixed fixtures have Unicode and one-third tombstones. TUI cases shuffled each round; input ends at an acknowledged marker/mode frame, including rendering and PTY/harness work; completion persisted before frame. Idle runs independent scopes together (mixed for both binaries, plus nested for the current binary when requested), one TUI each, with wait4 CPU including initialization/warmup and no terminal output after warmup. Warm caches, local storage; not a throughput ceiling or a cross-platform result.",
                   results=data)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")

@@ -117,6 +117,40 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(comparison.SETUP_STATUS[cases["current_due"]], "by due")
         self.assertEqual(comparison.SETUP_STATUS[cases["current_priority"]], "by priority")
 
+    def test_nested_tui_cases_pair_with_flat_and_their_targets_hold_in_both_fixtures(self):
+        import benchmark_concurrency_comparison as comparison
+
+        cases = {label: (setup, fixture) for label, _, setup, _, fixture in comparison.TUI_CASES["nested"]}
+        self.assertEqual(cases["current"], (b"", "nested"))
+        self.assertEqual(cases["current_flat"], (b"", "nested-flat"))
+        self.assertEqual(cases["current_flat_priority"], (b"s", "nested-flat"))
+        opening, key, status, mode = comparison.KEYSTROKES[("nested", "search_keystroke")]
+        self.assertEqual(((opening + key).decode(), mode), (status, "SEARCH"))
+        for size in (100, 1000, 10000):
+            nested = comparison.nested_fixture(size)
+            flat = comparison.nested_flat_fixture(size)
+            for value in (nested, flat):
+                live = [task for task in value["tasks"] if task["deletion_sequence"] is None]
+                # Task 6 is the first displayed row in both, so the toggle hits the same task.
+                self.assertEqual(live[0]["id"], comparison.TUI_TARGETS["nested"][0])
+                self.assertIn(comparison.TUI_TARGETS["nested"][1], live[0]["text"])
+            tasks = {task["id"]: task for task in nested["tasks"]}
+            first, third = comparison.NESTED_MOVED
+            for id in (first, third):
+                self.assertIsNone(tasks[id]["deletion_sequence"])
+                self.assertNotIn("parent_id", tasks[id])
+            self.assertEqual(tasks[comparison.NESTED_INDENTED]["parent_id"], first)
+            # Every search match is a live subtask whose parent does not match: a context row.
+            query = status[1:]
+            matches = [task for task in nested["tasks"]
+                       if task["deletion_sequence"] is None and query in task["text"].lower()]
+            self.assertEqual(len(matches), comparison.search_matches(nested, query))
+            self.assertEqual(comparison.search_matches(flat, query), len(matches))
+            self.assertGreater(len(matches), size // 20)
+            for task in matches:
+                self.assertTrue(str(task["id"]).endswith("7"))
+                self.assertNotIn(query, tasks[task["parent_id"]]["text"].lower())
+
     def test_nested_fixture_regroups_the_mixed_records_under_the_invariants(self):
         import benchmark_concurrency_comparison as comparison
 
