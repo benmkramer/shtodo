@@ -58,6 +58,15 @@ All notable changes to shtodo are documented in this file.
 - JSON task objects include `parent_id`, a number or `null`; `tasks` keeps
   each returned group together with its parent first. New error code
   `invalid_parent` for `add --parent` and `parent`.
+- TUI subtasks: subtask rows are indented, and a parent shows dimmed
+  `done/total` progress. When a subtask matches the view, search, or filter
+  but its parent does not, the parent shows as a dimmed context row that is
+  not counted as a match but can be selected and acted on.
+- TUI `A` adds a subtask to the selected task's group, `>` nests the
+  selected top-level task under the nearest top-level row above it, and `<`
+  promotes a subtask. A footer notice explains a refused nest or promote.
+- TUI Trash indents subtasks deleted with their parent, and `r` on a subtask
+  whose parent is in trash shows `Restore parent N first`.
 
 ### Changed
 
@@ -80,6 +89,11 @@ All notable changes to shtodo are documented in this file.
   the text `--parent`.
 - TUI `J`/`K` move a task among its siblings: a top-level task moves with its
   subtasks, and a subtask stays in its group.
+- TUI Help covers the header while open and shows the header text in its
+  title; the footer stays visible.
+- The new `add_subtask` (`A`), `indent_task` (`>`), and `outdent_task` (`<`)
+  defaults yield to existing Normal bindings on those keys, like the sort
+  and filter defaults. `shtodo doctor` counts 40 configurable actions.
 - `restore` of a subtask whose parent is in trash fails with `task_deleted`,
   whose `task_id` names the parent to restore first.
 

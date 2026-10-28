@@ -217,10 +217,29 @@ What each lifecycle action does to a group:
 | TUI `u` | Restores the latest deletion: one task, or a parent with the subtasks deleted with it |
 | `parent ID P` on a task with deleted subtasks | Those subtasks become top-level tasks in trash, left in place |
 
-Without subtasks, delete and restore output is unchanged. In the TUI,
-subtasks currently appear as ordinary rows in tree order. `J` and `K` move a
-task among its siblings only: a top-level task moves with its whole group,
-and a subtask stays inside its group.
+Without subtasks, delete and restore output is unchanged.
+
+**In the TUI.** A subtask row is indented two columns. A parent with
+subtasks shows its progress, such as `1/2`, dimmed before its text: done
+subtasks over all live subtasks. In Normal mode:
+
+- `A` adds a subtask: under the selected top-level task, or beside the
+  selected subtask. The draft row appears indented after the group's last
+  row.
+- `>` makes the selected top-level task the last subtask of the nearest
+  top-level row above it. `<` makes the selected subtask top-level again,
+  right after its group. Both work in any sort order. Instead of saving, the
+  footer shows `Already a subtask; < promotes`, `No task above to nest
+  under`, `Has subtasks; promote them first`, or `Already top-level`.
+- `j` and `k` visit every row. `J` and `K` move a task among its siblings
+  only: a top-level task moves with its whole group, and a subtask stays
+  inside its group.
+
+When a subtask matches the view, search, or filter but its parent does not,
+the parent is still shown above it as a dimmed context row. A context row
+is not counted in `N matches`, but it can be selected and every action works
+on it. `shtodo list` has no context rows; it prints exactly the matching
+tasks.
 
 **Compatibility.** A list without subtasks is saved as schema 1, byte for
 byte as before, so every earlier shtodo reads and writes it. A list with at
@@ -532,6 +551,9 @@ mode, saves nothing, and shows `Task text cannot be empty`.
 | `J`           | Move the selected task down (manual order only) |
 | `K`           | Move the selected task up (manual order only)   |
 | `i`           | Add a task                                      |
+| `A`           | Add a subtask to the selected task's group      |
+| `>`           | Nest the selected task under the task above     |
+| `<`           | Promote the selected subtask to top-level       |
 | `e`           | Edit the selected task                          |
 | Space         | Toggle the selected task complete or incomplete |
 | `d`           | Delete the selected task                        |
@@ -629,8 +651,11 @@ Accepting an empty buffer clears the filter.
 ### Help mode
 
 Help shows the current view's bindings. From the normal list it also shows
-Insert controls; from trash it shows Trash controls. Closing help returns to
-the view and selection from which it was opened.
+Insert controls; from trash it shows Trash controls. While open, Help covers
+the header and the list, and its title carries the header, for example
+`Keyboard help · shtodo global`; the footer stays visible. `>` and `<` share
+one row, `> nest, < promote`. Closing help returns to the view and selection
+from which it was opened.
 
 | Key        | Action              |
 | ---------- | ------------------- |
@@ -649,6 +674,10 @@ Rows show each task's stable scope-local ID, `open` or `done` completion
 state, and text, including tasks deleted with the shell `delete` command.
 Trash is ordered by persisted `deletion_sequence`, most recently deleted
 first, and opens with the newest deletion selected. No timestamps are added.
+Subtasks deleted with their parent follow its row, indented; a subtask
+deleted on its own is not indented. Pressing `r` on a subtask whose parent
+is also in trash saves nothing and shows `Restore parent 3 first`, naming
+the parent.
 
 | Key           | Action                         |
 | ------------- | ------------------------------ |
@@ -675,8 +704,9 @@ only clears the deletion marker; text, completion, ID, and canonical position
 are preserved. The normal list's `u` still restores the latest remaining
 deletion, including after a restart.
 
-Normal mutation, search, filter, and sort keys (`i`, `e`, Space, `d`, `J`,
-`K`, `u`, `/`, `f`, `s`, Tab, and Shift-Tab) are inactive in trash. Tombstones cannot be edited,
+Normal mutation, search, filter, and sort keys (`i`, `A`, `e`, Space, `d`,
+`J`, `K`, `>`, `<`, `u`, `/`, `f`, `s`, Tab, and Shift-Tab) are inactive in
+trash. Tombstones cannot be edited,
 completed, reordered, or permanently
 removed from this view. Browse and help actions never save the snapshot.
 
@@ -747,8 +777,9 @@ earliest due date first, then tasks without one, with priority and then
 manual order breaking ties, the same as `shtodo list --sort due`. Open and
 done tasks are not separated; use the Open tab for that. Selection keeps the
 same task when the order changes.
-Navigation and task actions operate on the displayed rows. Selection keeps its task identity while
-that task still matches. If completion, reopening, editing, or a view change
+Navigation and task actions operate on the displayed rows, context rows
+included (see [Subtasks](#subtasks)). Selection keeps its task identity while
+that task is still displayed. If completion, reopening, editing, or a view change
 hides it, selection moves to the next matching task in display order, then
 the previous one. Deletion also selects the next match, then the previous one.
 No matches means no selected task, so navigation, reordering, editing,

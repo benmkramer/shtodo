@@ -114,8 +114,9 @@ See [concurrent-process guidance](./docs/usage.md#concurrent-processes).
 The essentials are:
 
 ```text
-i add · e edit · Space complete · d delete · u restore latest · t trash
-/ search · f filter · s sort (cycles) · Tab / Shift-Tab views · ? help · q quit
+i add · A subtask · > < nest · e edit · Space complete · d delete
+u restore latest · t trash · / search · f filter · s sort (cycles)
+Tab / Shift-Tab views · ? help · q quit
 ```
 
 See [Usage and keyboard controls] for the full interaction guide.
