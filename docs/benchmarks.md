@@ -165,7 +165,9 @@ output, and the binary grows by 32 bytes. Completion-to-frame on the nested
 fixture in Manual order is +0.80 and +0.89 ms against the same records
 without links, over its 5% or 0.5 ms gate. A flat list padded to the same
 snapshot size costs the same, so the difference is the 198,452 bytes the
-`parent_id` lines add to every save.
+`parent_id` lines add to every save. The owner accepted this miss on
+October 29, 2026 as the same storage cost the shell gate on `add --parent`
+already accepted.
 
 ## Subtasks shell commands: October 24, 2026
 

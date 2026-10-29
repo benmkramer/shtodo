@@ -17,6 +17,10 @@ the TUI work (see [Cause](#cause)), so the mitigation the plan lists, per-group
 counts cached on `App`, cannot reach it. Per the plan's STOP conditions this
 is reported to the owner; no bound was changed.
 
+Owner decision, October 29, 2026: accepted as the snapshot-size cost that
+the PR 1 `add --parent` gate already accepted. The gate and its numbers
+stand as measured.
+
 ## Gates
 
 Medians in milliseconds at 10,000 records. A gate passes within its relative
