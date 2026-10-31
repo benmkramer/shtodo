@@ -21,6 +21,9 @@ pub(crate) enum BindingId {
     ClearSearch,
     ToggleSort,
     EditFilter,
+    AddSubtask,
+    IndentTask,
+    OutdentTask,
     OpenTrash,
     TrashMoveDown,
     TrashMoveUp,
@@ -59,6 +62,9 @@ impl BindingId {
                 | Self::ClearSearch
                 | Self::ToggleSort
                 | Self::EditFilter
+                | Self::AddSubtask
+                | Self::IndentTask
+                | Self::OutdentTask
         )
     }
 
@@ -79,6 +85,9 @@ impl BindingId {
             (Mode::Normal, "clear_search") => Self::ClearSearch,
             (Mode::Normal, "toggle_sort") => Self::ToggleSort,
             (Mode::Normal, "edit_filter") => Self::EditFilter,
+            (Mode::Normal, "add_subtask") => Self::AddSubtask,
+            (Mode::Normal, "indent_task") => Self::IndentTask,
+            (Mode::Normal, "outdent_task") => Self::OutdentTask,
             (Mode::Normal, "open_trash") => Self::OpenTrash,
             (Mode::Trash, "move_down") => Self::TrashMoveDown,
             (Mode::Trash, "move_up") => Self::TrashMoveUp,
@@ -122,6 +131,9 @@ impl BindingId {
             Self::ClearSearch => Some("clear_search"),
             Self::ToggleSort => Some("toggle_sort"),
             Self::EditFilter => Some("edit_filter"),
+            Self::AddSubtask => Some("add_subtask"),
+            Self::IndentTask => Some("indent_task"),
+            Self::OutdentTask => Some("outdent_task"),
             Self::OpenTrash => Some("open_trash"),
             Self::TrashMoveDown => Some("move_down"),
             Self::TrashMoveUp => Some("move_up"),
@@ -165,6 +177,9 @@ impl BindingId {
             | Self::ClearSearch
             | Self::ToggleSort
             | Self::EditFilter
+            | Self::AddSubtask
+            | Self::IndentTask
+            | Self::OutdentTask
             | Self::OpenTrash
             | Self::OpenHelp
             | Self::NormalQuit => Mode::Normal,
@@ -753,6 +768,31 @@ static DEFINITIONS: &[Definition] = &[
         description: "edit filter",
         footer_priority: Some(1),
         defaults: &[chord(KeyCode::Char('f'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::AddSubtask,
+        action: Action::AddSubtask,
+        description: "add subtask",
+        footer_priority: None,
+        defaults: &[chord(KeyCode::Char('A'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    // Help shows these two on one row while both are bound.
+    Definition {
+        id: BindingId::IndentTask,
+        action: Action::IndentTask,
+        description: "nest",
+        footer_priority: None,
+        defaults: &[chord(KeyCode::Char('>'), KeyModifiers::NONE)],
+        fixed: &[],
+    },
+    Definition {
+        id: BindingId::OutdentTask,
+        action: Action::OutdentTask,
+        description: "promote",
+        footer_priority: None,
+        defaults: &[chord(KeyCode::Char('<'), KeyModifiers::NONE)],
         fixed: &[],
     },
 ];
@@ -1417,8 +1457,8 @@ mod tests {
     #[test]
     fn keymap_should_expose_configurable_and_active_binding_counts() {
         let keymap = Keymap::defaults();
-        assert_eq!(keymap.configurable_action_count(), 37);
-        assert_eq!(keymap.active_binding_count(), 50);
+        assert_eq!(keymap.configurable_action_count(), 40);
+        assert_eq!(keymap.active_binding_count(), 53);
         assert_eq!(
             BindingId::from_config(Mode::Normal, "move_down"),
             Some(BindingId::MoveDown)
@@ -1636,8 +1676,8 @@ mod tests {
                 BindingId::EditFilter,
             ]
         );
-        assert_eq!(keymap.configurable_action_count(), 37);
-        assert_eq!(keymap.active_binding_count(), 47);
+        assert_eq!(keymap.configurable_action_count(), 40);
+        assert_eq!(keymap.active_binding_count(), 50);
         assert!(keymap.unbound_actions_for(Mode::Insert).next().is_none());
         for mode in [Mode::Normal, Mode::Insert, Mode::Search, Mode::Help] {
             assert_eq!(
@@ -1895,6 +1935,133 @@ mod tests {
             vec![
                 "Ctrl-C is reserved and cannot be configured",
                 "\"d\" conflicts with delete_task"
+            ]
+        );
+    }
+
+    #[test]
+    fn add_subtask_should_default_to_shift_a_in_normal_mode_and_yield_to_overrides() {
+        let a = pressed(KeyCode::Char('A'), KeyModifiers::NONE);
+        let keymap = Keymap::defaults();
+        assert_eq!(keymap.map_key(Mode::Normal, a), Some(Action::AddSubtask));
+        assert_eq!(keymap.map_key(Mode::Trash, a), None);
+        assert_eq!(keymap.map_key(Mode::Help, a), None);
+        assert_eq!(
+            keymap.map_key(Mode::Insert, a),
+            Some(Action::InsertChar('A'))
+        );
+        assert_eq!(
+            BindingId::from_config(Mode::Normal, "add_subtask"),
+            Some(BindingId::AddSubtask)
+        );
+        for mode in [Mode::Insert, Mode::Help, Mode::Trash] {
+            assert_eq!(BindingId::from_config(mode, "add_subtask"), None);
+        }
+        assert_eq!(BindingId::AddSubtask.config_name(), Some("add_subtask"));
+
+        let claimed = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.toggle_complete".into(),
+            id: BindingId::ToggleComplete,
+            keys: vec!["A".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            claimed.map_key(Mode::Normal, a),
+            Some(Action::ToggleComplete)
+        );
+        assert_eq!(
+            claimed
+                .unbound_actions_for(Mode::Normal)
+                .collect::<Vec<_>>(),
+            vec![BindingId::AddSubtask]
+        );
+        let issues = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.add_subtask".into(),
+            id: BindingId::AddSubtask,
+            keys: vec!["ctrl-c".into(), "j".into()],
+        }])
+        .unwrap_err()
+        .into_iter()
+        .map(|issue| issue.message)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            issues,
+            vec![
+                "Ctrl-C is reserved and cannot be configured",
+                "\"j\" conflicts with move_down"
+            ]
+        );
+    }
+
+    #[test]
+    fn indent_and_outdent_should_default_to_angle_brackets_in_normal_mode_and_yield_to_overrides() {
+        let keymap = Keymap::defaults();
+        for (character, id, action, name) in [
+            (
+                '>',
+                BindingId::IndentTask,
+                Action::IndentTask,
+                "indent_task",
+            ),
+            (
+                '<',
+                BindingId::OutdentTask,
+                Action::OutdentTask,
+                "outdent_task",
+            ),
+        ] {
+            let key = pressed(KeyCode::Char(character), KeyModifiers::NONE);
+            assert_eq!(keymap.map_key(Mode::Normal, key), Some(action));
+            assert_eq!(keymap.map_key(Mode::Trash, key), None);
+            assert_eq!(keymap.map_key(Mode::Help, key), None);
+            assert_eq!(
+                keymap.map_key(Mode::Insert, key),
+                Some(Action::InsertChar(character))
+            );
+            assert_eq!(BindingId::from_config(Mode::Normal, name), Some(id));
+            for mode in [Mode::Insert, Mode::Help, Mode::Trash] {
+                assert_eq!(BindingId::from_config(mode, name), None);
+            }
+            assert_eq!(id.config_name(), Some(name));
+        }
+
+        let claimed = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.toggle_complete".into(),
+            id: BindingId::ToggleComplete,
+            keys: vec![">".into(), "<".into()],
+        }])
+        .unwrap();
+        assert_eq!(
+            claimed.map_key(
+                Mode::Normal,
+                pressed(KeyCode::Char('<'), KeyModifiers::NONE)
+            ),
+            Some(Action::ToggleComplete)
+        );
+        assert_eq!(
+            claimed
+                .unbound_actions_for(Mode::Normal)
+                .collect::<Vec<_>>(),
+            vec![BindingId::IndentTask, BindingId::OutdentTask]
+        );
+        let issues = Keymap::with_overrides(&[BindingOverride {
+            order: 0,
+            path: "keybindings.normal.indent_task".into(),
+            id: BindingId::IndentTask,
+            keys: vec!["ctrl-c".into(), "<".into(), "j".into()],
+        }])
+        .unwrap_err()
+        .into_iter()
+        .map(|issue| issue.message)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            issues,
+            vec![
+                "Ctrl-C is reserved and cannot be configured",
+                "\"j\" conflicts with move_down"
             ]
         );
     }

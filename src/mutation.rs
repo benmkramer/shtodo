@@ -191,9 +191,11 @@ impl Mutation {
                         kind: ConflictKind::NoLongerActive,
                     });
                 }
-                if !projection.matches(task)
-                    || projection.adjacent(list, *id, *direction) != *neighbor
-                {
+                // A context parent is a displayed row, so it is checked like a match.
+                let displayed = list
+                    .position(*id)
+                    .is_some_and(|index| projection.displays(list, index));
+                if !displayed || projection.adjacent(list, *id, *direction) != *neighbor {
                     return Ok(Outcome::Conflict {
                         id: *id,
                         kind: ConflictKind::OrderChanged,
@@ -375,7 +377,70 @@ mod tests {
         list.edit(id(3), "third +x").unwrap();
         assert_eq!(projection.adjacent(&list, id(4), MoveDirection::Down), None);
         assert_eq!(projection.adjacent(&list, id(6), MoveDirection::Up), None);
-        assert_eq!(projection.adjacent(&list, id(3), MoveDirection::Up), None);
+        // 2 does not match, but its subtask 6 does, so 2 is a displayed context row.
+        assert_eq!(
+            projection.adjacent(&list, id(3), MoveDirection::Up),
+            Some(id(2))
+        );
+        list.edit(id(6), "second a").unwrap();
+        assert_eq!(
+            projection.adjacent(&list, id(3), MoveDirection::Up),
+            Some(id(1))
+        );
+    }
+
+    #[test]
+    fn a_context_parent_should_move_as_a_displayed_row_until_its_last_match_leaves() {
+        // Groups 1 [4, 5], 2 [6], and 3; the search matches 4 and 3 but not 1.
+        let mut list = groups();
+        list.edit(id(4), "first a match").unwrap();
+        list.edit(id(3), "third match").unwrap();
+        let projection = Projection {
+            lowercase_query: "match".into(),
+            ..Projection::default()
+        };
+        let request = |list: &TaskList, task, direction| Mutation::MoveAdjacent {
+            id: id(task),
+            direction,
+            neighbor: projection.adjacent(list, id(task), direction),
+            projection: projection.clone(),
+        };
+        // The context parent 1 is the moved task: its group swaps with 3's; 2 [6] stays put.
+        let down = request(&list, 1, MoveDirection::Down);
+        let mut moved = list.clone();
+        assert_eq!(
+            down.apply(&mut moved),
+            Outcome::Changed {
+                id: id(1),
+                celebrate: false
+            }
+        );
+        assert_eq!(order(&moved), [3, 2, 6, 1, 4, 5]);
+        assert!(valid(&moved));
+        // The context parent as the neighbor is accepted too.
+        let up = request(&list, 3, MoveDirection::Up);
+        let mut moved = list.clone();
+        assert_eq!(
+            up.apply(&mut moved),
+            Outcome::Changed {
+                id: id(3),
+                celebrate: false
+            }
+        );
+        assert_eq!(order(&moved), [3, 2, 6, 1, 4, 5]);
+        // When 1's last matching subtask stops matching before the lock, 1 is no longer a
+        // displayed row, so the observed move conflicts and nothing changes.
+        let mut changed_list = list.clone();
+        changed_list.edit(id(4), "first a").unwrap();
+        let before = changed_list.clone();
+        assert_eq!(
+            down.apply(&mut changed_list),
+            Outcome::Conflict {
+                id: id(1),
+                kind: ConflictKind::OrderChanged,
+            }
+        );
+        assert_eq!(changed_list, before);
     }
 
     #[test]

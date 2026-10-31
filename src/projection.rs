@@ -1,7 +1,7 @@
 //! Shared transient projection for rendering and latest-snapshot reorder checks.
 use crate::{
     metadata::{self, TaskFilter},
-    task::{MoveDirection, Task, TaskId, TaskList, adjacent_sibling},
+    task::{MoveDirection, Task, TaskId, TaskList, adjacent_sibling, block},
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -62,6 +62,11 @@ impl Projection {
         self.view == TaskView::All && self.lowercase_query.is_empty() && self.filter.is_empty()
     }
 
+    /// Whether the task at canonical `index` is a displayed row: see `displays_with`.
+    pub(crate) fn displays(&self, list: &TaskList, index: usize) -> bool {
+        displays_with(list, index, |task| self.matches(task))
+    }
+
     pub(crate) fn adjacent(
         &self,
         list: &TaskList,
@@ -95,6 +100,26 @@ pub(crate) fn matches_with(
                 .contains(&projection.lowercase_query))
 }
 
+/// True when the task at canonical `index` satisfies `matches`, or when it is a top-level task
+/// with a live subtask in its group that does: a context row. Scans only that group, and only
+/// for a top-level task that does not match.
+pub(crate) fn displays_with(
+    list: &TaskList,
+    index: usize,
+    matches: impl Fn(&Task) -> bool,
+) -> bool {
+    let tasks = list.tasks();
+    let task = &tasks[index];
+    matches(task)
+        || (task.parent_id().is_none()
+            && !task.is_deleted()
+            && tasks[block(tasks, index)][1..]
+                .iter()
+                .any(|subtask| !subtask.is_deleted() && matches(subtask)))
+}
+
+/// Top-level siblings are the displayed top-level tasks, context rows included; subtask
+/// siblings are the matching subtasks of the same parent.
 pub(crate) fn adjacent(
     list: &TaskList,
     id: TaskId,
@@ -104,8 +129,73 @@ pub(crate) fn adjacent(
     if projection.is_unfiltered() {
         return list.adjacent_visible(id, direction);
     }
-    adjacent_sibling(list.visible_tasks(), id, direction, |task| {
-        matches(task, projection)
+    let rows = list
+        .tasks()
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| !task.is_deleted())
+        .map(|(index, task)| {
+            let displayed = if task.parent_id().is_none() {
+                projection.displays(list, index)
+            } else {
+                projection.matches(task)
+            };
+            (task, displayed)
+        });
+    adjacent_sibling(rows, id, direction)
+}
+
+/// A TUI row: a context row is a top-level task shown only because a subtask matches.
+/// `progress` is done over total live subtasks, for a top-level task that has any.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DisplayedRow<'a> {
+    pub(crate) task: &'a Task,
+    pub(crate) context: bool,
+    pub(crate) progress: Option<(usize, usize)>,
+}
+
+/// The TUI's displayed rows over live tasks in tree order (canonical, or `sort_tree`'s), so
+/// each subtask follows its parent's row. A top-level task shows when it matches or when one of
+/// its live subtasks does; progress counts every live subtask, matching or not. Holds the
+/// matching subtasks of one group at a time.
+pub(crate) fn displayed_rows<'a>(
+    tasks: impl Iterator<Item = &'a Task>,
+    matches: impl Fn(&Task) -> bool,
+) -> impl Iterator<Item = DisplayedRow<'a>> {
+    let mut tasks = tasks.peekable();
+    let mut pending = std::collections::VecDeque::new();
+    std::iter::from_fn(move || {
+        loop {
+            if let Some(row) = pending.pop_front() {
+                return Some(row);
+            }
+            let task = tasks.next()?;
+            let row = |task, context, progress| DisplayedRow {
+                task,
+                context,
+                progress,
+            };
+            if task.parent_id().is_some() {
+                // Only a stream that is not in tree order has a subtask outside its group.
+                if matches(task) {
+                    return Some(row(task, false, None));
+                }
+                continue;
+            }
+            let (mut done, mut total) = (0, 0);
+            while let Some(subtask) = tasks.next_if(|next| next.parent_id() == Some(task.id())) {
+                total += 1;
+                done += usize::from(subtask.completed());
+                if matches(subtask) {
+                    pending.push_back(row(subtask, false, None));
+                }
+            }
+            let matched = matches(task);
+            if matched || !pending.is_empty() {
+                let progress = (total > 0).then_some((done, total));
+                return Some(row(task, !matched, progress));
+            }
+        }
     })
 }
 
@@ -329,8 +419,12 @@ mod tests {
             (&unfiltered, child_c, MoveDirection::Down, None),
             (&unfiltered, other, MoveDirection::Up, None),
             (&unfiltered, other, MoveDirection::Down, None),
-            (&tagged, first, MoveDirection::Down, Some(third)),
-            (&tagged, third, MoveDirection::Up, Some(first)),
+            // `second` does not match, but its subtask does, so it is a context row and a
+            // displayed top-level sibling.
+            (&tagged, first, MoveDirection::Down, Some(second)),
+            (&tagged, second, MoveDirection::Up, Some(first)),
+            (&tagged, second, MoveDirection::Down, Some(third)),
+            (&tagged, third, MoveDirection::Up, Some(second)),
             (&tagged, child_a, MoveDirection::Down, Some(child_c)),
             (&tagged, child_c, MoveDirection::Up, Some(child_a)),
             (&tagged, child_c, MoveDirection::Down, None),
@@ -539,5 +633,131 @@ mod tests {
         assert_eq!(sorted(&ordered), [1, 2, 3]);
         sort_by_priority(&mut []);
         assert_eq!(TaskOrder::default(), TaskOrder::Manual);
+    }
+
+    /// Group 1 [2 matches, 3], group 4 [5], 6 matches, and group 7 [8 matches, done].
+    fn context_tree() -> TaskList {
+        let mut list = tree(&[
+            (1, None, "alpha"),
+            (2, Some(1), "beta match"),
+            (3, Some(1), "gamma"),
+            (4, None, "delta"),
+            (5, Some(4), "epsilon"),
+            (6, None, "zeta match"),
+            (7, None, "eta"),
+            (8, Some(7), "theta match"),
+        ]);
+        list.set_completed(TaskId::from_shell_integer(3).unwrap(), true)
+            .unwrap();
+        list.set_completed(TaskId::from_shell_integer(8).unwrap(), true)
+            .unwrap();
+        list
+    }
+
+    fn search(query: &str) -> Projection {
+        Projection {
+            lowercase_query: query.into(),
+            ..Projection::default()
+        }
+    }
+
+    #[test]
+    fn displays_should_show_matches_and_top_level_tasks_with_a_matching_live_subtask() {
+        let mut list = context_tree();
+        let projection = search("match");
+        let shown = |list: &TaskList| {
+            (0..list.tasks().len())
+                .filter(|index| projection.displays(list, *index))
+                .map(|index| list.tasks()[index].id().get())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&list), [1, 2, 6, 7, 8]);
+        // `displays_with` over the same predicate gives the same answers.
+        for index in 0..list.tasks().len() {
+            assert_eq!(
+                displays_with(&list, index, |task| projection.matches(task)),
+                projection.displays(&list, index),
+                "{index}"
+            );
+        }
+        assert_eq!(
+            (0..list.tasks().len())
+                .filter(|index| displays_with(&list, *index, |task| task.text() == "epsilon"))
+                .count(),
+            2
+        );
+        // A matching subtask in trash does not make its parent a context row.
+        list.delete(TaskId::from_shell_integer(2).unwrap()).unwrap();
+        assert_eq!(shown(&list), [6, 7, 8]);
+    }
+
+    #[test]
+    fn adjacent_should_treat_context_parents_as_displayed_top_level_siblings() {
+        let list = context_tree();
+        let projection = search("match");
+        let id = |value| TaskId::from_shell_integer(value).unwrap();
+        let next = |task, direction| {
+            projection
+                .adjacent(&list, id(task), direction)
+                .map(TaskId::get)
+        };
+        assert_eq!(next(1, MoveDirection::Down), Some(6));
+        assert_eq!(next(6, MoveDirection::Up), Some(1));
+        assert_eq!(next(6, MoveDirection::Down), Some(7));
+        assert_eq!(next(7, MoveDirection::Up), Some(6));
+        // 4 is not displayed, so it has no neighbor and is skipped.
+        assert_eq!(next(4, MoveDirection::Down), None);
+        // A subtask's siblings still have to match: 3 is not one of 2's.
+        assert_eq!(next(2, MoveDirection::Down), None);
+        assert_eq!(next(2, MoveDirection::Up), None);
+    }
+
+    #[test]
+    fn displayed_rows_should_add_context_parents_and_count_every_live_subtask() {
+        let mut list = context_tree();
+        let rows = |list: &TaskList, matches: &dyn Fn(&Task) -> bool| {
+            displayed_rows(list.visible_tasks(), matches)
+                .map(|row| (row.task.id().get(), row.context, row.progress))
+                .collect::<Vec<_>>()
+        };
+        let projection = search("match");
+        assert_eq!(
+            rows(&list, &|task| projection.matches(task)),
+            [
+                (1, true, Some((1, 2))),
+                (2, false, None),
+                (6, false, None),
+                (7, true, Some((1, 1))),
+                (8, false, None),
+            ]
+        );
+        assert_eq!(
+            rows(&list, &|_| true),
+            [
+                (1, false, Some((1, 2))),
+                (2, false, None),
+                (3, false, None),
+                (4, false, Some((0, 1))),
+                (5, false, None),
+                (6, false, None),
+                (7, false, Some((1, 1))),
+                (8, false, None),
+            ]
+        );
+        // Progress counts live subtasks only.
+        list.delete(TaskId::from_shell_integer(3).unwrap()).unwrap();
+        assert_eq!(
+            rows(&list, &|task| task.id().get() <= 2),
+            [(1, false, Some((0, 1))), (2, false, None)]
+        );
+        // Sorted rows keep groups together, so the pass reads them the same way.
+        let mut sorted = list.visible_tasks().collect::<Vec<_>>();
+        sort_tree(&mut sorted, |task| std::cmp::Reverse(task.id().get()));
+        assert_eq!(
+            displayed_rows(sorted.into_iter(), |task| projection.matches(task))
+                .map(|row| (row.task.id().get(), row.context))
+                .collect::<Vec<_>>(),
+            [(7, true), (8, false), (6, false), (1, true), (2, false)]
+        );
     }
 }

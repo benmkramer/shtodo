@@ -22,7 +22,9 @@ rewriting are measured in the
 [due dates shell comparison](./benchmarks/2026-10-21-due-dates-cli-comparison.md).
 Subtasks, `add --parent`, `parent`, the structure filters, tree sort, and the
 JSON `parent_id` field are measured in the
-[subtasks shell comparison](./benchmarks/2026-10-24-subtasks-cli-comparison.md).
+[subtasks shell comparison](./benchmarks/2026-10-24-subtasks-cli-comparison.md),
+and nested TUI rows, context rows, and the subtask keys in the
+[subtasks TUI comparison](./benchmarks/2026-10-28-subtasks-tui-comparison.md).
 The unreleased TUI priority styling, sort, and filter editor are measured in
 the [tags and priority TUI comparison](./benchmarks/2026-10-21-tags-and-priority-tui-comparison.md),
 and TUI due-date styling, Due order, and due filter tokens in the
@@ -151,6 +153,21 @@ fields. The owner's decision on accepting it is recorded as question 12 in the
 [plan's decisions table](./plans/2026-10-21-tags-and-priority.md#decisions-before-stage-0-exits).
 Text listing does no token work. Filtered and sorted cases are recorded for
 information.
+
+## Subtasks in the TUI: October 28, 2026
+
+The [paired TUI comparison](./benchmarks/2026-10-28-subtasks-tui-comparison.md)
+measures PR 2 against the PR 1 head `ac8f1ed` in two runs. At 10,000 records
+completion-to-frame on the mixed fixture is unchanged (-0.26 and -0.01 ms),
+the search keystroke with context rows is within 0.04 ms of the flat list,
+idle CPU stays within 0.012 percentage points of one core with no idle
+output, and the binary grows by 32 bytes. Completion-to-frame on the nested
+fixture in Manual order is +0.80 and +0.89 ms against the same records
+without links, over its 5% or 0.5 ms gate. A flat list padded to the same
+snapshot size costs the same, so the difference is the 198,452 bytes the
+`parent_id` lines add to every save. The owner accepted this miss on
+October 29, 2026 as the same storage cost the shell gate on `add --parent`
+already accepted.
 
 ## Subtasks shell commands: October 24, 2026
 

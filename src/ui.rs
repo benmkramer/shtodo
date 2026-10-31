@@ -5,20 +5,22 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Tabs},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs},
 };
 
 use crate::{
     app::{App, EditKind, Mode, Notice, TaskView},
     input::{BindingId, Keymap, ResolvedBinding},
     metadata::{self, Date},
-    projection::TaskOrder,
-    task::{ListScope, Task},
+    projection::{DisplayedRow, TaskOrder},
+    task::ListScope,
 };
 
 const MIN_WIDTH: u16 = 40;
 const MIN_HEIGHT: u16 = 8;
 const ROW_PREFIX_WIDTH: u16 = 4;
+/// Columns a subtask row is indented before its marker.
+const SUBTASK_INDENT: u16 = 2;
 const PROJECT_COLOR: Color = Color::Cyan;
 const CONTEXT_COLOR: Color = Color::Magenta;
 const DUE_STYLE: Style = Style::new().fg(Color::Blue);
@@ -91,13 +93,14 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &App, keymap: &Keymap) {
     }
     render_footer(frame, regions[4], app, keymap);
     if app.mode() == Mode::Help {
+        // Help covers the header, view, and content rows; the footer below stays visible.
         let help_area = Rect::new(
-            regions[1].x,
-            regions[1].y,
-            regions[1].width,
-            regions[1].height + regions[2].height,
+            regions[0].x,
+            regions[0].y,
+            regions[0].width,
+            regions[0].height + regions[1].height + regions[2].height,
         );
-        render_help(frame, help_area, keymap, app.is_trash_view());
+        render_help(frame, help_area, keymap, app);
     }
 }
 
@@ -198,7 +201,6 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
     ])
     .split(area);
 
-    let scope = scope_label(app.tasks().scope());
     let title = Line::from(vec![
         Span::styled(
             "shtodo",
@@ -206,11 +208,7 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(if app.is_trash_view() {
-            format!(" TRASH · {scope} · newest first")
-        } else {
-            format!(" {scope}")
-        }),
+        Span::raw(header_detail(app)),
     ]);
 
     frame.render_widget(Paragraph::new(title), columns[0]);
@@ -218,6 +216,16 @@ fn render_header(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App) 
         Paragraph::new(counts).alignment(ratatui::layout::Alignment::Right),
         columns[1],
     );
+}
+
+/// The header text after `shtodo`, which Help repeats in its title.
+fn header_detail(app: &App) -> String {
+    let scope = scope_label(app.tasks().scope());
+    if app.is_trash_view() {
+        format!(" TRASH · {scope} · newest first")
+    } else {
+        format!(" {scope}")
+    }
 }
 
 fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -255,7 +263,7 @@ fn render_view(frame: &mut Frame<'_>, area: Rect, app: &App) {
         columns[0],
     );
     let area = columns[1];
-    let matches = app.visible_tasks().count();
+    let matches = app.match_count();
     let Some(editor) = app
         .editor()
         .filter(|_| matches!(app.mode(), Mode::Search | Mode::Filter))
@@ -342,11 +350,11 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         render_trash_content(frame, area, app, keymap);
         return;
     }
-    let visible_tasks = app.visible_tasks().collect::<Vec<_>>();
+    let rows = app.displayed_rows().collect::<Vec<_>>();
     let editor = app
         .editor()
         .filter(|editor| !matches!(editor.kind(), EditKind::Search | EditKind::Filter));
-    if visible_tasks.is_empty() && editor.is_none() {
+    if rows.is_empty() && editor.is_none() {
         let no_tasks = app.tasks().visible_tasks().next().is_none();
         let mut text = if no_tasks {
             "No tasks yet"
@@ -394,44 +402,68 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         return;
     }
 
-    let editor_width = area.width.saturating_sub(ROW_PREFIX_WIDTH);
+    // A subtask's draft starts two columns further right, under its indented marker.
+    let editor_indent = editor.map_or(0, |editor| match editor.kind() {
+        EditKind::AddSubtask(_) => SUBTASK_INDENT,
+        EditKind::Edit(id)
+            if app
+                .tasks()
+                .task(id)
+                .is_some_and(|task| task.parent_id().is_some()) =>
+        {
+            SUBTASK_INDENT
+        }
+        _ => 0,
+    });
+    let editor_width = area.width.saturating_sub(ROW_PREFIX_WIDTH + editor_indent);
     let editor_view = editor.map(|editor| {
         let (visible, cursor_column) =
             editor_window(editor.buffer(), editor.cursor(), editor_width);
         (editor.kind(), visible, cursor_column)
     });
-    let detached = editor_view.is_some_and(|(kind, _, _)| match kind {
-        EditKind::Add => true,
-        EditKind::Edit(id) => !visible_tasks.iter().any(|task| task.id() == id),
-        EditKind::Search | EditKind::Filter => false,
+    // Where a detached draft row goes: a new subtask after its group's last displayed row,
+    // anything else at the end.
+    let detached_at = editor_view.and_then(|(kind, _, _)| match kind {
+        EditKind::Add => Some(rows.len()),
+        EditKind::AddSubtask(parent) => Some(
+            rows.iter()
+                .rposition(|row| row.task.id() == parent || row.task.parent_id() == Some(parent))
+                .map_or(rows.len(), |index| index + 1),
+        ),
+        EditKind::Edit(id) => (!rows.iter().any(|row| row.task.id() == id)).then_some(rows.len()),
+        EditKind::Search | EditKind::Filter => None,
     });
-    let selected_index = if detached {
-        Some(visible_tasks.len())
-    } else {
-        visible_tasks
-            .iter()
-            .position(|task| Some(task.id()) == app.selected())
-    };
+    let selected_index = detached_at.or_else(|| {
+        rows.iter()
+            .position(|row| Some(row.task.id()) == app.selected())
+    });
     // Style only the rows the list can show: the window a fresh `ListState` scrolls to, which
     // ends at the selected row once it is past the first screen.
-    let rows = usize::from(area.height);
+    let height = usize::from(area.height);
     debug_assert!(
-        rows > 0,
+        height > 0,
         "the layout keeps list rows at the minimum terminal size"
     );
-    let start = selected_index.map_or(0, |index| (index + 1).saturating_sub(rows));
-    let mut items = visible_tasks
-        .iter()
-        .skip(start)
-        .take(rows)
-        .map(|task| match editor_view {
-            Some((EditKind::Edit(id), visible, _)) if task.id() == id => editor_item(visible),
-            _ => task_item(task, app.today()),
+    let start = selected_index.map_or(0, |index| (index + 1).saturating_sub(height));
+    let total = rows.len() + usize::from(detached_at.is_some());
+    let items = (start..total.min(start + height))
+        .map(|index| {
+            let row = match detached_at {
+                Some(at) if index == at => None,
+                Some(at) if index > at => Some(&rows[index - 1]),
+                _ => Some(&rows[index]),
+            };
+            match (row, editor_view) {
+                (Some(row), Some((EditKind::Edit(id), visible, _))) if row.task.id() == id => {
+                    editor_item(visible, editor_indent)
+                }
+                (Some(row), _) => task_item(row, app.today()),
+                (None, view) => {
+                    editor_item(view.map_or("", |(_, visible, _)| visible), editor_indent)
+                }
+            }
         })
         .collect::<Vec<_>>();
-    if detached && let Some((_, visible, _)) = editor_view {
-        items.push(editor_item(visible));
-    }
     let selected_index = selected_index.map(|index| index.saturating_sub(start));
 
     let list = List::new(items)
@@ -446,7 +478,7 @@ fn render_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, app: &App,
         let row = visible_row.min(usize::from(u16::MAX)) as u16;
         frame.set_cursor_position((
             area.x
-                .saturating_add(ROW_PREFIX_WIDTH)
+                .saturating_add(ROW_PREFIX_WIDTH + editor_indent)
                 .saturating_add(cursor_column),
             area.y.saturating_add(row),
         ));
@@ -466,11 +498,23 @@ fn render_trash_content(frame: &mut Frame<'_>, area: Rect, app: &App, keymap: &K
     let selected = deleted
         .iter()
         .position(|task| Some(task.id()) == app.selected());
+    // A subtask deleted with its parent follows the parent's row here (one sequence, canonical
+    // order) and is indented under it; one deleted on its own is not.
+    let mut group = None;
     let items = deleted
         .iter()
         .map(|task| {
             let state = if task.completed() { "done" } else { "open" };
-            let mut spans = vec![Span::raw(format!("{}  {state}  ", task.id().get()))];
+            let indented = task.parent_id().is_some()
+                && group
+                    == task
+                        .parent_id()
+                        .map(|parent| (parent, task.deletion_sequence()));
+            if task.parent_id().is_none() {
+                group = Some((task.id(), task.deletion_sequence()));
+            }
+            let indent = if indented { "  " } else { "" };
+            let mut spans = vec![Span::raw(format!("{indent}{}  {state}  ", task.id().get()))];
             // Tombstones are not actionable, so their dates are never overdue or due today.
             let due = metadata::due_token(task.text()).map(|(token, _)| (token, DUE_STYLE));
             spans.extend(text_spans(task.text(), Style::default(), due));
@@ -530,6 +574,16 @@ fn notice_text(notice: &Notice, keymap: &Keymap, width: usize) -> String {
             }
         }
         Notice::FinishTag(tags) => clip_entries("Finish the tag: ", tags, ", ", width),
+        Notice::RestoreParentFirst(parent) => format!("Restore parent {} first", parent.get()),
+        Notice::AlreadySubtask => {
+            match binding_label(keymap, Mode::Normal, BindingId::OutdentTask) {
+                Some(key) => format!("Already a subtask; {key} promotes"),
+                None => "Already a subtask".into(),
+            }
+        }
+        Notice::NoTaskAbove => "No task above to nest under".into(),
+        Notice::HasSubtasks => "Has subtasks; promote them first".into(),
+        Notice::AlreadyTopLevel => "Already top-level".into(),
     }
 }
 
@@ -575,12 +629,22 @@ fn clip_entries(prefix: &str, entries: &[String], separator: &str, width: usize)
     cut
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, trash: bool) {
-    let block = Block::bordered().title(if trash {
-        "Keyboard help: Trash"
-    } else {
-        "Keyboard help"
-    });
+fn render_help(frame: &mut Frame<'_>, area: Rect, keymap: &Keymap, app: &App) {
+    let trash = app.is_trash_view();
+    // The mode name comes first so it survives clipping; the header text follows it, because
+    // the popup covers the header. No bottom border, so the footer stays directly below.
+    let title = format!(
+        "{} · shtodo{}",
+        if trash {
+            "Keyboard help: Trash"
+        } else {
+            "Keyboard help"
+        },
+        header_detail(app)
+    );
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -702,12 +766,29 @@ fn help_lines(keymap: &Keymap, mode: Mode) -> Vec<Line<'static>> {
         mode_name(mode),
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    lines.extend(keymap.bindings_for(mode).map(|binding| {
-        Line::from(format!(
+    let row = |binding: &ResolvedBinding| {
+        format!(
             "{} {}",
             binding.labels().collect::<Vec<_>>().join(" / "),
             binding.description()
-        ))
+        )
+    };
+    // Nest and promote share one row while both are bound.
+    let outdent = keymap
+        .bindings_for(mode)
+        .find(|binding| binding.id() == BindingId::OutdentTask);
+    let indent_bound = keymap
+        .bindings_for(mode)
+        .any(|binding| binding.id() == BindingId::IndentTask);
+    lines.extend(keymap.bindings_for(mode).filter_map(|binding| {
+        match (binding.id(), outdent) {
+            (BindingId::IndentTask, Some(outdent)) => {
+                Some(format!("{}, {}", row(binding), row(outdent)))
+            }
+            (BindingId::OutdentTask, _) if indent_bound => None,
+            _ => Some(row(binding)),
+        }
+        .map(Line::from)
     }));
     lines.extend(keymap.unbound_actions_for(mode).filter_map(|id| {
         id.config_name()
@@ -737,23 +818,40 @@ fn scope_label(scope: &ListScope) -> String {
     }
 }
 
-fn task_item(task: &Task, today: Date) -> ListItem<'static> {
+fn task_item(row: &DisplayedRow<'_>, today: Date) -> ListItem<'static> {
+    let task = row.task;
     let completed = task.completed();
     let marker = if completed { "✓ " } else { "○ " };
-    let text_style = if completed {
-        Style::default().add_modifier(Modifier::DIM | Modifier::CROSSED_OUT)
+    // A context row is dimmed throughout; a done one keeps its strikethrough.
+    let row_style = if row.context {
+        Style::default().add_modifier(Modifier::DIM)
     } else {
         Style::default()
+    };
+    let text_style = if completed {
+        row_style.add_modifier(Modifier::DIM | Modifier::CROSSED_OUT)
+    } else {
+        row_style
     };
     let due = metadata::due_token(task.text());
     // A done task is never overdue or due today, so its token is blue and its marker plain.
     let urgent = due
         .filter(|_| !completed)
         .and_then(|(_, date)| urgent_style(date, today));
-    let marker_style = urgent.unwrap_or_default();
+    let marker_style = row_style.patch(urgent.unwrap_or_default());
     let due_style = text_style.patch(urgent.unwrap_or(DUE_STYLE));
 
-    let mut spans = vec![Span::styled(marker, marker_style)];
+    let mut spans = Vec::new();
+    if task.parent_id().is_some() {
+        spans.push(Span::raw(" ".repeat(usize::from(SUBTASK_INDENT))));
+    }
+    spans.push(Span::styled(marker, marker_style));
+    if let Some((done, total)) = row.progress {
+        spans.push(Span::styled(
+            format!("{done}/{total} "),
+            row_style.add_modifier(Modifier::DIM),
+        ));
+    }
     spans.extend(text_spans(
         task.text(),
         text_style,
@@ -820,8 +918,9 @@ fn text_spans(text: &str, base: Style, due: Option<(&str, Style)>) -> Vec<Span<'
     spans
 }
 
-fn editor_item(text: &str) -> ListItem<'static> {
+fn editor_item(text: &str, indent: u16) -> ListItem<'static> {
     ListItem::new(Line::from(vec![
+        Span::raw(" ".repeat(usize::from(indent))),
         Span::raw("○ "),
         Span::raw(text.to_owned()),
     ]))
@@ -1376,6 +1475,8 @@ mod tests {
             "Esc clear search",
             "Enter apply search",
             "Esc cancel search",
+            "A add subtask",
+            "> nest, < promote",
             "Insert",
             "Left move cursor left",
             "Right move cursor right",
@@ -2325,5 +2426,337 @@ mod tests {
         let buffer = render_app(&app, 80, 12);
         assert!(buffer_row(&buffer, 80, 1).contains("[Done] · 0 matches · /needle"));
         assert!(buffer_text(&buffer).contains("No matching tasks"));
+    }
+
+    /// 1 [2 done, 3 overdue], 4: the plan's example group, with dates around `test_today`.
+    fn subtask_app() -> App {
+        let mut list = TaskList::new(ListScope::Global);
+        let ship = list.add("Ship the release +shtodo").unwrap();
+        let changelog = list.add_subtask(ship, "Write the changelog").unwrap();
+        list.add_subtask(ship, "Tag the build due:2026-10-20")
+            .unwrap();
+        list.add("Pay rent due:2026-11-01").unwrap();
+        list.set_completed(changelog, true).unwrap();
+        App::new(list)
+    }
+
+    #[test]
+    fn subtask_rows_should_indent_show_dim_progress_and_keep_the_overdue_marker_at_minimum_size() {
+        let app = subtask_app();
+        let buffer = render_app(&app, 40, 8);
+        assert_eq!(
+            display_row(&buffer, 2).trim_end(),
+            "› ○ 1/2 Ship the release +shtodo"
+        );
+        assert_eq!(
+            display_row(&buffer, 3).trim_end(),
+            "    ✓ Write the changelog"
+        );
+        assert_eq!(
+            display_row(&buffer, 4).trim_end(),
+            "    ○ Tag the build due:2026-10-20"
+        );
+        assert_eq!(
+            display_row(&buffer, 5).trim_end(),
+            "  ○ Pay rent due:2026-11-01"
+        );
+        for cell in row_cells(&buffer, 2, "1/2") {
+            assert!(cell.modifier.contains(Modifier::DIM), "{cell:?}");
+        }
+        assert!(
+            !row_cells(&buffer, 2, "Ship")[0]
+                .modifier
+                .contains(Modifier::DIM)
+        );
+        // The indented subtask's marker still carries the overdue color.
+        assert_eq!(buffer[(4, 4)].symbol(), "○");
+        assert_eq!(buffer[(4, 4)].fg, Color::Red);
+    }
+
+    #[test]
+    fn a_context_row_should_be_dimmed_keep_strikethrough_and_stay_out_of_the_match_count() {
+        let mut app = subtask_app();
+        search_for(&mut app, "build");
+        let buffer = render_app(&app, 40, 8);
+        assert!(
+            buffer_row(&buffer, 40, 1).contains("1 matches"),
+            "{}",
+            buffer_row(&buffer, 40, 1)
+        );
+        assert_eq!(
+            display_row(&buffer, 2),
+            "› ○ 1/2 Ship the release +shtodo        "
+        );
+        assert_eq!(
+            display_row(&buffer, 3),
+            "    ○ Tag the build due:2026-10-20      "
+        );
+        for cell in row_cells(&buffer, 2, "○ 1/2 Ship the release +shtodo") {
+            assert!(cell.modifier.contains(Modifier::DIM), "{cell:?}");
+        }
+        assert!(
+            !row_cells(&buffer, 3, "Tag")[0]
+                .modifier
+                .contains(Modifier::DIM)
+        );
+        // A done context parent keeps its strikethrough.
+        let mut list = app.tasks().clone();
+        list.set_completed(crate::task::TaskId::from_shell_integer(1).unwrap(), true)
+            .unwrap();
+        app.reconcile(list);
+        let buffer = render_app(&app, 40, 8);
+        for cell in row_cells(&buffer, 2, "Ship the release") {
+            assert!(
+                cell.modifier
+                    .contains(Modifier::DIM | Modifier::CROSSED_OUT),
+                "{cell:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn editing_a_subtask_should_place_the_draft_and_cursor_two_columns_further_right() {
+        let mut app = subtask_app();
+        app.apply(Action::MoveDown).unwrap();
+        app.apply(Action::MoveDown).unwrap();
+        app.apply(Action::StartEdit).unwrap();
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &app, &Keymap::defaults()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        assert!(
+            display_row(&buffer, 4).starts_with("›   ○ Tag the build"),
+            "{}",
+            display_row(&buffer, 4)
+        );
+        // ROW_PREFIX_WIDTH + 2, then the 28 characters of the draft (clipped to the editor width).
+        let draft = "Tag the build due:2026-10-20".chars().count() as u16;
+        terminal
+            .backend_mut()
+            .assert_cursor_position((super::ROW_PREFIX_WIDTH + 2 + draft, 4));
+    }
+
+    #[test]
+    fn add_subtask_editor_should_follow_the_group_indented_with_the_cursor_two_columns_right() {
+        let footer = buffer_row(&render_app(&subtask_app(), 40, 8), 40, 7);
+        // From the parent and from one of its subtasks, the draft row follows the whole group.
+        for moves in [0, 2] {
+            let mut app = subtask_app();
+            for _ in 0..moves {
+                app.apply(Action::MoveDown).unwrap();
+            }
+            app.apply(Action::AddSubtask).unwrap();
+            for character in "Draft".chars() {
+                app.apply(Action::InsertChar(character)).unwrap();
+            }
+            let backend = TestBackend::new(40, 8);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, &app, &Keymap::defaults()))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            assert_eq!(
+                display_row(&buffer, 4).trim_end(),
+                "    ○ Tag the build due:2026-10-20"
+            );
+            assert_eq!(display_row(&buffer, 5).trim_end(), "›   ○ Draft");
+            assert_eq!(
+                display_row(&buffer, 6).trim_end(),
+                "  ○ Pay rent due:2026-11-01"
+            );
+            terminal
+                .backend_mut()
+                .assert_cursor_position((super::ROW_PREFIX_WIDTH + 2 + 5, 5));
+            app.apply(Action::CancelEdit).unwrap();
+            assert_eq!(buffer_row(&render_app(&app, 40, 8), 40, 7), footer);
+        }
+    }
+
+    #[test]
+    fn help_should_list_add_subtask_with_its_configured_key_or_as_unbound() {
+        let mut app = subtask_app();
+        app.apply(Action::OpenHelp).unwrap();
+        let help = buffer_text(&render_app(&app, 100, 30));
+        assert!(help.contains("A add subtask"), "{help}");
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::AddSubtask, &["ctrl-a"])]).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+        assert!(help.contains("Ctrl-a add subtask"), "{help}");
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::ToggleComplete, &["A"])]).unwrap();
+        let help = buffer_text(&render_app_with_keymap(&app, &keymap, 100, 30));
+        assert!(help.contains("Unbound: add_subtask (config)"), "{help}");
+        assert!(help.contains("A toggle complete"), "{help}");
+    }
+
+    #[test]
+    fn help_should_share_one_nest_and_promote_row_and_list_unbound_halves_separately() {
+        let mut app = subtask_app();
+        app.apply(Action::OpenHelp).unwrap();
+        let help = |keymap: &Keymap| buffer_text(&render_app_with_keymap(&app, keymap, 100, 30));
+        let text = help(&Keymap::defaults());
+        assert!(text.contains("> nest, < promote"), "{text}");
+        assert!(!text.contains("Unbound"), "{text}");
+
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::IndentTask, &["ctrl-l", "]"]),
+            override_for(BindingId::OutdentTask, &["ctrl-h"]),
+        ])
+        .unwrap();
+        assert!(help(&keymap).contains("Ctrl-l / ] nest, Ctrl-h promote"));
+
+        let keymap = Keymap::with_overrides(&[override_for(BindingId::MoveUp, &["<"])]).unwrap();
+        let text = help(&keymap);
+        assert!(text.contains("> nest"), "{text}");
+        assert!(!text.contains("promote"), "{text}");
+        assert!(text.contains("Unbound: outdent_task (config)"), "{text}");
+
+        let keymap = Keymap::with_overrides(&[override_for(BindingId::MoveDown, &[">"])]).unwrap();
+        let text = help(&keymap);
+        assert!(text.contains("< promote"), "{text}");
+        assert!(!text.contains("nest"), "{text}");
+        assert!(text.contains("Unbound: indent_task (config)"), "{text}");
+
+        let keymap = Keymap::with_overrides(&[
+            override_for(BindingId::MoveDown, &[">"]),
+            override_for(BindingId::MoveUp, &["<"]),
+        ])
+        .unwrap();
+        let text = help(&keymap);
+        assert!(
+            !text.contains("nest") && !text.contains("promote"),
+            "{text}"
+        );
+        assert!(text.contains("Unbound: indent_task (config)"), "{text}");
+        assert!(text.contains("Unbound: outdent_task (config)"), "{text}");
+
+        // The long-alias keymap still shows every subtask row at 80x24.
+        let keymap = Keymap::with_overrides(&[override_for(
+            BindingId::OpenHelp,
+            &[
+                "α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "λ", "μ", "ν", "ξ", "ο", "π", "ρ", "σ",
+            ],
+        )])
+        .unwrap();
+        let text = buffer_text(&render_app_with_keymap(&app, &keymap, 80, 24));
+        assert!(text.contains("A add subtask"), "{text}");
+        assert!(text.contains("> nest, < promote"), "{text}");
+        assert!(text.contains("σ show help"), "{text}");
+    }
+
+    #[test]
+    fn nest_and_promote_notices_should_name_configured_keys() {
+        let mut list = TaskList::new(ListScope::Global);
+        let ship = list.add("Ship").unwrap();
+        list.add_subtask(ship, "Tag").unwrap();
+        let mut app = App::new(list);
+        let footer = |app: &App, keymap: &Keymap| {
+            buffer_row(&render_app_with_keymap(app, keymap, 60, 8), 60, 7)
+        };
+        let defaults = Keymap::defaults();
+        app.apply(Action::IndentTask).unwrap();
+        assert!(
+            footer(&app, &defaults).starts_with("NORMAL  No task above to nest under"),
+            "{}",
+            footer(&app, &defaults)
+        );
+        app.apply(Action::OutdentTask).unwrap();
+        assert!(footer(&app, &defaults).starts_with("NORMAL  Already top-level"));
+        app.apply(Action::MoveDown).unwrap();
+        app.apply(Action::IndentTask).unwrap();
+        assert!(footer(&app, &defaults).starts_with("NORMAL  Already a subtask; < promotes"));
+        let keymap =
+            Keymap::with_overrides(&[override_for(BindingId::OutdentTask, &["ctrl-h"])]).unwrap();
+        assert!(footer(&app, &keymap).starts_with("NORMAL  Already a subtask; Ctrl-h promotes"));
+        let keymap = Keymap::with_overrides(&[override_for(BindingId::MoveUp, &["<"])]).unwrap();
+        let text = footer(&app, &keymap);
+        assert!(text.starts_with("NORMAL  Already a subtask"), "{text}");
+        assert!(!text.contains("promotes"), "{text}");
+
+        let mut list = TaskList::new(ListScope::Global);
+        list.add("Pay rent").unwrap();
+        let ship = list.add("Ship").unwrap();
+        list.add_subtask(ship, "Tag").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::MoveDown).unwrap();
+        app.apply(Action::IndentTask).unwrap();
+        assert!(footer(&app, &defaults).starts_with("NORMAL  Has subtasks; promote them first"));
+    }
+
+    #[test]
+    fn trash_should_indent_co_deleted_subtasks_and_name_the_parent_to_restore_first() {
+        let mut list = TaskList::new(ListScope::Global);
+        let ship = list.add("Ship").unwrap();
+        let alone = list.add_subtask(ship, "deleted alone").unwrap();
+        list.add_subtask(ship, "deleted with it").unwrap();
+        list.delete(alone).unwrap();
+        list.delete(ship).unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::OpenTrash).unwrap();
+        let buffer = render_app(&app, 40, 8);
+        assert!(
+            display_row(&buffer, 1).starts_with("› 1  open  Ship"),
+            "{}",
+            display_row(&buffer, 1)
+        );
+        assert!(display_row(&buffer, 2).starts_with("    3  open  deleted with it"));
+        assert!(display_row(&buffer, 3).starts_with("  2  open  deleted alone"));
+        app.apply(Action::MoveDown).unwrap();
+        app.apply(Action::RestoreSelected).unwrap();
+        let footer = buffer_row(&render_app(&app, 40, 8), 40, 7);
+        assert!(
+            footer.starts_with("TRASH  Restore parent 1 first"),
+            "{footer}"
+        );
+    }
+
+    #[test]
+    fn help_should_cover_the_header_without_a_bottom_border_and_keep_the_footer() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+        let buffer = render_app(&app, 80, 24);
+        let top = buffer_row(&buffer, 80, 0);
+        assert!(top.starts_with("┌Keyboard help · shtodo global"), "{top}");
+        assert!(!top.contains("open ·"), "{top}");
+        for row in 1..=22 {
+            let line = buffer_row(&buffer, 80, row);
+            assert!(
+                line.starts_with('│') && line.ends_with('│'),
+                "{row}: {line}"
+            );
+        }
+        assert!(buffer_row(&buffer, 80, 23).starts_with("HELP  "));
+        assert!(!buffer_text(&buffer).contains('└'));
+
+        app.apply(Action::CloseHelp).unwrap();
+        app.apply(Action::OpenTrash).unwrap();
+        app.apply(Action::OpenHelp).unwrap();
+        let top = buffer_row(&render_app(&app, 80, 24), 80, 0);
+        assert!(
+            top.starts_with("┌Keyboard help: Trash · shtodo TRASH · global · newest first"),
+            "{top}"
+        );
+    }
+
+    #[test]
+    fn help_at_minimum_size_should_keep_the_mode_name_in_the_title_and_the_footer_visible() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        app.apply(Action::OpenHelp).unwrap();
+        let buffer = render_app(&app, 40, 8);
+        assert!(buffer_row(&buffer, 40, 0).starts_with("┌Keyboard help · shtodo global"));
+        for row in 1..=6 {
+            assert!(buffer_row(&buffer, 40, row).starts_with('│'), "{row}");
+        }
+        assert!(buffer_row(&buffer, 40, 7).starts_with("HELP  "));
+        app.apply(Action::CloseHelp).unwrap();
+        app.apply(Action::OpenTrash).unwrap();
+        app.apply(Action::OpenHelp).unwrap();
+        let top = buffer_row(&render_app(&app, 40, 8), 40, 0);
+        assert!(
+            top.starts_with("┌Keyboard help: Trash · shtodo TRASH · "),
+            "{top}"
+        );
     }
 }

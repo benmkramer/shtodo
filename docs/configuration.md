@@ -89,6 +89,20 @@ Help then shows `Unbound: toggle_sort (config)` and
 `Unbound: edit_filter (config)`. To enable either action, assign a free Normal key, for example
 `toggle_sort = ["o"]` or `edit_filter = ["F"]`. There is no fallback key.
 
+### Existing bindings and the new subtask defaults
+
+The Normal-mode defaults for `add_subtask` (`A`), `indent_task` (`>`), and
+`outdent_task` (`<`) follow the same rule. If your config already assigns
+one of those keys to another Normal action, the config still loads, that
+action keeps the key, and Help shows `Unbound: add_subtask (config)` or the
+corresponding action name. The example above with `add_task = ["a"]` is
+unaffected, because `a` and `A` are different keys. To enable an unbound
+action, assign it a free Normal key, for example `add_subtask = ["ctrl-a"]`.
+
+Help shows `indent_task` and `outdent_task` on one row, `> nest, < promote`.
+When only one of them is bound, the row shows that one alone and the other
+gets its own `Unbound:` line.
+
 Conflicts between explicit bindings and conflicts with older defaults are
 still configuration errors. `Ctrl-C` remains fixed. `shtodo doctor` reports
 the number of supported configurable actions and the effective active keys,
@@ -135,6 +149,9 @@ invalid. Trash `close_trash` remains independent and defaults to `t` and Esc.
 | `clear_search`    | `esc`        |
 | `toggle_sort`     | `s`          |
 | `edit_filter`     | `f`          |
+| `add_subtask`     | `A`          |
+| `indent_task`     | `>`          |
+| `outdent_task`    | `<`          |
 | `open_trash`      | `t`          |
 | `open_help`       | `?`          |
 | `quit`            | `q`          |

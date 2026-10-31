@@ -25,6 +25,8 @@ pub(crate) use crate::projection::TaskView;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EditKind {
     Add,
+    /// A new subtask of this top-level task.
+    AddSubtask(TaskId),
     Edit(TaskId),
     Search,
     Filter,
@@ -238,6 +240,16 @@ pub(crate) enum Notice {
     ManualOrderRequired,
     /// Enter on a tag prefix shared by these tags, in hint-line order.
     FinishTag(Vec<String>),
+    /// Trash restore of a subtask whose parent, named here, is still in trash.
+    RestoreParentFirst(TaskId),
+    /// Nest was requested on a subtask.
+    AlreadySubtask,
+    /// Nest was requested with no displayed top-level row above.
+    NoTaskAbove,
+    /// Nest was requested on a task with live subtasks.
+    HasSubtasks,
+    /// Promote was requested on a top-level task.
+    AlreadyTopLevel,
 }
 
 /// Filter-mode preview. It never leaves `App`, so no shell or `Mutation` value can carry it.
@@ -411,6 +423,7 @@ impl App {
             if matches!(
                 action,
                 Action::StartAdd
+                    | Action::AddSubtask
                     | Action::StartEdit
                     | Action::ToggleComplete
                     | Action::Delete
@@ -418,6 +431,8 @@ impl App {
                     | Action::RestoreSelected
                     | Action::MoveTaskDown
                     | Action::MoveTaskUp
+                    | Action::IndentTask
+                    | Action::OutdentTask
             ) {
                 return Ok(Transition::Unchanged);
             }
@@ -432,6 +447,8 @@ impl App {
                         | Action::RestoreSelected
                         | Action::MoveTaskDown
                         | Action::MoveTaskUp
+                        | Action::IndentTask
+                        | Action::OutdentTask
                 ))
         {
             return Ok(Transition::Unchanged);
@@ -467,9 +484,16 @@ impl App {
                 if self.is_trash_view() {
                     task.is_deleted()
                 } else {
-                    self.matches(task)
+                    self.displays(task)
                 }
             })
+    }
+
+    /// Whether `task` is a displayed row: a match, or a context row for a matching subtask.
+    fn displays(&self, task: &Task) -> bool {
+        self.tasks.position(task.id()).is_some_and(|index| {
+            projection::displays_with(&self.tasks, index, |task| self.matches(task))
+        })
     }
 
     pub(crate) fn view(&self) -> TaskView {
@@ -543,9 +567,20 @@ impl App {
         self.order
     }
 
-    /// The transient TUI projection, in display order. Storage visibility stays unchanged.
+    /// The transient TUI projection, in display order, context rows included. Storage
+    /// visibility stays unchanged.
     pub(crate) fn visible_tasks(&self) -> impl Iterator<Item = &Task> {
-        self.ordered_live_tasks().filter(|task| self.matches(task))
+        self.displayed_rows().map(|row| row.task)
+    }
+
+    /// Displayed rows with their context flag and group progress, in display order.
+    pub(crate) fn displayed_rows(&self) -> impl Iterator<Item = projection::DisplayedRow<'_>> {
+        projection::displayed_rows(self.ordered_live_tasks(), |task| self.matches(task))
+    }
+
+    /// The rows that match the view, search, and filter; context rows are not matches.
+    pub(crate) fn match_count(&self) -> usize {
+        self.displayed_rows().filter(|row| !row.context).count()
     }
 
     /// Live tasks in display order: canonical, or the cached Priority or Due order.
@@ -651,6 +686,9 @@ impl App {
                 | Action::ClearSearch
                 | Action::ToggleSort
                 | Action::EditFilter
+                | Action::AddSubtask
+                | Action::IndentTask
+                | Action::OutdentTask
                 | Action::OpenTrash
                 | Action::OpenHelp
                 | Action::Quit
@@ -675,6 +713,9 @@ impl App {
             Action::ClearSearch => self.clear_search(),
             Action::ToggleSort => self.toggle_sort(),
             Action::EditFilter => self.start_filter(),
+            Action::AddSubtask => self.start_add_subtask(),
+            Action::IndentTask => self.indent_selected(),
+            Action::OutdentTask => self.outdent_selected(),
             Action::OpenTrash => self.open_trash(),
             Action::OpenHelp => self.open_help(),
             Action::Quit => Transition::Quit,
@@ -750,6 +791,13 @@ impl App {
             self.message = Some("Nothing to restore".into());
             return Ok(Transition::Transient);
         };
+        if let Some(parent) = task
+            .parent_id()
+            .filter(|parent| self.tasks.task(*parent).is_some_and(Task::is_deleted))
+        {
+            self.notice = Some(Notice::RestoreParentFirst(parent));
+            return Ok(Transition::Transient);
+        }
         let request = Mutation::Restore {
             id: task.id(),
             observed: Some(TaskObservation::new(task)),
@@ -1078,13 +1126,17 @@ impl App {
     fn reconciled_selection(&self) -> Option<TaskId> {
         let mut previous = None;
         let mut passed_selected = self.selected.is_none();
+        // Displayed rows are a subsequence of the live tasks in the same order, so one walk
+        // over both finds where a hidden selection was.
+        let mut displayed = self.visible_tasks().peekable();
         for task in self.ordered_live_tasks() {
+            let shown = displayed.next_if(|row| row.id() == task.id()).is_some();
             if Some(task.id()) == self.selected {
-                if self.matches(task) {
+                if shown {
                     return self.selected;
                 }
                 passed_selected = true;
-            } else if self.matches(task) {
+            } else if shown {
                 if passed_selected {
                     return Some(task.id());
                 }
@@ -1181,6 +1233,56 @@ impl App {
         Ok(self.submit(mutation))
     }
 
+    /// Nests the selected top-level task under the nearest displayed top-level row above it.
+    fn indent_selected(&mut self) -> Transition {
+        let Some(task) = self.selected_task() else {
+            return Transition::Unchanged;
+        };
+        let id = task.id();
+        let notice = if task.parent_id().is_some() {
+            Notice::AlreadySubtask
+        } else if let Some(parent) = self
+            .displayed_rows()
+            .map(|row| row.task)
+            .take_while(|row| row.id() != id)
+            .filter(|row| row.parent_id().is_none())
+            .last()
+            .map(Task::id)
+        {
+            if self
+                .tasks
+                .subtasks(id)
+                .iter()
+                .any(|subtask| !subtask.is_deleted())
+            {
+                Notice::HasSubtasks
+            } else {
+                return self.submit(Mutation::SetParent {
+                    id,
+                    parent: Some(parent),
+                });
+            }
+        } else {
+            Notice::NoTaskAbove
+        };
+        self.notice = Some(notice);
+        Transition::Transient
+    }
+
+    fn outdent_selected(&mut self) -> Transition {
+        let Some(task) = self.selected_task() else {
+            return Transition::Unchanged;
+        };
+        if task.parent_id().is_none() {
+            self.notice = Some(Notice::AlreadyTopLevel);
+            return Transition::Transient;
+        }
+        self.submit(Mutation::SetParent {
+            id: task.id(),
+            parent: None,
+        })
+    }
+
     fn delete_selected(&mut self) -> Result<Transition, ListError> {
         let Some(task) = self.selected_task() else {
             return Ok(Transition::Unchanged);
@@ -1201,9 +1303,10 @@ impl App {
         if self.tasks == tasks {
             return false;
         }
-        let ordinal = self
-            .visible_tasks()
-            .position(|task| Some(task.id()) == self.selected)
+        let shown = self.visible_tasks().map(Task::id).collect::<Vec<_>>();
+        let ordinal = shown
+            .iter()
+            .position(|id| Some(*id) == self.selected)
             .unwrap_or(0);
         let trash_ordinal = self
             .tasks
@@ -1218,16 +1321,16 @@ impl App {
         self.tasks = tasks;
         self.rebuild_order();
         self.refresh_tag_counts();
-        if !self
-            .selected
-            .is_some_and(|id| self.tasks.task(id).is_some_and(|task| self.matches(task)))
-        {
-            let selected = self
-                .visible_tasks()
-                .nth(ordinal)
-                .or_else(|| self.visible_tasks().last())
-                .map(Task::id);
-            self.selected = selected;
+        let displayed = self.visible_tasks().map(Task::id).collect::<Vec<_>>();
+        if !self.selected.is_some_and(|id| displayed.contains(&id)) {
+            // The next row the user saw that is still shown, so a group that left together
+            // does not skip the rows after it; otherwise the row now at the same position.
+            self.selected = shown
+                .iter()
+                .skip(ordinal + 1)
+                .find(|id| displayed.contains(id))
+                .or_else(|| displayed.get(ordinal).or(displayed.last()))
+                .copied();
         }
         if let Some(trash) = &mut self.trash {
             let deleted = self.tasks.deleted_tasks();
@@ -1301,17 +1404,20 @@ impl App {
     fn finish_success(&mut self, request: &Mutation, id: TaskId, celebrate: bool) -> bool {
         let mut dirty = false;
         self.message = None;
-        let visible = self.tasks.task(id).is_some_and(|task| self.matches(task));
+        let visible = self.tasks.task(id).is_some_and(|task| self.displays(task));
         if matches!(
             request,
-            Mutation::Add(_) | Mutation::RestoreLatest | Mutation::Restore { .. }
+            Mutation::Add(_)
+                | Mutation::AddSubtask { .. }
+                | Mutation::RestoreLatest
+                | Mutation::Restore { .. }
         ) {
             if visible {
                 dirty |= self.selected != Some(id);
                 self.selected = Some(id);
             } else {
                 self.reconcile_selection();
-                let action = if matches!(request, Mutation::Add(_)) {
+                let action = if matches!(request, Mutation::Add(_) | Mutation::AddSubtask { .. }) {
                     "Added"
                 } else {
                     "Restored"
@@ -1321,7 +1427,10 @@ impl App {
         } else if matches!(request, Mutation::EditText { .. }) && !visible {
             self.message = Some(format!("Edited task is {HIDDEN}"));
         }
-        if matches!(request, Mutation::Add(_) | Mutation::EditText { .. }) {
+        if matches!(
+            request,
+            Mutation::Add(_) | Mutation::AddSubtask { .. } | Mutation::EditText { .. }
+        ) {
             dirty |= self.editor.is_some();
             self.editor = None;
             self.mode = Mode::Normal;
@@ -1397,12 +1506,25 @@ impl App {
     }
 
     fn start_add(&mut self) -> Transition {
+        self.open_add_editor(EditKind::Add)
+    }
+
+    /// Adds under the selected top-level task, or beside the selected subtask.
+    fn start_add_subtask(&mut self) -> Transition {
+        let Some(task) = self.selected_task() else {
+            return Transition::Unchanged;
+        };
+        let parent = task.parent_id().unwrap_or(task.id());
+        self.open_add_editor(EditKind::AddSubtask(parent))
+    }
+
+    fn open_add_editor(&mut self, kind: EditKind) -> Transition {
         if self.mode != Mode::Normal {
             return Transition::Unchanged;
         }
         self.mode = Mode::Insert;
         self.editor = Some(Editor {
-            kind: EditKind::Add,
+            kind,
             buffer: String::new(),
             cursor: 0,
             original: None,
@@ -1618,6 +1740,7 @@ impl App {
         let text = metadata::normalize_due(text, || today).into_owned();
         let request = match editor.kind {
             EditKind::Add => Mutation::Add(text),
+            EditKind::AddSubtask(parent) => Mutation::AddSubtask { parent, text },
             EditKind::Edit(id) => {
                 if editor.original.as_deref() == Some(&text) {
                     self.mode = Mode::Normal;
@@ -4037,5 +4160,397 @@ mod due_filter_tests {
                 .collect::<Vec<_>>(),
             [1, 2, 3, 8, 5, 6, 7, 4]
         );
+    }
+}
+
+#[cfg(test)]
+mod subtask_tests {
+    use super::*;
+    use crate::task::ListScope;
+
+    fn id(value: u64) -> TaskId {
+        TaskId::from_shell_integer(value).unwrap()
+    }
+
+    fn ids(app: &App) -> Vec<u64> {
+        app.visible_tasks().map(|task| task.id().get()).collect()
+    }
+
+    /// Group 1 [4 match, 5 done], 2, group 3 [6, 7 match], 8 match.
+    fn tree() -> TaskList {
+        let mut list = TaskList::new(ListScope::Global);
+        for text in [
+            "one +home",
+            "two",
+            "three",
+            "four match",
+            "five",
+            "six",
+            "seven match",
+        ] {
+            list.add(text).unwrap();
+        }
+        for (task, parent) in [(4, 1), (5, 1), (6, 3), (7, 3)] {
+            list.set_parent(id(task), Some(id(parent))).unwrap();
+        }
+        list.add("eight match").unwrap();
+        list.set_completed(id(5), true).unwrap();
+        list.set_completed(id(1), true).unwrap();
+        assert_eq!(
+            list.visible_tasks()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 4, 5, 2, 3, 6, 7, 8]
+        );
+        list
+    }
+
+    fn search(app: &mut App, query: &str) {
+        app.apply(Action::StartSearch).unwrap();
+        for character in query.chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+        app.apply(Action::CommitEdit).unwrap();
+    }
+
+    fn rows(app: &App) -> Vec<(u64, bool)> {
+        app.displayed_rows()
+            .map(|row| (row.task.id().get(), row.context))
+            .collect()
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+    }
+
+    #[test]
+    fn add_subtask_should_submit_under_the_selected_top_level_task_or_the_subtask_parent() {
+        let mut app = App::new(tree());
+        // Top-level 1, its subtask 4, and the context parent 3 under a search.
+        for (selected, parent) in [(1, 1), (4, 1), (2, 2)] {
+            app.selected = Some(id(selected));
+            assert_eq!(
+                app.apply(Action::AddSubtask).unwrap(),
+                Transition::Transient
+            );
+            assert_eq!(app.mode(), Mode::Insert);
+            assert_eq!(
+                app.editor().unwrap().kind(),
+                EditKind::AddSubtask(id(parent))
+            );
+            type_text(&mut app, "new");
+            assert_eq!(app.prepare(Action::CommitEdit).unwrap(), Transition::Submit);
+            assert_eq!(
+                app.take_mutation(),
+                Some(Mutation::AddSubtask {
+                    parent: id(parent),
+                    text: "new".into()
+                })
+            );
+            assert_eq!(
+                app.apply(Action::CancelEdit).unwrap(),
+                Transition::Transient
+            );
+        }
+        search(&mut app, "match");
+        app.selected = Some(id(3));
+        app.apply(Action::AddSubtask).unwrap();
+        assert_eq!(app.editor().unwrap().kind(), EditKind::AddSubtask(id(3)));
+
+        // Escape cancels without a mutation.
+        let before = app.tasks().clone();
+        assert_eq!(
+            app.apply(Action::CancelEdit).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.editor().is_none());
+        assert_eq!(app.tasks(), &before);
+
+        // A matching subtask is saved at the end of its group and selected.
+        app.apply(Action::AddSubtask).unwrap();
+        type_text(&mut app, "nine match");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.mode(), Mode::Normal);
+        assert_eq!(app.selected(), Some(id(9)));
+        assert_eq!(app.message, None);
+        assert_eq!(app.tasks().task(id(9)).unwrap().parent_id(), Some(id(3)));
+        assert_eq!(ids(&app), [1, 4, 3, 7, 9, 8]);
+    }
+
+    #[test]
+    fn a_hidden_new_subtask_should_show_the_hidden_message_and_keep_the_selection() {
+        let mut app = App::new(tree());
+        search(&mut app, "match");
+        app.selected = Some(id(7));
+        app.apply(Action::AddSubtask).unwrap();
+        type_text(&mut app, "nine");
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.tasks().task(id(9)).unwrap().parent_id(), Some(id(3)));
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Added task is hidden by the current view, search, or filter")
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.editor().is_none());
+        assert_eq!(app.selected(), Some(id(7)));
+    }
+
+    #[test]
+    fn add_subtask_should_do_nothing_without_a_selected_task() {
+        let mut app = App::new(TaskList::new(ListScope::Global));
+        assert_eq!(
+            app.apply(Action::AddSubtask).unwrap(),
+            Transition::Unchanged
+        );
+        assert_eq!(app.mode(), Mode::Normal);
+        assert!(app.editor().is_none());
+    }
+
+    fn prepared(app: &mut App, selected: u64, action: Action) -> Option<Mutation> {
+        app.selected = Some(id(selected));
+        app.notice = None;
+        app.prepare(action).unwrap();
+        app.take_mutation()
+    }
+
+    fn nest(task: u64, parent: Option<u64>) -> Option<Mutation> {
+        Some(Mutation::SetParent {
+            id: id(task),
+            parent: parent.map(id),
+        })
+    }
+
+    #[test]
+    fn indent_and_outdent_should_submit_set_parent_or_show_a_notice() {
+        let mut app = App::new(tree());
+        // Rows: 1 [4, 5], 2, 3 [6, 7], 8.
+        assert_eq!(prepared(&mut app, 2, Action::IndentTask), nest(2, Some(1)));
+        assert_eq!(prepared(&mut app, 8, Action::IndentTask), nest(8, Some(3)));
+        assert_eq!(prepared(&mut app, 6, Action::OutdentTask), nest(6, None));
+        for (selected, action, notice) in [
+            (4, Action::IndentTask, Notice::AlreadySubtask),
+            (1, Action::IndentTask, Notice::NoTaskAbove),
+            (3, Action::IndentTask, Notice::HasSubtasks),
+            (2, Action::OutdentTask, Notice::AlreadyTopLevel),
+        ] {
+            assert_eq!(prepared(&mut app, selected, action), None);
+            assert_eq!(app.notice(), Some(&notice));
+        }
+        // The nearest displayed top-level row counts, a context row included.
+        search(&mut app, "match");
+        assert_eq!(rows(&app)[2], (3, true));
+        assert_eq!(prepared(&mut app, 8, Action::IndentTask), nest(8, Some(3)));
+        app.apply(Action::ClearSearch).unwrap();
+        search(&mut app, "eight");
+        assert_eq!(prepared(&mut app, 8, Action::IndentTask), None);
+        assert_eq!(app.notice(), Some(&Notice::NoTaskAbove));
+    }
+
+    #[test]
+    fn indent_then_outdent_should_keep_the_selection_in_any_sort_order() {
+        let mut app = App::new(tree());
+        app.apply(Action::ToggleSort).unwrap();
+        assert_eq!(app.order(), TaskOrder::Priority);
+        app.selected = Some(id(2));
+        app.apply(Action::IndentTask).unwrap();
+        assert_eq!(app.tasks().task(id(2)).unwrap().parent_id(), Some(id(1)));
+        assert_eq!(app.selected(), Some(id(2)));
+        assert_eq!(ids(&app), [1, 4, 5, 2, 3, 6, 7, 8]);
+        app.apply(Action::OutdentTask).unwrap();
+        assert_eq!(app.tasks().task(id(2)).unwrap().parent_id(), None);
+        assert_eq!(app.selected(), Some(id(2)));
+        assert_eq!(ids(&app), [1, 4, 5, 2, 3, 6, 7, 8]);
+    }
+
+    #[test]
+    fn every_action_should_work_on_a_selected_context_row() {
+        let mut app = App::new(tree());
+        search(&mut app, "match");
+        app.selected = Some(id(3));
+        assert_eq!(app.selected_task().map(Task::id), Some(id(3)));
+        assert_eq!(
+            app.prepare(Action::ToggleComplete).unwrap(),
+            Transition::Submit
+        );
+        assert_eq!(
+            app.take_mutation(),
+            Some(Mutation::SetCompleted {
+                id: id(3),
+                completed: true
+            })
+        );
+        assert_eq!(app.prepare(Action::Delete).unwrap(), Transition::Submit);
+        assert!(matches!(
+            app.take_mutation(),
+            Some(Mutation::Delete { id: deleted, .. }) if deleted == id(3)
+        ));
+        assert_eq!(app.apply(Action::StartEdit).unwrap(), Transition::Transient);
+        assert_eq!(app.editor().unwrap().kind(), EditKind::Edit(id(3)));
+        // The edited parent still shows as context, so it is not reported hidden.
+        app.apply(Action::InsertChar('!')).unwrap();
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(app.tasks().task(id(3)).unwrap().text(), "three!");
+        assert_eq!(app.message, None);
+        assert_eq!(app.selected(), Some(id(3)));
+    }
+
+    #[test]
+    fn context_rows_should_show_in_search_open_and_filter_views_without_counting_as_matches() {
+        let mut app = App::new(tree());
+        search(&mut app, "match");
+        assert_eq!(
+            rows(&app),
+            [(1, true), (4, false), (3, true), (7, false), (8, false)]
+        );
+        assert_eq!(app.match_count(), 3);
+        // Open hides the done parent 1, but its open matching subtask brings it back as context.
+        app.apply(Action::ClearSearch).unwrap();
+        app.apply(Action::CycleView).unwrap();
+        assert_eq!(app.view(), TaskView::Open);
+        assert_eq!(
+            rows(&app),
+            [
+                (1, true),
+                (4, false),
+                (2, false),
+                (3, false),
+                (6, false),
+                (7, false),
+                (8, false)
+            ]
+        );
+        assert_eq!(app.match_count(), 6);
+        // A filter on the parent's tag shows the parent only; its subtasks do not match.
+        app.apply(Action::CycleView).unwrap();
+        app.apply(Action::CycleView).unwrap();
+        assert_eq!(app.view(), TaskView::All);
+        app.apply(Action::EditFilter).unwrap();
+        for character in "+home".chars() {
+            app.apply(Action::InsertChar(character)).unwrap();
+        }
+        app.apply(Action::CommitEdit).unwrap();
+        assert_eq!(rows(&app), [(1, false)]);
+        assert_eq!(app.match_count(), 1);
+    }
+
+    #[test]
+    fn a_filter_preview_should_drive_context_rows_while_typing() {
+        let mut list = tree();
+        list.edit(id(7), "seven match +x").unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::EditFilter).unwrap();
+        app.apply(Action::InsertChar('+')).unwrap();
+        app.apply(Action::InsertChar('x')).unwrap();
+        assert_eq!(app.mode(), Mode::Filter);
+        assert_eq!(rows(&app), [(3, true), (7, false)]);
+        assert_eq!(app.match_count(), 1);
+        app.apply(Action::CancelEdit).unwrap();
+        assert_eq!(app.match_count(), 8);
+    }
+
+    #[test]
+    fn selection_should_visit_subtasks_and_context_rows_and_moves_stay_among_siblings() {
+        let mut app = App::new(tree());
+        search(&mut app, "match");
+        assert_eq!(app.selected(), Some(id(1)));
+        for expected in [4, 3, 7, 8] {
+            app.apply(Action::MoveDown).unwrap();
+            assert_eq!(app.selected(), Some(id(expected)));
+        }
+        // J on the context parent 3 moves its group among displayed top-level rows.
+        app.apply(Action::MoveUp).unwrap();
+        app.apply(Action::MoveUp).unwrap();
+        assert_eq!(app.selected(), Some(id(3)));
+        assert_eq!(
+            app.prepare(Action::MoveTaskDown).unwrap(),
+            Transition::Submit
+        );
+        let request = app.take_mutation().unwrap();
+        let Mutation::MoveAdjacent {
+            id: moved,
+            neighbor,
+            ..
+        } = &request
+        else {
+            panic!("{request:?}");
+        };
+        assert_eq!((*moved, *neighbor), (id(3), Some(id(8))));
+        let mut latest = app.tasks().clone();
+        assert!(request.apply(&mut latest).changed());
+        assert_eq!(
+            latest
+                .visible_tasks()
+                .map(|task| task.id().get())
+                .collect::<Vec<_>>(),
+            [1, 4, 5, 2, 8, 3, 6, 7]
+        );
+        // A subtask's only displayed sibling is itself, so K finds no neighbor.
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(7)));
+        assert_eq!(app.prepare(Action::MoveTaskUp).unwrap(), Transition::Submit);
+        let Some(Mutation::MoveAdjacent { neighbor, .. }) = app.take_mutation() else {
+            panic!("expected a move");
+        };
+        assert_eq!(neighbor, None);
+    }
+
+    #[test]
+    fn selection_should_survive_reparenting_and_fall_back_in_display_order_after_a_co_delete() {
+        let mut list = tree();
+        let mut app = App::new(list.clone());
+        for _ in 0..5 {
+            app.apply(Action::MoveDown).unwrap();
+        }
+        assert_eq!(app.selected(), Some(id(6)));
+        list.set_parent(id(6), None).unwrap();
+        assert!(app.reconcile(list.clone()));
+        assert_eq!(ids(&app), [1, 4, 5, 2, 3, 7, 6, 8]);
+        assert_eq!(app.selected(), Some(id(6)));
+        list.set_parent(id(6), Some(id(1))).unwrap();
+        assert!(app.reconcile(list.clone()));
+        assert_eq!(ids(&app), [1, 4, 5, 6, 2, 3, 7, 8]);
+        assert_eq!(app.selected(), Some(id(6)));
+        // Deleting 1 moves its group to trash; the selection takes the next displayed row.
+        list.delete(id(1)).unwrap();
+        assert!(app.reconcile(list));
+        assert_eq!(ids(&app), [2, 3, 7, 8]);
+        assert_eq!(app.selected(), Some(id(2)));
+    }
+
+    #[test]
+    fn trash_restore_of_a_subtask_under_a_deleted_parent_should_name_the_parent_and_submit_nothing()
+    {
+        let mut list = tree();
+        list.delete(id(3)).unwrap();
+        let mut app = App::new(list);
+        app.apply(Action::OpenTrash).unwrap();
+        let trash = app
+            .tasks()
+            .deleted_tasks()
+            .iter()
+            .map(|task| task.id().get())
+            .collect::<Vec<_>>();
+        assert_eq!(trash, [3, 6, 7]);
+        app.apply(Action::MoveDown).unwrap();
+        assert_eq!(app.selected(), Some(id(6)));
+        assert_eq!(
+            app.apply(Action::RestoreSelected).unwrap(),
+            Transition::Transient
+        );
+        assert_eq!(app.notice(), Some(&Notice::RestoreParentFirst(id(3))));
+        assert_eq!(app.take_mutation(), None);
+        // The parent row restores the group.
+        app.apply(Action::MoveUp).unwrap();
+        assert_eq!(
+            app.prepare(Action::RestoreSelected).unwrap(),
+            Transition::Submit
+        );
+        assert!(matches!(
+            app.take_mutation(),
+            Some(Mutation::Restore { id: restored, .. }) if restored == id(3)
+        ));
     }
 }

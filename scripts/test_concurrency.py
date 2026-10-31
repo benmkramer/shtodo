@@ -277,6 +277,14 @@ class ConcurrentUsage(unittest.TestCase):
                 self.fail(f"rows {found!r} != {expected!r}: {tui.text()}")
             tui.drain(0.05)
 
+    def column(self, tui, word):
+        # Screen column where `word` starts on the first content row that holds it.
+        for row in tui.screen[2:-1]:
+            line = "".join(row)
+            if word in line:
+                return line.index(word)
+        self.fail(f"{word!r} not on screen: {tui.text()}")
+
     def test_tag_filter_and_priority_sort_follow_idle_refresh_and_hide_untagged_rows(self):
         for text in ["plain first", "(B) beta +x", "(C) gamma +x"]:
             self.assertEqual(cli(self.home, "add", text).returncode, 0)
@@ -338,10 +346,17 @@ class ConcurrentUsage(unittest.TestCase):
             reply = cli(self.home, "add", "--parent", "1", "plain")
             self.assertEqual(reply.returncode, 0, reply.stderr)
             self.wait_rows(tui, ["alpha", "beta", "plain", "gamma"], words)
+            # Subtasks draw two columns right of a top-level task without progress.
+            top = self.column(tui, "gamma")
+            self.assertEqual(self.column(tui, "beta"), top + 2)
+            self.assertEqual(self.column(tui, "plain"), top + 2)
             # Promotion places the row right after its former group.
             reply = cli(self.home, "parent", "3", "none")
             self.assertEqual(reply.returncode, 0, reply.stderr)
             self.wait_rows(tui, ["alpha", "plain", "beta", "gamma"], words)
+            # beta (task 3) is now top-level; plain stays a subtask.
+            self.assertEqual(self.column(tui, "beta"), top)
+            self.assertEqual(self.column(tui, "plain"), top + 2)
             # Deleting the parent hides its group; u in the TUI brings the whole group back.
             reply = cli(self.home, "delete", "1")
             self.assertEqual(reply.stdout, b"Deleted 1 with 1 subtask: alpha\n")
