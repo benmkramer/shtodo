@@ -422,6 +422,62 @@ mod tests {
     }
 
     #[test]
+    fn refresh_should_reconcile_external_subtask_changes_with_one_sorted_rebuild_each() {
+        let (_home, store, mut session, now) = fixture();
+        session.action(&store, Action::ToggleSort).unwrap();
+        assert_eq!(displayed(&session), [1, 2]);
+        let rebuilds = session.app.order_rebuilds();
+        // The list turns into schema 2 between refreshes.
+        write(
+            &store,
+            Mutation::AddSubtask {
+                parent: id(1),
+                text: "(A) child".into(),
+            },
+        );
+        let bytes = std::fs::read_to_string(&store.paths().data_file).unwrap();
+        assert!(bytes.contains(r#""schema_version": 2,"#));
+        assert!(session.refresh_using(&store, || now));
+        assert_eq!(session.app.order_rebuilds(), rebuilds + 1);
+        assert_eq!(displayed(&session), [1, 3, 2]);
+
+        // Unchanged schema 2 bytes are neither parsed nor redrawn.
+        let before = store.counts();
+        for step in 1..=3 {
+            let at = now + Duration::from_secs(step);
+            assert!(!session.tick_using(&store, at, || at, test_today));
+        }
+        assert_eq!(store.counts().1, before.1);
+        assert_eq!(session.app.order_rebuilds(), rebuilds + 1);
+
+        write(
+            &store,
+            Mutation::SetParent {
+                id: id(3),
+                parent: None,
+            },
+        );
+        assert!(session.refresh_using(&store, || now));
+        assert_eq!(session.app.order_rebuilds(), rebuilds + 2);
+        assert_eq!(displayed(&session), [3, 1, 2]);
+
+        // A tree that fails validation keeps the last good list and shows the error.
+        let last_good = session.app.tasks().clone();
+        let invalid = r#"{"schema_version":2,"scope":{"kind":"global"},"next_task_id":4,"next_deletion_sequence":1,"tasks":[{"id":2,"text":"second","completed":false,"deletion_sequence":null,"parent_id":1},{"id":1,"text":"base","completed":false,"deletion_sequence":null}]}"#;
+        std::fs::write(&store.paths().data_file, invalid).unwrap();
+        session.refresh_using(&store, || now);
+        assert_eq!(session.app.tasks(), &last_good);
+        assert!(
+            session
+                .app
+                .message()
+                .is_some_and(|message| message.contains("subtask")),
+            "{:?}",
+            session.app.message()
+        );
+    }
+
+    #[test]
     fn refresh_should_rebuild_due_order_and_a_new_day_should_only_restyle() {
         let (_home, store, mut session, now) = fixture();
         session.action(&store, Action::ToggleSort).unwrap();

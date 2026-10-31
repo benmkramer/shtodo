@@ -60,7 +60,13 @@ fn execute(command: cli::Command, format: cli::OutputFormat) -> Result<()> {
             )?;
         }
         cli::Command::Add(choice, argument, print_id) => {
-            add_task(choice, argument, print_id, format)?;
+            add_task(choice, None, argument, print_id, format)?;
+        }
+        cli::Command::AddSubtask(choice, parent, argument, print_id) => {
+            add_task(choice, Some(parent), argument, print_id, format)?;
+        }
+        cli::Command::Parent(choice, id, parent) => {
+            set_parent(choice, id, parent, format)?;
         }
         cli::Command::List(choice, filter) => {
             list_tasks(choice, filter, format)?;
@@ -107,6 +113,7 @@ fn execute(command: cli::Command, format: cli::OutputFormat) -> Result<()> {
 
 fn add_task(
     choice: cli::ScopeChoice,
+    parent: Option<u64>,
     argument: Option<OsString>,
     print_id: bool,
     format: cli::OutputFormat,
@@ -124,12 +131,17 @@ fn add_task(
     let home = storage::home_from_environment()?;
     let scope = storage::scope_from_environment(choice)?;
     let store = storage::Store::open(&home, scope)?;
+    let request = match parent.and_then(task::TaskId::from_shell_integer) {
+        Some(parent) => mutation::Mutation::AddSubtask { parent, text },
+        None => mutation::Mutation::Add(text),
+    };
     let reply = store.mutate(
-        &mutation::Mutation::Add(text),
+        &request,
         storage::ScopePresence::AllowMissing,
         storage::SHELL_LOCK_BUDGET,
     )?;
-    let (id, tasks, changed) = shell_result(reply)?;
+    let (id, tasks, changed) =
+        shell_result(reply).map_err(|error| with_restore_hint(store.scope(), error))?;
     if format == cli::OutputFormat::Json {
         return json::write_mutation("add", &tasks, id, changed);
     }
@@ -174,37 +186,98 @@ fn list_tasks(
     let scope = storage::scope_from_environment(choice)?;
     let tasks = storage::load_read_only(&home, &scope)?;
     let unfiltered = projection.is_unfiltered();
-    let rows = tasks
-        .visible_tasks()
-        .filter(|task| unfiltered || projection.matches(task));
-    match list.order {
-        projection::TaskOrder::Manual => write_list_rows(tasks.scope(), rows, format),
-        projection::TaskOrder::Priority => {
-            let mut sorted: Vec<&task::Task> = rows.collect();
-            projection::sort_by_priority(&mut sorted);
-            write_list_rows(tasks.scope(), sorted.into_iter(), format)
+    let structure = list.structure;
+    // The structure flag is the cheapest check, so it runs first.
+    let matches = |task: &task::Task| {
+        structure.matches(task.parent_id()) && (unfiltered || projection.matches(task))
+    };
+    let sort: fn(&mut [&task::Task]) = match list.order {
+        projection::TaskOrder::Manual => {
+            let rows = projection::list_rows(tasks.visible_tasks(), matches);
+            return write_list_rows(tasks.scope(), rows, format);
         }
-        projection::TaskOrder::Due => {
-            let mut sorted: Vec<&task::Task> = rows.collect();
-            projection::sort_by_due(&mut sorted);
-            write_list_rows(tasks.scope(), sorted.into_iter(), format)
-        }
-    }
+        projection::TaskOrder::Priority => projection::sort_by_priority,
+        projection::TaskOrder::Due => projection::sort_by_due,
+    };
+    let mut sorted: Vec<&task::Task> = tasks.visible_tasks().filter(|task| matches(task)).collect();
+    sort(&mut sorted);
+    let rows = projection::list_rows(sorted.into_iter(), |_| true);
+    write_list_rows(tasks.scope(), rows, format)
 }
 
 fn write_list_rows<'a>(
     scope: &'a task::ListScope,
-    rows: impl Iterator<Item = &'a task::Task>,
+    rows: impl Iterator<Item = projection::ListRow<'a>>,
     format: cli::OutputFormat,
 ) -> Result<()> {
     if format == cli::OutputFormat::Json {
-        return json::write_list(scope, rows);
+        return json::write_list(scope, rows.map(|row| row.task));
     }
     let mut stdout = std::io::stdout().lock();
-    for task in rows {
+    for projection::ListRow { task, indented } in rows {
         let state = if task.completed() { "done" } else { "open" };
-        writeln!(stdout, "{}  {}  {}", task.id().get(), state, task.text())?;
+        // Stored text never starts with whitespace, so the indent always means "under the
+        // row above".
+        let indent = if indented { "  " } else { "" };
+        writeln!(
+            stdout,
+            "{}  {}  {indent}{}",
+            task.id().get(),
+            state,
+            task.text()
+        )?;
     }
+    Ok(())
+}
+
+/// ` with 2 subtasks` when a delete or restore moved subtasks with their parent.
+fn subtask_count(count: usize) -> String {
+    match count {
+        0 => String::new(),
+        1 => " with 1 subtask".into(),
+        count => format!(" with {count} subtasks"),
+    }
+}
+
+fn set_parent(
+    choice: cli::ScopeChoice,
+    raw_id: u64,
+    raw_parent: Option<u64>,
+    format: cli::OutputFormat,
+) -> Result<()> {
+    let home = storage::home_from_environment()?;
+    let scope = storage::scope_from_environment(choice)?;
+    let store = storage::Store::open(&home, scope)?;
+    let id = task::TaskId::from_shell_integer(raw_id)
+        .ok_or_else(|| eyre!("task ID must be a positive integer"))?;
+    let parent = raw_parent
+        .map(|raw| {
+            task::TaskId::from_shell_integer(raw)
+                .ok_or_else(|| eyre!("parent task ID must be a positive integer"))
+        })
+        .transpose()?;
+    let reply = store.mutate(
+        &mutation::Mutation::SetParent { id, parent },
+        storage::ScopePresence::AllowMissing,
+        storage::SHELL_LOCK_BUDGET,
+    )?;
+    let (id, tasks, changed) =
+        shell_result(reply).map_err(|error| with_restore_hint(store.scope(), error))?;
+    if format == cli::OutputFormat::Json {
+        return json::write_mutation("parent", &tasks, id, changed);
+    }
+    let task = tasks.task(id).ok_or(task::ListError::TaskNotFound(id))?;
+    let state = if changed { "now" } else { "already" };
+    let place = match task.parent_id() {
+        Some(parent) => format!("under {}", parent.get()),
+        None => "top-level".into(),
+    };
+    writeln!(
+        std::io::stdout().lock(),
+        "{} is {state} {place}: {}",
+        id.get(),
+        task.text()
+    )?;
     Ok(())
 }
 
@@ -216,17 +289,25 @@ fn delete_task(choice: cli::ScopeChoice, raw_id: u64, format: cli::OutputFormat)
     if format == cli::OutputFormat::Json {
         return json::write_mutation("delete", &tasks, id, changed);
     }
-    let text = tasks
-        .task(id)
-        .ok_or(task::ListError::TaskNotFound(id))?
-        .text();
+    let task = tasks.task(id).ok_or(task::ListError::TaskNotFound(id))?;
 
-    let prefix = if !changed {
-        "Already deleted"
+    let (prefix, count) = if !changed {
+        ("Already deleted", String::new())
     } else {
-        "Deleted"
+        let sequence = task.deletion_sequence();
+        let count = tasks
+            .subtasks(id)
+            .iter()
+            .filter(|subtask| subtask.deletion_sequence() == sequence)
+            .count();
+        ("Deleted", subtask_count(count))
     };
-    writeln!(std::io::stdout().lock(), "{prefix} {}: {}", id.get(), text)?;
+    writeln!(
+        std::io::stdout().lock(),
+        "{prefix} {}{count}: {}",
+        id.get(),
+        task.text()
+    )?;
     Ok(())
 }
 
@@ -287,6 +368,17 @@ fn mutate_task(
         .task(id)
         .ok_or(task::ListError::TaskNotFound(id))?
         .text();
+    // A restored parent brings back its group; no subtask under a deleted parent was live.
+    let count = match (mutation, changed) {
+        (TaskMutation::Restore, true) => subtask_count(
+            tasks
+                .subtasks(id)
+                .iter()
+                .filter(|subtask| !subtask.is_deleted())
+                .count(),
+        ),
+        _ => String::new(),
+    };
     let prefix = match (mutation, changed) {
         (TaskMutation::SetCompleted(true), true) => "Completed",
         (TaskMutation::SetCompleted(true), false) => "Already done",
@@ -297,8 +389,31 @@ fn mutate_task(
         (TaskMutation::Restore, true) => "Restored",
         (TaskMutation::Restore, false) => "Already live",
     };
-    writeln!(std::io::stdout().lock(), "{prefix} {}: {}", id.get(), text)?;
+    writeln!(
+        std::io::stdout().lock(),
+        "{prefix} {}{count}: {}",
+        id.get(),
+        text
+    )?;
     Ok(())
+}
+
+/// Names the task to restore first, scoped like the command, for a deleted task or parent.
+fn with_restore_hint(scope: &task::ListScope, error: color_eyre::Report) -> color_eyre::Report {
+    match error.downcast_ref::<task::ListError>() {
+        Some(task::ListError::TaskDeleted(id) | task::ListError::ParentDeleted(id)) => {
+            let scope_option = match scope {
+                task::ListScope::Global => "",
+                task::ListScope::Project { .. } => " --local",
+            };
+            let message = format!(
+                "{error}; run `shtodo{scope_option} restore {}` first",
+                id.get()
+            );
+            error.wrap_err(message)
+        }
+        _ => error,
+    }
 }
 
 fn mutate_task_in_store(
@@ -329,16 +444,8 @@ fn mutate_task_in_store(
         })
         .and_then(shell_result)
         .map_err(|error| match error.downcast_ref::<task::ListError>() {
-            Some(task::ListError::TaskDeleted(id)) => {
-                let scope_option = match store.scope() {
-                    task::ListScope::Global => "",
-                    task::ListScope::Project { .. } => " --local",
-                };
-                let message = format!(
-                    "{error}; run `shtodo{scope_option} restore {}` first",
-                    id.get()
-                );
-                error.wrap_err(message)
+            Some(task::ListError::TaskDeleted(_) | task::ListError::ParentDeleted(_)) => {
+                with_restore_hint(store.scope(), error)
             }
             Some(task::ListError::InvalidText) => {
                 let message = format!("{error}\n\n{}", cli::usage());

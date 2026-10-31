@@ -62,6 +62,60 @@ def dated_fixture(size):
                     deletion_sequence=None) for index in range(1, size + 1)])
 
 
+def mixed_fixture(size):
+    with tempfile.TemporaryDirectory(prefix="shtodo-mixed-fixture-") as directory:
+        fixture(Path(directory), size)
+        return json.loads((Path(directory) / ".shtodo/global/tasks.json").read_text())
+
+
+def nested_fixture(size):
+    """The mixed records in groups of one top-level task and four subtasks, with as many
+    tombstones: whole groups sharing one sequence, then single subtasks deleted earlier."""
+    value = mixed_fixture(size)
+    tombstones = sum(task["deletion_sequence"] is not None for task in value["tasks"])
+    tasks = [task | dict(deletion_sequence=None) for task in value["tasks"]]
+    groups = [tasks[start:start + 5] for start in range(0, len(tasks), 5)]
+    for group in groups:
+        for task in group[1:]:
+            task["parent_id"] = group[0]["id"]
+    whole = []
+    for group in groups[::4]:
+        if len(group) <= tombstones - sum(map(len, whole)):
+            whole.append(group)
+    remaining = tombstones - sum(map(len, whole))
+    # Single deletions come from the last live groups, so the first groups stay whole.
+    singles = [group[-1] for group in reversed(groups) if group not in whole and len(group) > 1][:remaining]
+    assert len(singles) == remaining, (size, remaining)
+    sequence = 0
+    for task in sorted(singles, key=lambda task: task["id"]):
+        sequence += 1
+        task["deletion_sequence"] = sequence
+    for group in whole:
+        sequence += 1
+        for task in group:
+            task["deletion_sequence"] = sequence
+    linked = any("parent_id" in task for task in tasks)
+    return value | dict(schema_version=2 if linked else 1, next_deletion_sequence=sequence + 1,
+                        tasks=tasks)
+
+
+def nested_flat_fixture(size):
+    """The nested records with every link removed, which is schema 1. Schema 1 needs unique
+    sequences, so the tombstones are renumbered in storage order."""
+    value = nested_fixture(size)
+    tasks = [{key: field for key, field in task.items() if key != "parent_id"} for task in value["tasks"]]
+    sequence = 0
+    for task in tasks:
+        if task["deletion_sequence"] is not None:
+            sequence += 1
+            task["deletion_sequence"] = sequence
+    return value | dict(schema_version=1, next_deletion_sequence=sequence + 1, tasks=tasks)
+
+
+# The nested cases' parent: the head of the second group, which stays live and whole.
+NESTED_PARENT = 6
+NESTED_PROMOTED = 8
+
 MONTH_START = RUN_DATE.replace(day=1)
 MONTH_END = (MONTH_START + timedelta(days=31)).replace(day=1) - timedelta(days=1)
 
@@ -77,6 +131,8 @@ READ_OPERATIONS = {
     "list_due_month": ["list", "--due", f"{MONTH_START}..{MONTH_END}"],
     "list_sort_due": ["list", "--sort", "due"],
     "list_json_sort_due": ["list", "--json", "--sort", "due"],
+    "list_roots": ["list", "--roots"],
+    "list_parent": ["list", "--parent", str(NESTED_PARENT)],
 }
 INFO_OPERATIONS = {"list_tag": (1000, 10000), "list_priority": (1000, 10000),
                    "list_search": (1000, 10000), "list_sort": (10000,),
@@ -85,6 +141,12 @@ INFO_OPERATIONS = {"list_tag": (1000, 10000), "list_priority": (1000, 10000),
 DUE_OPERATIONS = {"list_due_today": (1000, 10000), "list_due_date": (1000, 10000),
                   "list_overdue": (1000, 10000), "list_due_month": (1000, 10000),
                   "list_sort_due": (1000, 10000), "list_json_sort_due": (1000, 10000)}
+# Nested kinds run on the current binary only: the control cannot read schema 2, so each nested
+# gate compares against nested-flat on the same build (`add_parent` against flat `add`).
+NESTED_OPERATIONS = {"nested": ["list", "list_json", "list_sort", "list_sort_due", "add_parent"],
+                     "nested-flat": ["list", "list_json", "list_sort", "list_sort_due", "add"]}
+NESTED_INFO_OPERATIONS = {"list_roots": (1000, 10000), "list_parent": (1000, 10000),
+                          "list_json_sort_due": (1000, 10000), "parent_none": (1000, 10000)}
 ADDED_DUE_TASK = f"{benchmark.ADDED_TASK} due:today"
 
 
@@ -101,6 +163,21 @@ def due(text):
             except ValueError:
                 continue
     return None
+
+
+def sort_tree(tasks, key):
+    """Groups sort by their head's key and subtasks within their group, stably; a subtask
+    whose parent is not among the rows heads a group of its own."""
+    keyed = []
+    head = None
+    for position, task in enumerate(tasks):
+        own = key(task)
+        if head and task.get("parent_id") == head[0]:
+            keyed.append(((head[2], head[1], 1, own, position), task))
+        else:
+            head = (task["id"], position, own)
+            keyed.append(((own, position, 0), task))
+    return [task for _, task in sorted(keyed, key=lambda item: item[0])]
 
 
 def expected_rows(value, operation):
@@ -121,7 +198,11 @@ def expected_rows(value, operation):
     def priority_key(task):
         return (priority(task["text"]) is None, priority(task["text"]) or "")
 
-    if operation == "list_tag":
+    if operation == "list_roots":
+        tasks = [task for task in tasks if "parent_id" not in task]
+    elif operation == "list_parent":
+        tasks = [task for task in tasks if task.get("parent_id") == NESTED_PARENT]
+    elif operation == "list_tag":
         tasks = [task for task in tasks if "+proj1" in tags(task["text"])]
     elif operation in ("list_due_today", "list_due_date"):
         tasks = [task for task in tasks if due(task["text"]) == RUN_DATE]
@@ -131,21 +212,29 @@ def expected_rows(value, operation):
     elif operation == "list_due_month":
         tasks = [task for task in tasks if MONTH_START <= (due(task["text"]) or date.min) <= MONTH_END]
     elif operation in ("list_sort_due", "list_json_sort_due"):
-        tasks = sorted(tasks, key=lambda task: (due(task["text"]) is None, due(task["text"]) or date.min,
-                                                priority_key(task)))
+        tasks = sort_tree(tasks, key=lambda task: (due(task["text"]) is None, due(task["text"]) or date.min,
+                                                   priority_key(task)))
     elif operation == "list_priority":
         tasks = [task for task in tasks if priority(task["text"]) in ("A", "B", "C")]
     elif operation == "list_search":
         tasks = [task for task in tasks if "x" in task["text"].lower()]
     elif operation in ("list_sort", "list_json_sort"):
-        tasks = sorted(tasks, key=priority_key)
+        tasks = sort_tree(tasks, key=priority_key)
     if operation.startswith("list_json"):
         return [dict(id=task["id"], text=task["text"], state="done" if task["completed"] else "open",
                      deleted=False, priority=priority(task["text"]), tags=tags(task["text"]),
-                     due=str(due(task["text"])) if due(task["text"]) else None)
+                     due=str(due(task["text"])) if due(task["text"]) else None,
+                     parent_id=task.get("parent_id"))
                 for task in tasks]
-    return "".join(f"{task['id']}  {'done' if task['completed'] else 'open'}  {task['text']}\n"
-                   for task in tasks)
+    rows = []
+    root = None
+    for task in tasks:
+        # A subtask is indented only under its own parent's printed row.
+        if "parent_id" not in task:
+            root = task["id"]
+        indent = "  " if task.get("parent_id", object()) == root else ""
+        rows.append(f"{task['id']}  {'done' if task['completed'] else 'open'}  {indent}{task['text']}\n")
+    return "".join(rows)
 
 
 def cli_case(value, kind, operation):
@@ -159,12 +248,32 @@ def cli_case(value, kind, operation):
         "reopen": ["reopen", "3"], "edit": ["edit", "2", "Changed café 東京"],
         "restore": ["restore", "1"], "noop_done": ["done", "3"],
         "noop_delete": ["delete", "1"], "version": ["--version"],
+        "add_parent": ["add", "--parent", str(NESTED_PARENT), benchmark.ADDED_TASK],
+        "parent_none": ["parent", str(NESTED_PROMOTED), "none"],
     }
+
+    def group_end(id):
+        start = next(index for index, task in enumerate(tasks) if task["id"] == id)
+        end = start + 1
+        while end < len(tasks) and tasks[end].get("parent_id") == id:
+            end += 1
+        return end
+
     if operation in ("add", "add_due_today"):
         text = benchmark.ADDED_TASK if operation == "add" else f"{benchmark.ADDED_TASK} due:{RUN_DATE}"
         tasks.append(dict(id=expected["next_task_id"], text=text,
                           completed=False, deletion_sequence=None))
         expected["next_task_id"] += 1
+    elif operation == "add_parent":
+        tasks.insert(group_end(NESTED_PARENT), dict(
+            id=expected["next_task_id"], text=benchmark.ADDED_TASK, completed=False,
+            deletion_sequence=None, parent_id=NESTED_PARENT))
+        expected["next_task_id"] += 1
+    elif operation == "parent_none":
+        index = next(index for index, task in enumerate(tasks) if task["id"] == NESTED_PROMOTED)
+        promoted = tasks.pop(index)
+        former = promoted.pop("parent_id")
+        tasks.insert(group_end(former), promoted)
     elif operation == "delete":
         tasks[active_id - 1]["deletion_sequence"] = expected["next_deletion_sequence"]
         expected["next_deletion_sequence"] += 1
@@ -198,8 +307,14 @@ def measure_cli(args, binaries, rng):
             path.parent.mkdir(parents=True)
             for size in args.sizes:
                 for kind in args.kinds:
+                    if kind in NESTED_OPERATIONS and label != "current":
+                        continue
                     if kind == "plain":
                         value = plain_fixture(size)
+                    elif kind == "nested":
+                        value = nested_fixture(size)
+                    elif kind == "nested-flat":
+                        value = nested_flat_fixture(size)
                     elif kind == "tagged":
                         value = tagged_fixture(size)
                     elif kind == "dated":
@@ -220,6 +335,11 @@ def measure_cli(args, binaries, rng):
                                        if size in sizes]
                     if kind == "mixed" and label == "current":
                         operations.append("add_due_today")
+                    if kind in NESTED_OPERATIONS:
+                        operations = list(NESTED_OPERATIONS[kind]) if size >= 10 else []
+                    if kind == "nested":
+                        operations += [operation for operation, sizes in NESTED_INFO_OPERATIONS.items()
+                                       if size in sizes]
                     if args.operations:
                         operations = [operation for operation in operations if operation in args.operations]
                     for operation in operations:
@@ -260,9 +380,9 @@ def measure_cli(args, binaries, rng):
                 if case["operation"].startswith("list_json"):
                     output = json.loads(output)["tasks"]
                     if case["label"] == "baseline":
-                        # The control predates the derived due field.
+                        # The control predates the parent_id field.
                         expected = [{key: value for key, value in task.items()
-                                     if key != "due"} for task in expected]
+                                     if key != "parent_id"} for task in expected]
                 assert output == expected, (case["label"], case["kind"], case["operation"], case["records"])
             verify(case, before)
         print(f"Preflight passed for {len(cases)} paired CLI cases", flush=True)
@@ -454,7 +574,8 @@ def main():
     parser.add_argument("--current", default=str(ROOT / "target/release/shtodo"))
     parser.add_argument("--mode", choices=("cli", "tui", "idle"), required=True)
     parser.add_argument("--sizes", type=int, nargs="+", default=[0, 100, 1000, 10000])
-    parser.add_argument("--kinds", nargs="+", choices=("plain", "mixed", "tagged", "dated"),
+    parser.add_argument("--kinds", nargs="+",
+                        choices=("plain", "mixed", "tagged", "dated", "nested", "nested-flat"),
                         default=["plain", "mixed"])
     parser.add_argument("--operations", nargs="+",
                         help="CLI operations to time (default: all for each fixture)")

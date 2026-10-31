@@ -1835,3 +1835,434 @@ fn add_should_resolve_today_in_the_process_zone_for_posix_rules_and_iana_names()
         "system zone date {system} is {days} days from UTC"
     );
 }
+
+/// 1 "Ship the release" [3 done, 4], then 2 "Pay rent".
+fn seed_subtasks(home: &std::path::Path) {
+    for arguments in [
+        vec!["add", "(B) Ship the release +shtodo"],
+        vec!["add", "(A) Pay rent due:2026-11-01"],
+        vec!["add", "--parent", "1", "(C) Write the changelog"],
+        vec![
+            "add",
+            "--print-id",
+            "--parent",
+            "1",
+            "(A) Tag the build due:2026-10-24",
+        ],
+        vec!["done", "3"],
+    ] {
+        let output = run_with_home(home, &arguments);
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+    }
+}
+
+fn stdout_of(home: &std::path::Path, arguments: &[&str]) -> String {
+    let output = run_with_home(home, arguments);
+    assert!(output.status.success(), "{arguments:?}: {output:?}");
+    assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn help_should_show_the_subtask_commands_and_flags() {
+    let stdout = stdout_of(tempfile::tempdir().unwrap().path(), &["--help"]);
+    for line in [
+        "  shtodo [--local] add [--print-id] --parent <ID> [<TASK>]\n",
+        "              [--roots | --parent <ID>]\n",
+        "  shtodo [--local] parent <ID> <PARENT_ID | none>\n",
+        "  shtodo add --parent 3 \"Write the changelog\"\n",
+    ] {
+        assert!(stdout.contains(line), "{line}");
+    }
+}
+
+#[test]
+fn add_parent_should_print_like_add_and_list_should_indent_the_tree() {
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        stdout_of(home.path(), &["add", "Parent"]),
+        "Added: Parent\n"
+    );
+    assert_eq!(
+        stdout_of(home.path(), &["add", "--parent", "1", "  Child  "]),
+        "Added: Child\n"
+    );
+    assert_eq!(
+        stdout_of(
+            home.path(),
+            &["add", "--parent", "1", "--print-id", "Second"]
+        ),
+        "3\n"
+    );
+    assert_eq!(
+        stdout_of(home.path(), &["list"]),
+        "1  open  Parent\n2  open    Child\n3  open    Second\n"
+    );
+    let snapshot = read_snapshot(&snapshot_path(home.path(), "global"));
+    assert_eq!(snapshot["schema_version"], 2);
+    assert_eq!(snapshot["tasks"][0].get("parent_id"), None);
+    assert_eq!(snapshot["tasks"][1]["parent_id"], 1);
+
+    let home = tempfile::tempdir().unwrap();
+    seed_subtasks(home.path());
+    assert_eq!(
+        stdout_of(home.path(), &["list"]),
+        "1  open  (B) Ship the release +shtodo\n\
+         3  done    (C) Write the changelog\n\
+         4  open    (A) Tag the build due:2026-10-24\n\
+         2  open  (A) Pay rent due:2026-11-01\n"
+    );
+}
+
+#[test]
+fn list_filters_should_stay_exact_and_print_an_unmatched_parents_subtasks_unindented() {
+    let home = tempfile::tempdir().unwrap();
+    seed_subtasks(home.path());
+    for (arguments, expected) in [
+        (vec!["list", "--done"], "3  done  (C) Write the changelog\n"),
+        (
+            vec!["list", "--open"],
+            "1  open  (B) Ship the release +shtodo\n\
+             4  open    (A) Tag the build due:2026-10-24\n\
+             2  open  (A) Pay rent due:2026-11-01\n",
+        ),
+        (
+            vec!["list", "--tag", "+shtodo"],
+            "1  open  (B) Ship the release +shtodo\n",
+        ),
+        (
+            vec!["list", "--roots"],
+            "1  open  (B) Ship the release +shtodo\n2  open  (A) Pay rent due:2026-11-01\n",
+        ),
+        (
+            vec!["list", "--parent", "1"],
+            "3  done  (C) Write the changelog\n4  open  (A) Tag the build due:2026-10-24\n",
+        ),
+        (
+            vec!["list", "--parent", "1", "--open"],
+            "4  open  (A) Tag the build due:2026-10-24\n",
+        ),
+        (vec!["list", "--parent", "2"], ""),
+        (vec!["list", "--parent", "99"], ""),
+        (vec!["list", "--roots", "--done"], ""),
+        (
+            vec!["list", "--sort", "priority"],
+            "2  open  (A) Pay rent due:2026-11-01\n\
+             1  open  (B) Ship the release +shtodo\n\
+             4  open    (A) Tag the build due:2026-10-24\n\
+             3  done    (C) Write the changelog\n",
+        ),
+        (
+            vec!["list", "--sort", "due"],
+            "2  open  (A) Pay rent due:2026-11-01\n\
+             1  open  (B) Ship the release +shtodo\n\
+             4  open    (A) Tag the build due:2026-10-24\n\
+             3  done    (C) Write the changelog\n",
+        ),
+        (
+            vec!["list", "--parent", "1", "--sort", "priority"],
+            "4  open  (A) Tag the build due:2026-10-24\n3  done  (C) Write the changelog\n",
+        ),
+    ] {
+        assert_eq!(
+            stdout_of(home.path(), &arguments),
+            expected,
+            "{arguments:?}"
+        );
+    }
+    assert!(stdout_of(home.path(), &["delete", "1"]).starts_with("Deleted 1 with 2 subtasks: "));
+    assert_eq!(stdout_of(home.path(), &["list", "--parent", "1"]), "");
+}
+
+#[test]
+fn parent_should_nest_promote_and_report_no_ops() {
+    let home = tempfile::tempdir().unwrap();
+    seed_subtasks(home.path());
+    for (arguments, expected) in [
+        (
+            vec!["parent", "2", "1"],
+            "2 is now under 1: (A) Pay rent due:2026-11-01\n",
+        ),
+        (
+            vec!["parent", "2", "1"],
+            "2 is already under 1: (A) Pay rent due:2026-11-01\n",
+        ),
+        (
+            vec!["parent", "3", "NONE"],
+            "3 is now top-level: (C) Write the changelog\n",
+        ),
+        (
+            vec!["parent", "3", "none"],
+            "3 is already top-level: (C) Write the changelog\n",
+        ),
+    ] {
+        assert_eq!(
+            stdout_of(home.path(), &arguments),
+            expected,
+            "{arguments:?}"
+        );
+    }
+    assert_eq!(
+        stdout_of(home.path(), &["list"]),
+        "1  open  (B) Ship the release +shtodo\n\
+         4  open    (A) Tag the build due:2026-10-24\n\
+         2  open    (A) Pay rent due:2026-11-01\n\
+         3  done  (C) Write the changelog\n"
+    );
+    for id in ["4", "2"] {
+        stdout_of(home.path(), &["parent", id, "none"]);
+    }
+    // The last promotion returns the file to schema 1 with no parent links.
+    let bytes = std::fs::read_to_string(snapshot_path(home.path(), "global")).unwrap();
+    assert!(bytes.contains("\"schema_version\": 1,"), "{bytes}");
+    assert!(!bytes.contains("parent_id"));
+}
+
+#[test]
+fn delete_and_restore_should_count_the_subtasks_that_move_with_a_parent() {
+    let home = tempfile::tempdir().unwrap();
+    seed_subtasks(home.path());
+    assert_eq!(
+        stdout_of(home.path(), &["delete", "4"]),
+        "Deleted 4: (A) Tag the build due:2026-10-24\n"
+    );
+    assert_eq!(
+        stdout_of(home.path(), &["delete", "1"]),
+        "Deleted 1 with 1 subtask: (B) Ship the release +shtodo\n"
+    );
+    assert_eq!(
+        stdout_of(home.path(), &["delete", "3"]),
+        "Already deleted 3: (C) Write the changelog\n"
+    );
+    let output = run_with_home(home.path(), &["restore", "4"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("parent task 1 is deleted"), "{stderr}");
+    assert!(stderr.contains("run `shtodo restore 1` first"), "{stderr}");
+    assert_eq!(
+        stdout_of(home.path(), &["restore", "1"]),
+        "Restored 1 with 1 subtask: (B) Ship the release +shtodo\n"
+    );
+    assert_eq!(
+        stdout_of(home.path(), &["restore", "4"]),
+        "Restored 4: (A) Tag the build due:2026-10-24\n"
+    );
+    stdout_of(home.path(), &["add", "--parent", "1", "Third"]);
+    assert_eq!(
+        stdout_of(home.path(), &["delete", "1"]),
+        "Deleted 1 with 3 subtasks: (B) Ship the release +shtodo\n"
+    );
+    assert_eq!(
+        stdout_of(home.path(), &["restore", "1"]),
+        "Restored 1 with 3 subtasks: (B) Ship the release +shtodo\n"
+    );
+    assert_eq!(
+        stdout_of(home.path(), &["restore", "1"]),
+        "Already live 1: (B) Ship the release +shtodo\n"
+    );
+}
+
+#[test]
+fn subtask_usage_errors_should_exit_one_with_usage_and_create_no_storage() {
+    let home = tempfile::tempdir().unwrap();
+    for (arguments, message) in [
+        (vec!["add", "--parent"], "--parent requires a value"),
+        (vec!["list", "--parent"], "--parent requires a value"),
+        (
+            vec!["add", "--parent", "x"],
+            r#"invalid --parent "x"; expected a task ID"#,
+        ),
+        (
+            vec!["add", "--parent", "0", "t"],
+            r#"invalid --parent "0"; expected a task ID"#,
+        ),
+        (
+            vec!["add", "--parent", "-1"],
+            r#"invalid --parent "-1"; expected a task ID"#,
+        ),
+        (
+            vec!["add", "--parent", ""],
+            r#"invalid --parent ""; expected a task ID"#,
+        ),
+        (
+            vec!["add", "--parent", "--json"],
+            r#"invalid --parent "--json"; expected a task ID"#,
+        ),
+        (
+            vec!["list", "--parent", "x"],
+            r#"invalid --parent "x"; expected a task ID"#,
+        ),
+        (
+            vec!["list", "--parent", "0"],
+            r#"invalid --parent "0"; expected a task ID"#,
+        ),
+        (
+            vec!["list", "--parent", "--json"],
+            r#"invalid --parent "--json"; expected a task ID"#,
+        ),
+        (
+            vec!["parent"],
+            "parent requires a task ID and a parent task ID or none",
+        ),
+        (
+            vec!["parent", "5"],
+            "parent requires a task ID and a parent task ID or none",
+        ),
+        (
+            vec!["parent", "x", "3"],
+            r#"invalid task ID "x"; expected a positive integer"#,
+        ),
+        (
+            vec!["parent", "0", "3"],
+            r#"invalid task ID "0"; expected a positive integer"#,
+        ),
+        (
+            vec!["parent", "5", "x"],
+            r#"invalid parent "x"; expected a task ID or none"#,
+        ),
+        (
+            vec!["parent", "5", "0"],
+            r#"invalid parent "0"; expected a task ID or none"#,
+        ),
+        (
+            vec!["parent", "5", "--json"],
+            r#"invalid parent "--json"; expected a task ID or none"#,
+        ),
+        (
+            vec!["parent", "5", "3", "extra"],
+            r#"unsupported shtodo arguments: "parent""#,
+        ),
+        (
+            vec!["--local", "parent", "5", "3", "extra"],
+            r#"unsupported shtodo arguments: "--local""#,
+        ),
+        (
+            vec!["list", "--roots", "--parent", "3"],
+            "--roots and --parent cannot be combined",
+        ),
+        (
+            vec!["list", "--roots", "--roots"],
+            "--roots may only be specified once",
+        ),
+        (
+            vec!["list", "--parent", "3", "--parent", "3"],
+            "--parent may only be specified once",
+        ),
+    ] {
+        let output = run_with_home(home.path(), &arguments);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        assert!(stderr.contains(message), "{arguments:?}: {stderr}");
+        assert!(stderr.contains("Usage:"), "{arguments:?}");
+        assert!(!home.path().join(".shtodo").exists(), "{arguments:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn add_and_list_should_reject_a_non_utf8_parent_before_creating_storage() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let home = tempfile::tempdir().unwrap();
+    for command in ["add", "list"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_shtodo"))
+            .arg(command)
+            .arg("--parent")
+            .arg(std::ffi::OsString::from_vec(vec![0xff]))
+            .env("HOME", home.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("invalid --parent value; expected UTF-8")
+        );
+        assert!(!home.path().join(".shtodo").exists());
+    }
+}
+
+#[test]
+fn subtask_storage_errors_should_exit_one_with_their_messages_and_write_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    seed_subtasks(home.path());
+    stdout_of(home.path(), &["add", "Spare"]);
+    stdout_of(home.path(), &["delete", "5"]);
+    let path = snapshot_path(home.path(), "global");
+    let before = std::fs::read(&path).unwrap();
+    for (arguments, message) in [
+        (vec!["add", "--parent", "9", "x"], "task 9 was not found"),
+        (vec!["parent", "9", "1"], "task 9 was not found"),
+        (vec!["parent", "2", "9"], "task 9 was not found"),
+        (
+            vec!["parent", "5", "1"],
+            "task 5 is deleted; restore it before changing it",
+        ),
+        (vec!["parent", "5", "1"], "run `shtodo restore 5` first"),
+        (
+            vec!["add", "--parent", "5", "x"],
+            "parent task 5 is deleted",
+        ),
+        (
+            vec!["add", "--parent", "5", "x"],
+            "run `shtodo restore 5` first",
+        ),
+        (vec!["parent", "2", "5"], "parent task 5 is deleted"),
+        (vec!["parent", "2", "2"], "task 2 cannot be its own parent"),
+        (
+            vec!["parent", "2", "3"],
+            "task 3 is a subtask; subtasks cannot have subtasks",
+        ),
+        (
+            vec!["add", "--parent", "3", "x"],
+            "task 3 is a subtask; subtasks cannot have subtasks",
+        ),
+        (
+            vec!["parent", "1", "2"],
+            "task 1 has subtasks; promote them first",
+        ),
+    ] {
+        let output = run_with_home(home.path(), &arguments);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        assert!(stderr.contains(message), "{arguments:?}: {stderr}");
+        assert!(!stderr.contains("Usage:"), "{arguments:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "{arguments:?}");
+    }
+}
+
+#[test]
+fn add_should_take_a_repeated_parent_flag_as_subtask_text_with_or_without_json() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    for scope in [&[][..], &["--local"][..]] {
+        let at = |arguments: &[&str]| {
+            let output = run_with_home_at(home.path(), project.path(), arguments);
+            assert!(output.status.success(), "{arguments:?}: {output:?}");
+            assert!(output.stderr.is_empty(), "{arguments:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        at(&[scope, &["add", "parent"]].concat());
+        assert_eq!(
+            at(&[scope, &["add", "--parent", "1", "--parent"]].concat()),
+            "Added: --parent\n"
+        );
+        for placement in [
+            &["add", "--parent", "1", "--parent", "--json"][..],
+            &["--json", "add", "--parent", "1", "--parent"][..],
+        ] {
+            let reply: serde_json::Value =
+                serde_json::from_str(&at(&[scope, placement].concat())).unwrap();
+            assert_eq!(reply["command"], "add", "{scope:?} {placement:?}");
+            assert_eq!(reply["changed"], true);
+            assert_eq!(reply["task"]["text"], "--parent", "{scope:?} {placement:?}");
+            assert_eq!(reply["task"]["parent_id"], 1, "{scope:?} {placement:?}");
+        }
+        assert_eq!(
+            at(&[scope, &["list"]].concat()),
+            "1  open  parent\n2  open    --parent\n3  open    --parent\n4  open    --parent\n"
+        );
+    }
+}
