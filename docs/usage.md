@@ -780,10 +780,14 @@ same task when the order changes.
 Navigation and task actions operate on the displayed rows, context rows
 included (see [Subtasks](#subtasks)). Selection keeps its task identity while
 that task is still displayed. If completion, reopening, editing, or a view change
-hides it, selection moves to the next matching task in display order, then
-the previous one. Deletion also selects the next match, then the previous one.
-No matches means no selected task, so navigation, reordering, editing,
-completion, and deletion safely do nothing.
+hides it, selection moves to the next displayed row (context rows included),
+then the previous one, so it can land on a dimmed parent shown for a matching
+subtask. Deletion also selects the next displayed row, then the previous one.
+When a change from another process removes the selected row, selection moves
+to the next row that was shown before and is still shown, otherwise to the
+row now at the same position, otherwise to the last row. No displayed rows
+means no selected task, so navigation, reordering, editing, completion, and
+deletion safely do nothing.
 
 `J`/`K` reorder only in manual order. In priority or due order they change
 nothing and show `Reorder needs manual order; s cycles`, naming the configured
