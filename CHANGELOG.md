@@ -4,6 +4,8 @@ All notable changes to shtodo are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-beta.5] - 2026-10-31
+
 ### Added
 
 - Opt-in `--json` output for listing and all shell task mutations, with a
@@ -170,7 +172,8 @@ All notable changes to shtodo are documented in this file.
 - User-configured keybindings from `~/.shtodo/config.toml`, reflected in input, footer hints, empty-state guidance, and keyboard help.
 - `shtodo doctor` for validating keybinding syntax, reserved keys, and conflicts without opening task storage or the terminal UI.
 
-[Unreleased]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.4...HEAD
+[Unreleased]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.5...HEAD
+[0.1.0-beta.5]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.4...v0.1.0-beta.5
 [0.1.0-beta.4]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.3...v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.2...v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/benmkramer/shtodo/compare/v0.1.0-beta.1...v0.1.0-beta.2
